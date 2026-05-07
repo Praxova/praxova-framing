@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "praxova_framing"
+version = "0.2.0"
+name = "Praxova Framing"
+tagline = "Tagged lumber and sheet templates with OC spacing and cut-list export"
+maintainer = "Alton Lord <adlord@gmail.com>"
+type = "add-on"
+
+website = "https://praxova.ai"
+tags = ["3D View", "Mesh", "Object"]
+
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-2.0-or-later"]
+copyright = ["2026 Praxova"]
