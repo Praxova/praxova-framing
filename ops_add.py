@@ -1,4 +1,4 @@
-"""Operators: add a tagged lumber piece or sheet good at the 3D cursor."""
+"""Operators: add a tagged lumber piece, sheet good, or panel at the 3D cursor."""
 
 import bpy
 from bpy.props import StringProperty, IntProperty, EnumProperty
@@ -193,6 +193,100 @@ class PRAXOVA_OT_add_sheet(bpy.types.Operator):
         tag.sheet_material = self.material
         tag.sheet_thickness_callout = self.thickness
         tag.sheet_size_key = self.size
+        tag.orientation = self.orientation
+        tag.cutlist_label = label
+
+        context.collection.objects.link(obj)
+        _select_only(context, obj)
+        return {'FINISHED'}
+
+
+# ===========================================================================
+# Panels (metal roofing / siding)
+# ===========================================================================
+
+class PRAXOVA_OT_add_panel(bpy.types.Operator):
+    """Add a Praxova-tagged panel (metal roofing or siding).
+
+    Geometry convention (matches lumber and sheets):
+        VERTICAL  -> long axis = +Z. (profile_height, width, length).
+                     A 36" x 8' panel stands tall: X=0.75", Y=36", Z=96".
+        HORIZONTAL-> long axis = +X. (length, width, profile_height).
+
+    Profile height comes from templates.PANEL_MATERIAL_PROFILE - a single
+    generic placeholder per material in v0.3.1. A future patch will replace
+    make_box_mesh here with a proper corrugation generator without changing
+    this operator's interface.
+    """
+
+    bl_idname = "praxova.add_panel"
+    bl_label = "Add Panel"
+    bl_description = "Add a tagged metal roofing/siding panel at the 3D cursor"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    material: EnumProperty(  # noqa: F821
+        name="Material",
+        items=[
+            ('METAL', "Metal", "Metal roofing or siding panel"),
+        ],
+        default='METAL',
+    )
+    size: EnumProperty(  # noqa: F821
+        name="Size",
+        items=[
+            ('36x8',  "36\" x 8'",  "36-inch wide, 8 feet long"),
+            ('36x12', "36\" x 12'", "36-inch wide, 12 feet long"),
+            ('36x16', "36\" x 16'", "36-inch wide, 16 feet long"),
+        ],
+        default='36x8',
+    )
+    orientation: EnumProperty(  # noqa: F821
+        name="Orientation",
+        items=[
+            ('VERTICAL',   "Vertical",   "Standing: long axis along Z"),
+            ('HORIZONTAL', "Horizontal", "Flat: long axis along X"),
+        ],
+        default='VERTICAL',
+    )
+
+    def execute(self, context):
+        if self.size not in templates.PANEL_SIZES:
+            self.report({'ERROR'}, f"Unknown panel size: {self.size}")
+            return {'CANCELLED'}
+
+        if self.material not in templates.PANEL_MATERIAL_PROFILE:
+            self.report({'ERROR'}, f"Unknown panel material: {self.material}")
+            return {'CANCELLED'}
+
+        width_in, length_in = templates.PANEL_SIZES[self.size]
+        profile_h_in = templates.PANEL_MATERIAL_PROFILE[self.material]
+
+        if self.orientation == 'VERTICAL':
+            # Standing panel: X=profile_height, Y=coverage_width, Z=length
+            dims_in = (profile_h_in, width_in, length_in)
+        else:
+            # Flat panel: X=length, Y=coverage_width, Z=profile_height
+            dims_in = (length_in, width_in, profile_h_in)
+
+        label = templates.panel_cutlist_label(
+            self.material, self.size, self.orientation,
+        )
+        safe = label.replace('"', '').replace(' ', '_')
+        mesh_name = f"praxova_mesh_{safe}"
+
+        mesh = bpy.data.meshes.get(mesh_name)
+        if mesh is None:
+            mesh = templates.make_box_mesh(mesh_name, dims_in)
+
+        obj_name = label.replace('"', '')
+        obj = bpy.data.objects.new(obj_name, mesh)
+        obj.location = context.scene.cursor.location
+
+        tag = obj.praxova_lumber
+        tag.is_lumber = True
+        tag.category = 'PANEL'
+        tag.panel_material = self.material
+        tag.panel_size_key = self.size
         tag.orientation = self.orientation
         tag.cutlist_label = label
 

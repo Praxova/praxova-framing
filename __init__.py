@@ -1,10 +1,11 @@
 """
 Praxova Framing - construction modeling helper for Blender.
 
-Provides tagged lumber templates (2x4 through 2x12, 6x6) and sheet goods
-(plywood and OSB at 1/2" and 3/4"), an on-center spacing duplicator, a
-cut-list generator, and (v0.3) a localhost JSON-RPC bridge so an external
-MCP server can drive the same operators from an LLM agent.
+Provides tagged lumber templates (1x2 through 6x6), sheet goods (plywood
+and OSB at 1/2" and 3/4"), metal roofing/siding panels (36" x 8/12/16 ft),
+an on-center spacing duplicator, a cut-list generator, and (v0.3) a
+localhost JSON-RPC bridge so an external MCP server can drive the same
+operators from an LLM agent.
 """
 
 import bpy
@@ -26,6 +27,7 @@ def register():
         # Operators.
         ops_add.PRAXOVA_OT_add_lumber,
         ops_add.PRAXOVA_OT_add_sheet,
+        ops_add.PRAXOVA_OT_add_panel,
         ops_duplicate.PRAXOVA_OT_set_spacing,
         ops_duplicate.PRAXOVA_OT_duplicate_oc,
         ops_cutlist.PRAXOVA_OT_generate_cutlist,
@@ -33,9 +35,10 @@ def register():
         # v0.3: MCP bridge operators.
         _server.PRAXOVA_OT_start_bridge,
         _server.PRAXOVA_OT_stop_bridge,
-        # UI - parent submenu, sheets submenu, main panel.
+        # UI - parent submenu, sheets submenu, panels submenu, main panel.
         ui.PRAXOVA_MT_add_lumber_submenu,
         ui.PRAXOVA_MT_sheets_submenu,
+        ui.PRAXOVA_MT_panels_submenu,
         ui.PRAXOVA_PT_main_panel,
     ]
 

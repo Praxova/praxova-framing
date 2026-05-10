@@ -1,4 +1,4 @@
-"""Lumber and sheet-good dimension data and mesh construction."""
+"""Lumber, sheet-good, and panel dimension data and mesh construction."""
 
 import bpy
 
@@ -101,6 +101,61 @@ def sheet_cutlist_label(
     mat_short = "PLY" if material == "PLYWOOD" else "OSB"
     suffix = "V" if orientation == 'VERTICAL' else "H"
     return f'{thickness_callout}" {mat_short} {size_key} {suffix}'
+
+
+# ===========================================================================
+# Panels (metal roofing / siding)
+# ===========================================================================
+
+# Standard panel sizes: (coverage_width_inches, length_inches).
+# The 36" is the on-roof coverage width *after* side-seam overlap, which is
+# the dimension that matters for layout. The size key is '<width_in>x<length_ft>'
+# - e.g. "36x8" is a 36"-wide panel that's 8 feet long.
+PANEL_SIZES: dict[str, tuple[float, float]] = {
+    "36x8":  (36.0,  96.0),
+    "36x12": (36.0, 144.0),
+    "36x16": (36.0, 192.0),
+}
+
+
+# Generic profile height per material. Real metal-panel rib geometry varies
+# widely by manufacturer and profile:
+#   5V crimp        ~0.5"
+#   AG / corrugated ~0.75"
+#   R-panel         ~1.25"
+#   Standing seam   1.5"-3"
+#
+# v0.3.1 models panels as flat slabs of this thickness - enough visible
+# presence in the viewport to avoid z-fight against sheathing, without
+# committing to a specific manufacturer's rib pattern. A future patch will
+# replace the slab with a proper corrugation generator and provide a
+# scene-walking "refresh labels" pass to update existing tagged objects.
+PANEL_MATERIAL_PROFILE: dict[str, float] = {
+    "METAL": 0.75,
+}
+
+
+PANEL_MATERIAL_LABELS: dict[str, str] = {
+    "METAL": "Metal",
+}
+
+
+def panel_cutlist_label(
+    material: str,
+    size_key: str,
+    orientation: str,
+) -> str:
+    """Build the canonical panel cutlist label, e.g. '36" Metal x 8 V'.
+
+    Format: '<width>" <Material> x <length_ft> <V|H>'.
+    Width is in inches with a quote suffix; length is in feet (no suffix,
+    matching the lumber convention where '2x4x8' implies the trailing 8
+    is feet). V/H suffix is the orientation, matching lumber and sheets.
+    """
+    width_str, length_ft_str = size_key.split('x')
+    mat_label = PANEL_MATERIAL_LABELS[material]
+    suffix = "V" if orientation == 'VERTICAL' else "H"
+    return f'{width_str}" {mat_label} x {length_ft_str} {suffix}'
 
 
 # ===========================================================================

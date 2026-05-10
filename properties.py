@@ -23,8 +23,8 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
     cut-list generation without any extra bookkeeping.
 
     The class name is kept as 'PraxovaLumberProps' for backward compatibility
-    with v0.1 scene data, but it now covers both lumber and sheet goods via
-    the 'category' enum.
+    with v0.1 scene data, but it now covers lumber, sheet goods, and panels
+    via the 'category' enum.
     """
 
     is_lumber: BoolProperty(  # noqa: F821
@@ -38,6 +38,7 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
         items=[
             ('LUMBER', "Lumber", "Dimensional lumber or post"),
             ('SHEET',  "Sheet",  "Sheet good (plywood, OSB)"),
+            ('PANEL',  "Panel",  "Panel (metal roofing or siding)"),
         ],
         default='LUMBER',
     )
@@ -71,6 +72,20 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
     sheet_size_key: StringProperty(  # noqa: F821
         name="Sheet Size",
         description='Sheet size key, e.g. "4x8"',
+        default="",
+    )
+
+    # --- Panel-specific fields (used when category == 'PANEL') ---
+    panel_material: EnumProperty(  # noqa: F821
+        name="Panel Material",
+        items=[
+            ('METAL', "Metal", "Metal roofing or siding panel"),
+        ],
+        default='METAL',
+    )
+    panel_size_key: StringProperty(  # noqa: F821
+        name="Panel Size",
+        description='Panel size key, e.g. "36x8" (coverage width in inches x length in feet)',
         default="",
     )
 

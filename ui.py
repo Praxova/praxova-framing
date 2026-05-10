@@ -13,7 +13,7 @@ from . import server as _server  # v0.3: bridge state for the MCP Bridge subpane
 class PRAXOVA_MT_add_lumber_submenu(bpy.types.Menu):
     """Top-level Praxova submenu under the 3D View Add menu.
 
-    Lists per-size submenus for lumber, then the Sheets submenu.
+    Lists per-size submenus for lumber, then the Sheets and Panels submenus.
     """
 
     bl_idname = "PRAXOVA_MT_add_lumber_submenu"
@@ -26,6 +26,7 @@ class PRAXOVA_MT_add_lumber_submenu(bpy.types.Menu):
             layout.menu(f"PRAXOVA_MT_lumber_{safe}", text=nominal)
         layout.separator()
         layout.menu(PRAXOVA_MT_sheets_submenu.bl_idname, text="Sheets")
+        layout.menu(PRAXOVA_MT_panels_submenu.bl_idname, text="Panels")
 
 
 class PRAXOVA_MT_sheets_submenu(bpy.types.Menu):
@@ -68,6 +69,42 @@ class PRAXOVA_MT_sheets_submenu(bpy.types.Menu):
             op.orientation = 'HORIZONTAL'
 
 
+class PRAXOVA_MT_panels_submenu(bpy.types.Menu):
+    """Panel submenu: metal roofing/siding panels, V and H."""
+
+    bl_idname = "PRAXOVA_MT_panels_submenu"
+    bl_label = "Panels"
+
+    def draw(self, context):
+        layout = self.layout
+
+        row = layout.row()
+
+        # --- Vertical column ---
+        col = row.column()
+        col.label(text="Vertical", icon='EMPTY_SINGLE_ARROW')
+        for material, size_key in _panel_combinations():
+            mat_label = templates.PANEL_MATERIAL_LABELS[material]
+            width_str, length_str = size_key.split('x')
+            display = f'{mat_label} {width_str}" x {length_str}\''
+            op = col.operator("praxova.add_panel", text=display)
+            op.material = material
+            op.size = size_key
+            op.orientation = 'VERTICAL'
+
+        # --- Horizontal column ---
+        col = row.column()
+        col.label(text="Horizontal", icon='EMPTY_ARROWS')
+        for material, size_key in _panel_combinations():
+            mat_label = templates.PANEL_MATERIAL_LABELS[material]
+            width_str, length_str = size_key.split('x')
+            display = f'{mat_label} {width_str}" x {length_str}\''
+            op = col.operator("praxova.add_panel", text=display)
+            op.material = material
+            op.size = size_key
+            op.orientation = 'HORIZONTAL'
+
+
 def _sheet_combinations() -> list[tuple[str, str]]:
     """Stable ordering of (material, thickness_callout) for menu display."""
     out = []
@@ -75,6 +112,15 @@ def _sheet_combinations() -> list[tuple[str, str]]:
         for thickness in ("1/2", "3/4"):
             if (material, thickness) in templates.SHEET_THICKNESS_ACTUAL:
                 out.append((material, thickness))
+    return out
+
+
+def _panel_combinations() -> list[tuple[str, str]]:
+    """Stable ordering of (material, size_key) for panel menu display."""
+    out = []
+    for material in ("METAL",):
+        for size_key in templates.PANEL_SIZES:
+            out.append((material, size_key))
     return out
 
 
@@ -254,7 +300,7 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
                     col.label(
                         text=f"Length:      {tag.length_in}\" ({tag.length_in // 12}')",
                     )
-            else:  # SHEET
+            elif tag.category == 'SHEET':
                 mat = templates.SHEET_MATERIAL_LABELS.get(
                     tag.sheet_material, tag.sheet_material,
                 )
@@ -265,6 +311,17 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
                 )
                 if actual is not None:
                     col.label(text=f"Actual:      {actual:.4f}\" thick")
+            elif tag.category == 'PANEL':
+                mat = templates.PANEL_MATERIAL_LABELS.get(
+                    tag.panel_material, tag.panel_material,
+                )
+                col.label(text=f"Material:    {mat}")
+                col.label(text=f"Size:        {tag.panel_size_key}")
+                profile = templates.PANEL_MATERIAL_PROFILE.get(tag.panel_material)
+                if profile is not None:
+                    col.label(
+                        text=f"Profile:     {profile:.3f}\" (generic placeholder)",
+                    )
 
             col.label(text=f"Orientation: {tag.orientation.title()}")
             col.label(text=f"Label:       {tag.cutlist_label}")

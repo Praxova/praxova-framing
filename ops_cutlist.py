@@ -56,6 +56,24 @@ def _sheet_sort_key(label: str):
     return (thickness_val, material, size, orient)
 
 
+def _panel_sort_key(label: str):
+    """Sort panel labels by material, then width, then length, then orient.
+
+    Label format: '<width>" <Material> x <length> <orient>',
+    e.g. '36" Metal x 8 V'.
+    """
+    parts = label.split()
+    if len(parts) != 5:
+        return (label,)
+    width_str, material, _x, length_str, orient = parts
+    try:
+        width = float(width_str.rstrip('"'))
+        length = int(length_str)
+    except ValueError:
+        return (label,)
+    return (material, width, length, orient)
+
+
 def _format_section(title: str, counter: Counter, sort_key) -> tuple[list[str], int]:
     """Render a cut-list section (header + entries) and return its total."""
     if not counter:
@@ -77,6 +95,7 @@ def _build_report() -> tuple[str, int, dict[str, int]]:
     """
     lumber_counter: Counter = Counter()
     sheet_counter: Counter = Counter()
+    panel_counter: Counter = Counter()
 
     for obj in bpy.context.scene.objects:
         tag = getattr(obj, "praxova_lumber", None)
@@ -84,6 +103,8 @@ def _build_report() -> tuple[str, int, dict[str, int]]:
             continue
         if tag.category == 'SHEET':
             sheet_counter[tag.cutlist_label] += 1
+        elif tag.category == 'PANEL':
+            panel_counter[tag.cutlist_label] += 1
         else:
             lumber_counter[tag.cutlist_label] += 1
 
@@ -104,6 +125,9 @@ def _build_report() -> tuple[str, int, dict[str, int]]:
     sheet_lines, sheet_total = _format_section(
         "SHEETS", sheet_counter, _sheet_sort_key,
     )
+    panel_lines, panel_total = _format_section(
+        "PANELS", panel_counter, _panel_sort_key,
+    )
 
     if lumber_lines:
         lines.extend(lumber_lines)
@@ -111,17 +135,28 @@ def _build_report() -> tuple[str, int, dict[str, int]]:
     if sheet_lines:
         lines.extend(sheet_lines)
         lines.append("")
+    if panel_lines:
+        lines.extend(panel_lines)
+        lines.append("")
 
-    grand_total = lumber_total + sheet_total
+    grand_total = lumber_total + sheet_total + panel_total
     lines.append("=" * 50)
     lines.append(f"GRAND TOTAL: {grand_total} pieces")
-    if lumber_total and sheet_total:
-        lines.append(f"  Lumber: {lumber_total}")
-        lines.append(f"  Sheets: {sheet_total}")
+
+    # Show category subtotals whenever 2 or more categories have items.
+    subtotals = [
+        ("Lumber", lumber_total),
+        ("Sheets", sheet_total),
+        ("Panels", panel_total),
+    ]
+    nonzero = [(name, n) for name, n in subtotals if n > 0]
+    if len(nonzero) >= 2:
+        for name, n in nonzero:
+            lines.append(f"  {name}: {n}")
 
     return ("\n".join(lines),
             grand_total,
-            {'LUMBER': lumber_total, 'SHEET': sheet_total})
+            {'LUMBER': lumber_total, 'SHEET': sheet_total, 'PANEL': panel_total})
 
 
 def _disk_path_for_current_blend() -> str | None:
