@@ -2,6 +2,28 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.3.1] — 2026-05-10
+
+### Added
+- **Lumber:** four new dimensional sizes.
+  - **1x2** furring strip (0.75" × 1.5"), 8' length.
+  - **2x3** interior partition / blocking (1.5" × 2.5"), 8/10/12' lengths.
+  - **4x4** post (3.5" × 3.5"), 8/10/12/14/16' lengths.
+  - **4x6** mid-weight beam / header (3.5" × 5.5"), 8/10/12/14/16/20' lengths.
+- **Panels:** new third material category alongside Lumber and Sheets. 36"-wide metal roofing/siding panels at 8'/12'/16'. Modeled as a flat slab with a 0.75" generic profile placeholder; a future patch will replace the slab with a proper corrugation generator.
+- **OC presets** 8' and 10' for timber/post framing, in a second preset row labeled in feet (existing 12"/16"/19.2"/24" presets unchanged, on the first row).
+
+### Changed
+- Cut list now has three sections: LUMBER, SHEETS, PANELS. The grand-total breakdown shows category subtotals whenever 2 or more categories have items (previously only LUMBER+SHEETS).
+- Add-menu lumber order is now small-to-large by cross-section (1x2 first, 6x6 last) so the dropdown reads naturally.
+- Active-object info panel branches on three categories with explicit `elif` chains; previously a sheet branch fell out of an `else`.
+
+### Architecture notes
+- The `category` enum on `PraxovaLumberProps` widens from `LUMBER/SHEET` to `LUMBER/SHEET/PANEL`. Enum widening is backward-compatible: existing v0.3.0 .blend files load unchanged.
+- New tag fields `panel_material` (enum) and `panel_size_key` (string) on `PraxovaLumberProps`. They follow the same denormalized cut-list-label pattern as lumber and sheets.
+- Panel cut-list label format `'36" Metal x 8 V'` is built by `templates.panel_cutlist_label()` and stored on each Object. Changing the format later affects new objects only; existing scene objects keep their stored labels until a future "refresh labels" pass walks them — that pass will ship alongside the corrugation generator.
+- The MCP bridge does **not** yet expose an `add_panel` tool. UI parity confirmed first; bridge tool lands in v0.3.2.
+
 ## [0.3.0] — 2026-05-10
 
 ### Added
