@@ -2,6 +2,27 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.3.2] — 2026-05-10
+
+### Added
+- **Bridge `add_panel` MCP tool.** Mirrors `add_sheet` semantics with `material`, `size`, `orientation`, and optional `location_m` parameters. Brings the bridge surface to ten methods: `ping`, `list_materials`, `list_objects`, `get_scene_info`, `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `generate_cutlist`, `set_imperial_units`.
+- **Bridge `list_materials` panel data.** New `panel_sizes` (size key → coverage width and length in inches) and `panel_materials` (list of `{material, label, profile_height_in}`) keys, exposing the v0.3.1 panel catalog so an LLM agent can discover panel options at runtime.
+- **Smoke test `add_panel` step.** `smoke_test.py` now exercises panel placement, asserts the cut-list output contains LUMBER + SHEETS + PANELS sections when all three are present, and guards against the pre-v0.3.2 `_serialize_object` regression by checking that `panel_material` and `panel_size_key` are returned (and `sheet_material` is not) for panel objects. Total numbered checks: 11.
+- **README "Working with linked-mesh duplicates"** section explains the rotation/Apply tradeoff with linked mesh data and when to use *Make Single User → Object & Data*.
+- **README "Metal panels — generic profile"** section documents the per-material 0.75" profile placeholder and the deferred ribbed-geometry roadmap.
+- **Roadmap entry: v0.3.3 — Fill operator** for sheets and panels, lays edge-to-edge across a span using the sheet's *width* (local Y) as spacing. Distinct from the OC duplicator, which uses center-to-center spacing along local X for studs.
+
+### Changed
+- **MCP `add_lumber` Literal extended to all v0.3.1 sizes.** The `nominal` parameter type now accepts `1x2`, `2x3`, `4x4`, and `4x6` in addition to the original six. The bridge handler already accepted these via `templates.LUMBER_TYPES`, but the MCP tool's type signature was rejecting them client-side before any network call. v0.3.1 carryover bug — now in sync.
+- **Bridge `_serialize_object` fixed for the PANEL category.** Previously, the function had a `LUMBER` branch followed by a bare `else` that hard-coded sheet-specific fields. Panel objects (added in v0.3.1) silently fell through and returned with empty `sheet_material` / `sheet_thickness_callout` / `sheet_size_key` strings. Now three explicit branches; panel objects expose `panel_material` and `panel_size_key`.
+- **Bridge `ping`** reports `addon_version: "0.3.2"` (was `"0.3.0"`).
+- **`mcp_server` package version** 0.3.0 → 0.3.2 (skipping 0.3.1, since no separate `mcp_server` release was made for it; manifest and Python package versions are now back in sync).
+- **README sections** updated for the v0.3.1 reality (full lumber list, panels, two-row OC presets, three-section cut list, PANEL data model fields).
+
+### Architecture notes
+- Panel validation in the bridge handler mirrors sheet validation: required `material` checked against `templates.PANEL_MATERIAL_PROFILE`, required `size` checked against `templates.PANEL_SIZES`, optional `orientation` defaulting to `VERTICAL`, optional `location_m` reusing the shared `_location_param` helper.
+- Profile height is **not** a bridge parameter. The per-material default in `PANEL_MATERIAL_PROFILE` (0.75" for `METAL`) is the source of truth. A `profile_height_override` parameter could be added later if a use case appears, but the design intent is that LLM agents shouldn't need to think about rib geometry to place panels correctly.
+
 ## [0.3.1] — 2026-05-10
 
 ### Added

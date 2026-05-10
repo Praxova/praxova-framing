@@ -2,7 +2,7 @@
 
 A Blender add-on for fast construction framing in 3D — lumber, sheet, and panel templates with one-click on-center duplication, cut-list export, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
 
-**Status:** Beta (v0.3.1). Pre-1.0 — APIs and the per-object data model may change between minor versions.
+**Status:** Beta (v0.3.2). Pre-1.0 — APIs and the per-object data model may change between minor versions.
 
 ## What it does
 
@@ -108,7 +108,7 @@ The in-Blender bridge listens on localhost only. All `bpy` mutation is serialize
 To use:
 
 1. N-panel → **MCP Bridge** → **Start Bridge** in Blender.
-2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `add_panel` (v0.3.2+), `duplicate_oc`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
+2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
 
 For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running.
 
@@ -116,7 +116,7 @@ For protocol-level testing without an LLM client, run `smoke_test.py` from the r
 
 - ✅ **v0.3** — MCP server in front of the operators.
 - ✅ **v0.3.1** — Lumber additions (1x2 / 2x3 / 4x4 / 4x6), 36" metal roofing/siding panels (PANEL category), 8' / 10' OC presets for post-framing.
-- **v0.3.2** — Bridge parity for panels (`add_panel` MCP tool); smoke-test coverage for panels; `add_lumber` MCP Literal extended to include the v0.3.1 lumber additions.
+- ✅ **v0.3.2** — Bridge parity for panels (`add_panel` MCP tool); smoke-test coverage for panels; `add_lumber` MCP Literal extended to include the v0.3.1 lumber additions; `_serialize_object` fixed for the PANEL category.
 - **v0.3.3** — **Fill operator** for sheets and panels: lay sheets edge-to-edge across a span using the sheet's *width* (local Y) as spacing. Useful for sheathing a wall or covering a roof in one shot. Distinct from the OC duplicator, which uses center-to-center spacing along local X for studs.
 - **v0.4** — "Frame a wall" composite operator (plates + studs + corners in one shot).
 - **v0.5** — Door / window openings (king studs, jacks, headers, cripples).
