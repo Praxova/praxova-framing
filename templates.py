@@ -159,6 +159,34 @@ def panel_cutlist_label(
 
 
 # ===========================================================================
+# Tag helpers (cross-category)
+# ===========================================================================
+
+def fill_axis_width_in(obj) -> float:
+    """Return the local-Y (fill axis) width in inches for a sheet or panel.
+
+    The Fill (Duplicate Edge-to-Edge) operator places copies along local +Y
+    using this dimension as the step size. The same value also drives the
+    fill-span -> count conversion in the N-panel's update callback.
+
+    Defensive against tags that point to retired or unknown size keys:
+    returns 0.0 in that case. Returns 0.0 for objects that aren't Praxova
+    SHEETs or PANELs - lumber is intentionally not supported here (its
+    local-Y is the cross-section width, not a meaningful fill spacing).
+    """
+    tag = getattr(obj, "praxova_lumber", None)
+    if tag is None or not tag.is_lumber:
+        return 0.0
+    if tag.category == 'SHEET':
+        size = SHEET_SIZES.get(tag.sheet_size_key)
+        return float(size[0]) if size else 0.0
+    if tag.category == 'PANEL':
+        size = PANEL_SIZES.get(tag.panel_size_key)
+        return float(size[0]) if size else 0.0
+    return 0.0
+
+
+# ===========================================================================
 # Mesh construction
 # ===========================================================================
 
