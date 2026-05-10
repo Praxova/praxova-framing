@@ -7,6 +7,11 @@ on 127.0.0.1:9876 with a fresh empty scene.
     python smoke_test.py --port 9876
 
 Exits non-zero on any unexpected response.
+
+Covers the full v0.3.2 RPC surface end-to-end: ping, scene info,
+material catalog, lumber/sheet/panel placement, on-center duplication,
+cut-list generation (verifying all three sections appear), and two
+error paths.
 """
 
 from __future__ import annotations
@@ -63,12 +68,16 @@ def run(host: str, port: int) -> int:
         print("\n[2] get_scene_info")
         r = cli.call("get_scene_info")
         print(f"  -> {r}")
-        before_count = r["object_count"]
 
         print("\n[3] list_materials (truncated)")
         r = cli.call("list_materials")
         print(f"  -> lumber types: {sorted(r['lumber_types'].keys())}")
-        print(f"  -> sheet sizes: {sorted(r['sheet_sizes'].keys())}")
+        print(f"  -> sheet sizes:  {sorted(r['sheet_sizes'].keys())}")
+        print(f"  -> panel sizes:  {sorted(r['panel_sizes'].keys())}")
+        # v0.3.2: panel keys should be present.
+        assert "panel_sizes" in r, "list_materials missing panel_sizes"
+        assert "panel_materials" in r, "list_materials missing panel_materials"
+        assert "36x8" in r["panel_sizes"]
 
         print("\n[4] add_lumber 2x4 x8 vertical at origin")
         r = cli.call("add_lumber", {
@@ -103,24 +112,47 @@ def run(host: str, port: int) -> int:
         print(f"  -> {r}")
         assert r["category"] == "SHEET"
 
-        print("\n[7] list_objects (praxova only)")
+        print("\n[7] add_panel 36\" Metal x 8 vertical at y=2m")
+        r = cli.call("add_panel", {
+            "material": "METAL",
+            "size": "36x8",
+            "orientation": "VERTICAL",
+            "location_m": [0.0, 2.0, 0.0],
+        })
+        print(f"  -> {r}")
+        assert r["category"] == "PANEL"
+        assert r["label"] == '36" Metal x 8 V'
+        # _serialize_object should now expose panel-specific fields, not the
+        # empty sheet_* fields it used to leak in pre-v0.3.2 builds.
+        assert r.get("panel_material") == "METAL"
+        assert r.get("panel_size_key") == "36x8"
+        assert "sheet_material" not in r, (
+            "panel object leaked sheet_material - _serialize_object regressed"
+        )
+
+        print("\n[8] list_objects (praxova only)")
         r = cli.call("list_objects")
         print(f"  -> {r['count']} tagged objects")
-        assert r["count"] == 6  # 1 stud + 4 dupes + 1 sheet
+        assert r["count"] == 7  # 1 stud + 4 dupes + 1 sheet + 1 panel
 
-        print("\n[8] generate_cutlist")
+        print("\n[9] generate_cutlist")
         r = cli.call("generate_cutlist")
         print("  -> cutlist body:")
         for line in r["text"].splitlines():
             print(f"     {line}")
+        # All three sections should appear when all three categories
+        # are populated.
+        assert "LUMBER" in r["text"]
+        assert "SHEETS" in r["text"]
+        assert "PANELS" in r["text"]
 
-        print("\n[9] error path: unknown lumber")
+        print("\n[10] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[10] error path: bad method")
+        print("\n[11] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:
