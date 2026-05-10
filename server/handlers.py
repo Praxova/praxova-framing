@@ -104,7 +104,13 @@ def _location_param(params: dict) -> Vector | None:
 # ---------------------------------------------------------------------------
 
 def _serialize_object(obj: bpy.types.Object) -> dict:
-    """Render a Praxova-tagged object as a JSON-friendly dict."""
+    """Render a Praxova-tagged object as a JSON-friendly dict.
+
+    Branches on tag.category. Until v0.3.2 the LUMBER branch was followed
+    by a bare else that hard-coded sheet fields - so PANEL objects (added
+    in v0.3.1) were silently serializing with empty sheet_* fields. Now
+    each category gets its own branch.
+    """
     tag = obj.praxova_lumber
     out: dict = {
         "name": obj.name,
@@ -117,10 +123,13 @@ def _serialize_object(obj: bpy.types.Object) -> dict:
     if tag.category == 'LUMBER':
         out["nominal_size"] = tag.nominal_size
         out["length_in"] = tag.length_in
-    else:
+    elif tag.category == 'SHEET':
         out["sheet_material"] = tag.sheet_material
         out["sheet_thickness_callout"] = tag.sheet_thickness_callout
         out["sheet_size_key"] = tag.sheet_size_key
+    elif tag.category == 'PANEL':
+        out["panel_material"] = tag.panel_material
+        out["panel_size_key"] = tag.panel_size_key
     return out
 
 
@@ -166,6 +175,18 @@ def list_materials(params: dict) -> dict:
                 "actual_in": actual,
             }
             for (mat, cal), actual in templates.SHEET_THICKNESS_ACTUAL.items()
+        ],
+        "panel_sizes": {
+            key: {"coverage_width_in": w, "length_in": ln}
+            for key, (w, ln) in templates.PANEL_SIZES.items()
+        },
+        "panel_materials": [
+            {
+                "material": mat,
+                "label": templates.PANEL_MATERIAL_LABELS.get(mat, mat),
+                "profile_height_in": profile,
+            }
+            for mat, profile in templates.PANEL_MATERIAL_PROFILE.items()
         ],
         "orientations": ["VERTICAL", "HORIZONTAL"],
     }
@@ -297,6 +318,52 @@ def add_sheet(params: dict) -> dict:
     return _serialize_object(obj)
 
 
+def add_panel(params: dict) -> dict:
+    """Place a tagged metal roofing/siding panel.
+
+    Mirrors add_sheet's contract. Required: 'material', 'size'.
+    Optional: 'orientation' (default VERTICAL), 'location_m'.
+
+    Profile height is intentionally NOT a bridge parameter in v0.3.2 -
+    the per-material default in templates.PANEL_MATERIAL_PROFILE is
+    the source of truth (currently 0.75" for METAL). A profile_height
+    override could be added later if a use case appears, but for now
+    LLM agents shouldn't have to think about rib geometry.
+    """
+    material = _require(
+        params, "material", str,
+        choices=tuple(templates.PANEL_MATERIAL_PROFILE),
+    )
+    size = _require(
+        params, "size", str, choices=tuple(templates.PANEL_SIZES),
+    )
+    orientation = _optional(
+        params, "orientation", str, default="VERTICAL",
+        choices=("VERTICAL", "HORIZONTAL"),
+    )
+    location = _location_param(params)
+
+    result = bpy.ops.praxova.add_panel(
+        'EXEC_DEFAULT',
+        material=material,
+        size=size,
+        orientation=orientation,
+    )
+    _check_op_result(result, "praxova.add_panel")
+
+    obj = bpy.context.view_layer.objects.active
+    if obj is None:
+        raise bridge.RPCError(
+            bridge.INTERNAL_ERROR,
+            "add_panel finished but produced no active object",
+        )
+
+    if location is not None:
+        obj.location = location
+
+    return _serialize_object(obj)
+
+
 # ===========================================================================
 # Duplication
 # ===========================================================================
@@ -410,7 +477,7 @@ def ping(params: dict) -> dict:
     """Liveness probe. Useful for the MCP server to verify connectivity."""
     return {
         "ok": True,
-        "addon_version": "0.3.0",
+        "addon_version": "0.3.2",
         "method_count": len(METHODS),
     }
 
@@ -426,6 +493,7 @@ METHODS = {
     "get_scene_info": get_scene_info,
     "add_lumber": add_lumber,
     "add_sheet": add_sheet,
+    "add_panel": add_panel,
     "duplicate_oc": duplicate_oc,
     "generate_cutlist": generate_cutlist,
     "set_imperial_units": set_imperial_units,
