@@ -15,23 +15,34 @@ INCH = 0.0254
 # Actual cross-section dimensions in inches: (thickness, width).
 # Nominal sizes (e.g. "2x4") are rough-sawn callouts; planed dimensional
 # lumber is smaller. Source: US softwood lumber standards.
+#
+# Order matters: this dict is iterated to build the Add menu, so listing
+# small-to-large keeps the menu sorted by cross-section.
 LUMBER_TYPES: dict[str, tuple[float, float]] = {
+    "1x2":  (0.75, 1.5),    # furring strip
+    "2x3":  (1.5, 2.5),     # interior partition / blocking
     "2x4":  (1.5, 3.5),
     "2x6":  (1.5, 5.5),
     "2x8":  (1.5, 7.25),
     "2x10": (1.5, 9.25),
     "2x12": (1.5, 11.25),
-    "6x6":  (5.5, 5.5),  # post / heavy timber
+    "4x4":  (3.5, 3.5),     # post
+    "4x6":  (3.5, 5.5),     # mid-weight beam / header
+    "6x6":  (5.5, 5.5),     # post / heavy timber
 }
 
 
 # Available stock lengths in feet for each nominal size.
 LENGTHS_BY_TYPE: dict[str, list[int]] = {
+    "1x2":  [8],
+    "2x3":  [8, 10, 12],
     "2x4":  [8, 10, 12, 14, 16],
     "2x6":  [8, 10, 12, 14, 16],
     "2x8":  [8, 10, 12, 14, 16],
     "2x10": [10, 12, 14, 16],
     "2x12": [10, 12, 14, 16],
+    "4x4":  [8, 10, 12, 14, 16],
+    "4x6":  [8, 10, 12, 14, 16, 20],
     "6x6":  [8, 10, 12, 14, 16, 20],
 }
 
