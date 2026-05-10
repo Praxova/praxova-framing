@@ -1,8 +1,8 @@
 """Praxova Framing MCP server.
 
 Exposes the in-Blender bridge as a set of MCP tools so an LLM client (Claude
-Desktop, etc.) can place lumber, place sheets, duplicate on-center, and
-generate cut lists in a live Blender session.
+Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
+on-center, and generate cut lists in a live Blender session.
 
 Configuration (env vars, read at startup):
     PRAXOVA_BRIDGE_HOST     default: 127.0.0.1
@@ -74,11 +74,12 @@ def _call(method: str, params: dict | None = None):
 def list_materials() -> dict:
     """List every material the add-on can place.
 
-    Call this BEFORE add_lumber or add_sheet to discover valid options.
-    Returns lumber types with their actual cross-sections and standard
-    stock lengths, sheet sizes, and the valid (material, thickness)
+    Call this BEFORE add_lumber, add_sheet, or add_panel to discover valid
+    options. Returns lumber types with their actual cross-sections and
+    standard stock lengths, sheet sizes and (material, thickness)
     combinations with their actual thicknesses (these differ from the
-    call-out per APA Performance Category standards).
+    call-out per APA Performance Category standards), and metal panel
+    sizes plus per-material profile height placeholders.
 
     Returns:
         lumber_types: dict mapping nominal (e.g. "2x4") to
@@ -86,6 +87,12 @@ def list_materials() -> dict:
         sheet_sizes: dict mapping size key (e.g. "4x8") to
             {width_in, length_in}
         sheet_thicknesses: list of {material, thickness_callout, actual_in}
+        panel_sizes: dict mapping size key (e.g. "36x8") to
+            {coverage_width_in, length_in}
+        panel_materials: list of {material, label, profile_height_in}.
+            profile_height_in is a generic placeholder (rib geometry
+            varies widely by manufacturer); see README "Metal panels"
+            section.
         orientations: list of valid orientation strings
     """
     return _call("list_materials")
@@ -95,13 +102,15 @@ def list_materials() -> dict:
 def list_objects(praxova_only: bool = True) -> dict:
     """List objects in the current Blender scene.
 
-    Defaults to only Praxova-tagged pieces (lumber and sheets); pass
-    praxova_only=False to include everything in the scene.
+    Defaults to only Praxova-tagged pieces (lumber, sheets, and panels);
+    pass praxova_only=False to include everything in the scene.
 
     Each Praxova object includes 'name' (use as target_name for
-    duplicate_oc), 'category' ('LUMBER' or 'SHEET'), 'label', 'orientation',
-    'location_m', 'dimensions_m', and category-specific fields like
-    nominal_size for lumber or sheet_material for sheets.
+    duplicate_oc), 'category' ('LUMBER', 'SHEET', or 'PANEL'), 'label',
+    'orientation', 'location_m', 'dimensions_m', and category-specific
+    fields: nominal_size and length_in for lumber, sheet_material and
+    sheet_thickness_callout and sheet_size_key for sheets, panel_material
+    and panel_size_key for panels.
 
     Returns:
         count: number of objects in the result
@@ -137,7 +146,10 @@ def get_scene_info() -> dict:
 
 @mcp.tool()
 def add_lumber(
-    nominal: Literal["2x4", "2x6", "2x8", "2x10", "2x12", "6x6"],
+    nominal: Literal[
+        "1x2", "2x3", "2x4", "2x6", "2x8", "2x10", "2x12",
+        "4x4", "4x6", "6x6",
+    ],
     length_ft: int,
     orientation: Literal["VERTICAL", "HORIZONTAL"] = "VERTICAL",
     location_m: list[float] | None = None,
@@ -148,10 +160,14 @@ def add_lumber(
         nominal: Nominal cross-section call-out. Geometry uses the
             actual planed dimensions (e.g. a "2x4" is actually 1.5"x3.5"),
             but the cut-list label uses the call-out so material orders
-            match. See list_materials for available types.
+            match. See list_materials for available types and stock
+            lengths. v0.3.1 added 1x2 (furring), 2x3 (interior partition),
+            4x4 (post), and 4x6 (mid-weight beam) to the original
+            2x4..2x12 + 6x6 set.
         length_ft: Length in feet. Must be a standard stock length for
             the chosen nominal - call list_materials first if uncertain.
-            Common: 8, 10, 12, 14, 16. 6x6 also stocks 20.
+            Common: 8, 10, 12, 14, 16. 4x6 and 6x6 also stock 20.
+            1x2 is 8' only.
         orientation: VERTICAL = long axis along +Z (a stud);
             HORIZONTAL = long axis along +X (a plate, joist, header).
         location_m: Optional [x, y, z] in meters, world-space, of the
@@ -207,6 +223,44 @@ def add_sheet(
     return _call("add_sheet", params)
 
 
+@mcp.tool()
+def add_panel(
+    material: Literal["METAL"] = "METAL",
+    size: Literal["36x8", "36x12", "36x16"] = "36x8",
+    orientation: Literal["VERTICAL", "HORIZONTAL"] = "VERTICAL",
+    location_m: list[float] | None = None,
+) -> dict:
+    """Place one tagged metal roofing or siding panel in the scene.
+
+    Args:
+        material: Currently only METAL. Real metal-panel rib geometry
+            varies widely by manufacturer and profile (5V crimp ~0.5",
+            AG/corrugated ~0.75", R-panel ~1.25", standing seam 1.5-3");
+            v0.3 models all panels as flat slabs with a 0.75" generic
+            profile placeholder. Layout (coverage width, length, count)
+            is what matters for ordering and on-roof placement; rib
+            geometry is cosmetic and will get its own generator later.
+        size: Panel size as 'WIDTH_in x LENGTH_ft'. "36x8" = 36" wide
+            (on-roof coverage width after side-seam overlap) by 8 feet
+            long. Available: 36x8, 36x12, 36x16. Default 36x8.
+        orientation: VERTICAL = standing tall (long axis +Z, e.g. wall
+            siding panel); HORIZONTAL = lying flat (long axis +X). Most
+            roof and wall installs are VERTICAL. Default VERTICAL.
+        location_m: Optional [x, y, z] world-space meters at the
+            min-corner origin. If omitted, uses Blender's 3D cursor.
+
+    Returns the placed object's metadata.
+    """
+    params: dict = {
+        "material": material,
+        "size": size,
+        "orientation": orientation,
+    }
+    if location_m is not None:
+        params["location_m"] = location_m
+    return _call("add_panel", params)
+
+
 # ===========================================================================
 # Duplication
 # ===========================================================================
@@ -229,12 +283,14 @@ def duplicate_oc(
     Args:
         spacing_in: On-center spacing in inches (e.g. 12.0, 16.0, 19.2,
             24.0). Common values: 12 (close stud), 16 (standard wall),
-            19.2 (engineered floor truss), 24 (advanced framing).
+            19.2 (engineered floor truss), 24 (advanced framing). For
+            timber/post framing pass the foot-equivalent in inches:
+            96 = 8', 120 = 10'.
         count: Number of new pieces to create (1-500).
         direction: RIGHT = +local X; LEFT = -local X. Default RIGHT.
         target_name: Object to duplicate. Pass the 'name' returned by
-            add_lumber for deterministic chains. If omitted, uses
-            Blender's currently active object.
+            add_lumber/add_sheet/add_panel for deterministic chains.
+            If omitted, uses Blender's currently active object.
 
     Returns a description of the duplication including the names of
     each new object.
@@ -263,12 +319,15 @@ def generate_cutlist() -> dict:
       - If the .blend has been saved: a sidecar
         '<blendfile>_cutlist.txt' next to the .blend file.
 
+    The body has up to three sections - LUMBER, SHEETS, PANELS - each
+    listed alphabetically by canonical label, with subtotals when more
+    than one section is populated, plus a grand total.
+
     Errors with code -32003 if no Praxova-tagged material exists in the
-    scene (place lumber or sheets first).
+    scene (place lumber, sheets, or panels first).
 
     Returns:
-        text: full cut-list body as a string (LUMBER section, SHEETS
-            section, grand total)
+        text: full cut-list body as a string
         text_datablock: the in-Blender Text datablock name
         disk_path: path to the sidecar .txt, or None if the .blend
             hasn't been saved yet
