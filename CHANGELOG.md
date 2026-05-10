@@ -2,6 +2,22 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.3.3] — 2026-05-10
+
+### Added
+- **Fill Edge-to-Edge operator** (`praxova.duplicate_e2e`) for sheets and panels. Duplicates the active source object N times along its local +Y or -Y axis at edge-to-edge spacing (the source's own width). Use to sheathe a wall or cover a roof in one click. Refuses LUMBER active objects with a message pointing back to the OC duplicator.
+- **N-panel "Fill Edge-to-Edge" section** directly under "On-Center Duplicate". Two preset distance rows (8'/12'/16' and 20'/24'/32'), an auto-computing `Fill Length` field, a manually-editable `Fill Count` override, a Forward/Back direction toggle, and a `Fill` button. Status line confirms the source and exact width when a compatible active object is selected; shows a "Select a sheet or panel" hint otherwise.
+- **`templates.fill_axis_width_in(obj)`** — cross-category helper returning the local-Y width in inches for a sheet or panel. Single source of truth used by both the Fill operator and the `fill_span_in` update callback. Returns 0.0 for LUMBER and for unknown size keys, letting callers decide how to handle.
+- **`PraxovaSceneProps.fill_count`, `fill_span_in`, `fill_direction`** — three new scene fields backing the UI. The `fill_span_in` update callback (`_on_fill_span_change`) recomputes `fill_count = ceil(span / width)` from the active object's width using the helper above, so clicking a preset atomically sets both span and count.
+- **`PRAXOVA_OT_set_fill_span`** internal operator powering the preset buttons (mirrors `PRAXOVA_OT_set_spacing`'s role for the OC duplicator).
+
+### Architecture notes
+- Operator mirrors `praxova.duplicate_oc`'s pattern: world-space step from `obj.matrix_world.to_3x3().col[1]` so rotated sources (e.g. roof panels tilted onto a slope) fill along their own width direction rather than along world-Y. Linked-mesh copies via `obj.copy()` — same memory and cut-list semantics as OC Duplicate.
+- LUMBER refusal is enforced at three layers: `fill_axis_width_in` returns 0.0 for LUMBER, the operator refuses with a redirect to OC Duplicate, and the UI's "Select a sheet or panel" hint front-loads the obvious case. The hint doesn't disable inputs — users can pre-stage values before selecting a source, mirroring how OC Duplicate behaves.
+- Bridge MCP tool intentionally deferred to v0.3.4. v0.3.2 established the "UI parity in vN, bridge parity in vN+1" cycle; v0.3.3 sticks to that.
+- The new `templates.fill_axis_width_in` lives in its own "Tag helpers (cross-category)" section between the panel data and mesh construction. Future tag-reading helpers (e.g. for a future export pipeline) have an obvious home there.
+- `mcp_server` package version unchanged at 0.3.2 (no MCP-side changes this cycle).
+
 ## [0.3.2] — 2026-05-10
 
 ### Added
