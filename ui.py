@@ -148,6 +148,21 @@ def add_to_add_menu(self, context):
 # N-panel
 # ===========================================================================
 
+# OC spacing presets. (display_label, value_in_inches).
+# Stud/joist spacing in inches on row 1; post spacing in feet on row 2.
+# The underlying field is always inches, so 8' stores as 96.0.
+_OC_PRESETS_INCHES: tuple[tuple[str, float], ...] = (
+    ('12"',   12.0),
+    ('16"',   16.0),
+    ('19.2"', 19.2),
+    ('24"',   24.0),
+)
+_OC_PRESETS_FEET: tuple[tuple[str, float], ...] = (
+    ("8'",  96.0),
+    ("10'", 120.0),
+)
+
+
 class PRAXOVA_PT_main_panel(bpy.types.Panel):
     """Main Praxova Framing panel in the 3D View N-panel ('Praxova' tab)."""
 
@@ -172,10 +187,17 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="On-Center Duplicate", icon='MOD_ARRAY')
 
+        # Row 1: stud/joist spacing in inches.
         row = box.row(align=True)
-        for preset in (12.0, 16.0, 19.2, 24.0):
-            op = row.operator("praxova.set_spacing", text=f'{preset:g}"')
-            op.spacing = preset
+        for label, spacing_in in _OC_PRESETS_INCHES:
+            op = row.operator("praxova.set_spacing", text=label)
+            op.spacing = spacing_in
+
+        # Row 2: post/timber spacing in feet (stored as inches).
+        row = box.row(align=True)
+        for label, spacing_in in _OC_PRESETS_FEET:
+            op = row.operator("praxova.set_spacing", text=label)
+            op.spacing = spacing_in
 
         box.prop(scn, "spacing_in")
         box.prop(scn, "count")
