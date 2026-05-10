@@ -208,6 +208,18 @@ _OC_PRESETS_FEET: tuple[tuple[str, float], ...] = (
     ("10'", 120.0),
 )
 
+# Fill preset spans in feet (stored as inches). Used by the v0.3.3 Fill
+# Edge-to-Edge duplicator. Six entries laid out in two rows of three so
+# the buttons don't get cramped at the N-panel's default width.
+_FILL_PRESETS_FEET: tuple[tuple[str, float], ...] = (
+    ("8'",  96.0),
+    ("12'", 144.0),
+    ("16'", 192.0),
+    ("20'", 240.0),
+    ("24'", 288.0),
+    ("32'", 384.0),
+)
+
 
 class PRAXOVA_PT_main_panel(bpy.types.Panel):
     """Main Praxova Framing panel in the 3D View N-panel ('Praxova' tab)."""
@@ -252,6 +264,55 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
         row.prop(scn, "direction", expand=True)
 
         box.operator("praxova.duplicate_oc", icon='MOD_ARRAY')
+
+        # --- Fill (edge-to-edge, v0.3.3) ---
+        # Sister section to OC Duplicate above, but stepping along local Y
+        # by the source's own width. Sheets and panels only - lumber is
+        # refused by the operator with a pointer back to OC Duplicate.
+        box = layout.box()
+        box.label(text="Fill Edge-to-Edge", icon='SEQ_STRIP_DUPLICATE')
+
+        # Status line - confirms what the operator will fill from, plus the
+        # exact width that the spacing will use. When nothing compatible is
+        # active, a hint replaces it (the operator will still error out on
+        # click; this hint just front-loads the obvious case).
+        active = context.active_object
+        fillable = (
+            active is not None
+            and active.praxova_lumber.is_lumber
+            and active.praxova_lumber.category in {'SHEET', 'PANEL'}
+        )
+        if fillable:
+            width_in = templates.fill_axis_width_in(active)
+            box.label(
+                text=f"Source: {active.praxova_lumber.cutlist_label}  ({width_in:g}\" wide)",
+                icon='OBJECT_DATA',
+            )
+        else:
+            box.label(text="Select a sheet or panel", icon='INFO')
+
+        # Preset distance buttons (two rows of three).
+        # Clicking a preset fires praxova.set_fill_span which writes the
+        # value into fill_span_in. That field's update callback then
+        # recomputes fill_count from the active object's width.
+        row = box.row(align=True)
+        for label, span_in in _FILL_PRESETS_FEET[:3]:
+            op = row.operator("praxova.set_fill_span", text=label)
+            op.span = span_in
+        row = box.row(align=True)
+        for label, span_in in _FILL_PRESETS_FEET[3:]:
+            op = row.operator("praxova.set_fill_span", text=label)
+            op.span = span_in
+
+        box.prop(scn, "fill_span_in")
+        box.prop(scn, "fill_count")
+
+        row = box.row(align=True)
+        row.prop(scn, "fill_direction", expand=True)
+
+        # Fill button reuses MOD_ARRAY for visual parity with OC's button
+        # since both are array-style operations.
+        box.operator("praxova.duplicate_e2e", icon='MOD_ARRAY', text="Fill")
 
         # --- Cut list ---
         box = layout.box()
