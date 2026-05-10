@@ -3,6 +3,7 @@
 import bpy
 
 from . import templates
+from . import server as _server  # v0.3: bridge state for the MCP Bridge subpanel
 
 
 # ===========================================================================
@@ -193,6 +194,29 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
         col.label(text="Output: Text datablock", icon='DOT')
         col.label(text="\"Praxova Cut List\" + .txt", icon='BLANK1')
         col.label(text="next to .blend (if saved)", icon='BLANK1')
+
+        # --- v0.3: MCP Bridge ---
+        # Lets an external MCP server (mcp_server/) connect and drive the
+        # operators above from an LLM agent. Localhost-only.
+        box = layout.box()
+        box.label(text="MCP Bridge", icon='URL')
+        running = _server.bridge.is_running()
+
+        # Port input - greyed out while running so the user sees that
+        # changing it won't take effect until restart.
+        row = box.row(align=True)
+        row.enabled = not running
+        row.prop(scn, "bridge_port", text="Port")
+
+        if running:
+            box.label(
+                text=f"Listening on 127.0.0.1:{_server.bridge.get_port()}",
+                icon='RADIOBUT_ON',
+            )
+            box.operator("praxova.stop_bridge", icon='PAUSE', text="Stop Bridge")
+        else:
+            box.label(text="Stopped", icon='RADIOBUT_OFF')
+            box.operator("praxova.start_bridge", icon='PLAY', text="Start Bridge")
 
         # --- Active object info ---
         obj = context.active_object

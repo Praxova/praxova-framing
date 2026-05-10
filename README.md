@@ -1,8 +1,8 @@
 # Praxova Framing
 
-A Blender add-on for fast construction framing in 3D — lumber and sheet templates with one-click on-center duplication and cut-list export.
+A Blender add-on for fast construction framing in 3D — lumber and sheet templates with one-click on-center duplication, cut-list export, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
 
-**Status:** Beta (v0.2.0). Pre-1.0 — APIs and the per-object data model may change between minor versions.
+**Status:** Beta (v0.3.0). Pre-1.0 — APIs and the per-object data model may change between minor versions.
 
 ## What it does
 
@@ -10,6 +10,7 @@ A Blender add-on for fast construction framing in 3D — lumber and sheet templa
 - **On-center duplicator** with preset spacing (12" / 16" / 19.2" / 24"), count, and Right/Left direction. Each duplicate is a separate Object (so the cut list is correct), but they share mesh data (so it's memory-efficient).
 - **Cut list** generator that walks the scene, counts tagged objects by label, and writes to both an in-Blender Text datablock and a `.txt` file next to your `.blend`.
 - **Add-menu integration** — `Add → Praxova Lumber → ...` for both lumber and sheets, in vertical and horizontal orientations.
+- **MCP bridge** (v0.3) — an in-Blender JSON-RPC bridge plus a separate-process MCP server (`mcp_server/`) so an LLM agent can drive every operator above through a chat interface.
 
 ## Install
 
@@ -20,6 +21,8 @@ A Blender add-on for fast construction framing in 3D — lumber and sheet templa
 The N-panel tab "Praxova" should appear in the 3D Viewport (press `N` to open).
 
 **Targets:** Blender 4.2+ (uses the new extensions system). Tested on Blender 5.1.
+
+For LLM-driven framing via MCP, also see [`mcp_server/README.md`](mcp_server/README.md).
 
 ## Sheet thickness — actuals vs. call-outs
 
@@ -72,16 +75,36 @@ N-panel → **Cut List → Generate Cut List**. Output goes to:
 1. A Blender Text datablock named **"Praxova Cut List"** — to view, split an editor area, change its type to Text Editor, and pick "Praxova Cut List" from the data picker.
 2. A **`<blendfile>_cutlist.txt`** file alongside the .blend (only if the .blend has been saved). Status bar message shows the exact path.
 
+## MCP bridge (v0.3)
+
+Drive the add-on from an LLM agent. Two-process architecture:
+
+```
+┌──────────────────┐    stdio MCP    ┌────────────────────┐    TCP JSON-RPC    ┌─────────────────────┐
+│  Claude Desktop  │────────────────▶│  praxova-framing-  │───────────────────▶│  Blender 5.x        │
+│                  │                 │  mcp (Python pkg)  │   127.0.0.1:9876   │  (bridge thread)    │
+└──────────────────┘                 └────────────────────┘                    └─────────────────────┘
+```
+
+The in-Blender bridge listens on localhost only. All `bpy` mutation is serialized onto Blender's main thread via `bpy.app.timers`, so concurrent client connections cannot race on bpy state. See [`mcp_server/README.md`](mcp_server/README.md) for install and Claude Desktop configuration.
+
+To use:
+
+1. N-panel → **MCP Bridge** → **Start Bridge** in Blender.
+2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `duplicate_oc`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
+
+For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running.
+
 ## Roadmap
 
-- v0.3 — MCP server in front of the operators (drive framing from agents)
+- v0.3 — MCP server in front of the operators ✅
 - v0.4 — "Frame a wall" composite operator (plates + studs + corners in one shot)
 - v0.5 — Door / window openings (king studs, jacks, headers, cripples)
 - Later — additional sheet sizes (4x10, 4x12), 5/8" thickness, addon preferences for thickness overrides, post-frame-friendly OC presets (8'/10' for timber framing)
 
 ## License
 
-GPL-2.0-or-later. See `LICENSE`. (Required for Blender add-ons that use the `bpy` API.)
+GPL-2.0-or-later. See `LICENSE`. (Required for Blender add-ons that use the `bpy` API. The MCP server in `mcp_server/` is licensed to match.)
 
 ## Author
 

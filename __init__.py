@@ -2,15 +2,15 @@
 Praxova Framing - construction modeling helper for Blender.
 
 Provides tagged lumber templates (2x4 through 2x12, 6x6) and sheet goods
-(plywood and OSB at 1/2" and 3/4"), an on-center spacing duplicator, and a
-cut-list generator. All placed material is tagged via a registered
-PropertyGroup, so duplicates inherit the tag automatically and the cut list
-is a simple Counter over scene objects.
+(plywood and OSB at 1/2" and 3/4"), an on-center spacing duplicator, a
+cut-list generator, and (v0.3) a localhost JSON-RPC bridge so an external
+MCP server can drive the same operators from an LLM agent.
 """
 
 import bpy
 
 from . import properties, ops_add, ops_duplicate, ops_cutlist, ops_units, ui
+from . import server as _server  # v0.3: in-Blender MCP bridge
 
 
 _registered_classes: list = []
@@ -30,6 +30,9 @@ def register():
         ops_duplicate.PRAXOVA_OT_duplicate_oc,
         ops_cutlist.PRAXOVA_OT_generate_cutlist,
         ops_units.PRAXOVA_OT_set_imperial_units,
+        # v0.3: MCP bridge operators.
+        _server.PRAXOVA_OT_start_bridge,
+        _server.PRAXOVA_OT_stop_bridge,
         # UI - parent submenu, sheets submenu, main panel.
         ui.PRAXOVA_MT_add_lumber_submenu,
         ui.PRAXOVA_MT_sheets_submenu,
@@ -58,6 +61,11 @@ def register():
 
 
 def unregister():
+    # v0.3: ensure the bridge is stopped before tearing the module down,
+    # otherwise the listener thread keeps a stale reference to a defunct
+    # version of the module after a reload.
+    _server.bridge.stop()
+
     bpy.types.VIEW3D_MT_add.remove(ui.add_to_add_menu)
 
     del bpy.types.Object.praxova_lumber

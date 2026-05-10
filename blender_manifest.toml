@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "praxova_framing"
-version = "0.2.0"
+version = "0.3.0"
 name = "Praxova Framing"
-tagline = "Tagged lumber and sheet templates with OC spacing and cut-list export"
+tagline = "Tagged lumber and sheet templates with OC spacing, cut lists, and MCP bridge"
 maintainer = "Alton Lord <adlord@gmail.com>"
 type = "add-on"
 

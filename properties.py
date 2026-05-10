@@ -118,3 +118,15 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
         ],
         default='RIGHT',
     )
+
+    # --- v0.3: MCP bridge ---
+    # The bridge running-state is intentionally NOT a PropertyGroup field;
+    # it's transient process state and lives in server/bridge.py. Only the
+    # user-configured port lives here, since it's a UI input.
+    bridge_port: IntProperty(  # noqa: F821
+        name="Bridge Port",
+        description="TCP port for the local MCP bridge (127.0.0.1 only)",
+        default=9876,
+        min=1024,
+        max=65535,
+    )
