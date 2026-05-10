@@ -1,15 +1,15 @@
 # Praxova Framing
 
-A Blender add-on for fast construction framing in 3D — lumber and sheet templates with one-click on-center duplication, cut-list export, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
+A Blender add-on for fast construction framing in 3D — lumber, sheet, and panel templates with one-click on-center duplication, cut-list export, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
 
-**Status:** Beta (v0.3.0). Pre-1.0 — APIs and the per-object data model may change between minor versions.
+**Status:** Beta (v0.3.1). Pre-1.0 — APIs and the per-object data model may change between minor versions.
 
 ## What it does
 
-- **Tagged templates** for dimensional lumber (2x4 / 2x6 / 2x8 / 2x10 / 2x12 / 6x6) and sheet goods (plywood and OSB at 1/2" and 3/4" performance categories, 4x8 size). Geometry is *actual* dimensions; cut-list labels use *nominal* / call-out sizes.
-- **On-center duplicator** with preset spacing (12" / 16" / 19.2" / 24"), count, and Right/Left direction. Each duplicate is a separate Object (so the cut list is correct), but they share mesh data (so it's memory-efficient).
-- **Cut list** generator that walks the scene, counts tagged objects by label, and writes to both an in-Blender Text datablock and a `.txt` file next to your `.blend`.
-- **Add-menu integration** — `Add → Praxova Lumber → ...` for both lumber and sheets, in vertical and horizontal orientations.
+- **Tagged templates** for dimensional lumber (1x2 / 2x3 / 2x4 / 2x6 / 2x8 / 2x10 / 2x12 / 4x4 / 4x6 / 6x6), sheet goods (plywood and OSB at 1/2" and 3/4" performance categories, 4x8 size), and metal roofing/siding panels (36" coverage width at 8' / 12' / 16' lengths). Geometry is *actual* dimensions; cut-list labels use *nominal* / call-out sizes.
+- **On-center duplicator** with two preset rows: stud/joist spacing in inches (12" / 16" / 19.2" / 24") and post/timber spacing in feet (8' / 10'). Plus count and Right/Left direction. Each duplicate is a separate Object (so the cut list is correct), but they share mesh data (so it's memory-efficient).
+- **Cut list** generator that walks the scene, counts tagged objects by label, and writes to both an in-Blender Text datablock and a `.txt` file next to your `.blend`. Three sections: LUMBER, SHEETS, PANELS, with subtotals when more than one is populated.
+- **Add-menu integration** — `Add → Praxova Lumber → ...` for lumber, sheets, and panels, in vertical and horizontal orientations.
 - **MCP bridge** (v0.3) — an in-Blender JSON-RPC bridge plus a separate-process MCP server (`mcp_server/`) so an LLM agent can drive every operator above through a chat interface.
 
 ## Install
@@ -35,16 +35,29 @@ Sheet goods are sold by **Performance Category** (the call-out), which doesn't m
 
 Per APA PS 1 (plywood) and APA PS 2 (OSB). Geometry uses the actual; cut-list label uses the call-out so material orders match. Override `SHEET_THICKNESS_ACTUAL` in `templates.py` if your supplier uses different stock.
 
+## Metal panels — generic profile
+
+Real metal-panel rib geometry varies widely by manufacturer and profile (5V crimp ~0.5", AG/corrugated ~0.75", R-panel ~1.25", standing seam 1.5–3"). v0.3 models all metal panels as flat slabs with a generic 0.75" profile placeholder, defined per-material in `templates.PANEL_MATERIAL_PROFILE`. Panel layout (coverage width, length, count) is what matters for ordering and on-roof placement; the rib geometry is cosmetic. A future version will replace the slab with a proper corrugation generator.
+
 ## Geometry orientation
 
 Same convention for all materials:
 
 | Orientation | X | Y | Z | Long axis |
 |-------------|---|---|---|-----------|
-| Vertical    | thickness | width | length | +Z |
-| Horizontal  | length | width | thickness | +X |
+| Vertical    | thickness / profile | width | length | +Z |
+| Horizontal  | length | width | thickness / profile | +X |
 
 Origin at min corner (0, 0, 0). Click the 3D cursor where you want the bottom-front-left corner of the piece.
+
+## Working with linked-mesh duplicates
+
+Each Praxova template (a `2x4x8 V`, a `36" Metal x 12 V`, etc.) is built once as a single mesh datablock. Every subsequent placement — via the on-center duplicator, Shift-D, or a re-add of the same template — creates a new **Object** that *links* to the same **Mesh**. Two instances. One mesh. This keeps memory low and editing fast (change the mesh once and every instance updates).
+
+The tradeoff: applying a transform via *Object → Apply → Rotation/Scale* bakes that transform into the mesh, so doing it on one instance affects every linked instance. Blender catches this and prompts "Make Single User?". The right answer depends on what you want:
+
+- **Most workflows**: don't apply rotation/scale at all. Object-level transforms render identically and don't affect other instances. The cut list ignores transforms — it counts by `cutlist_label` stored on each Object's tag, not by mesh identity.
+- **You really do need it baked in** (e.g., exporting to a tool that ignores Blender object transforms, or running a boolean on one piece): with that one piece selected, *Object → Relations → Make Single User → **Object & Data*** (shortcut: `U` → Object & Data). That copy gets its own mesh; everything else stays linked. Cut-list count is unaffected.
 
 ## Data model
 
@@ -52,14 +65,16 @@ Each placed piece carries a `praxova_lumber` PropertyGroup with:
 
 ```
 is_lumber:                bool    # "is Praxova-managed"
-category:                 'LUMBER' | 'SHEET'
-nominal_size:             "2x4", "6x6", ...        (lumber only)
-length_in:                96, 120, ...             (lumber only)
-sheet_material:           'PLYWOOD' | 'OSB'        (sheet only)
-sheet_thickness_callout:  "1/2", "3/4"             (sheet only)
-sheet_size_key:           "4x8"                    (sheet only)
+category:                 'LUMBER' | 'SHEET' | 'PANEL'
+nominal_size:             "2x4", "4x6", ...           (lumber only)
+length_in:                96, 120, ...                (lumber only)
+sheet_material:           'PLYWOOD' | 'OSB'           (sheet only)
+sheet_thickness_callout:  "1/2", "3/4"                (sheet only)
+sheet_size_key:           "4x8"                       (sheet only)
+panel_material:           'METAL'                     (panel only)
+panel_size_key:           "36x8" / "36x12" / "36x16"  (panel only)
 orientation:              'VERTICAL' | 'HORIZONTAL'
-cutlist_label:            "2x4x8 V" or "1/2\" PLY 4x8 V"
+cutlist_label:            "2x4x8 V" / "1/2\" PLY 4x8 V" / "36\" Metal x 8 V"
 ```
 
 Filter for cut-list construction or external scripts:
@@ -74,6 +89,8 @@ N-panel → **Cut List → Generate Cut List**. Output goes to:
 
 1. A Blender Text datablock named **"Praxova Cut List"** — to view, split an editor area, change its type to Text Editor, and pick "Praxova Cut List" from the data picker.
 2. A **`<blendfile>_cutlist.txt`** file alongside the .blend (only if the .blend has been saved). Status bar message shows the exact path.
+
+Output is split into LUMBER, SHEETS, and PANELS sections, with subtotals when more than one category is present, plus a grand total.
 
 ## MCP bridge (v0.3)
 
@@ -91,16 +108,19 @@ The in-Blender bridge listens on localhost only. All `bpy` mutation is serialize
 To use:
 
 1. N-panel → **MCP Bridge** → **Start Bridge** in Blender.
-2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `duplicate_oc`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
+2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `add_panel` (v0.3.2+), `duplicate_oc`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
 
 For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running.
 
 ## Roadmap
 
-- v0.3 — MCP server in front of the operators ✅
-- v0.4 — "Frame a wall" composite operator (plates + studs + corners in one shot)
-- v0.5 — Door / window openings (king studs, jacks, headers, cripples)
-- Later — additional sheet sizes (4x10, 4x12), 5/8" thickness, addon preferences for thickness overrides, post-frame-friendly OC presets (8'/10' for timber framing)
+- ✅ **v0.3** — MCP server in front of the operators.
+- ✅ **v0.3.1** — Lumber additions (1x2 / 2x3 / 4x4 / 4x6), 36" metal roofing/siding panels (PANEL category), 8' / 10' OC presets for post-framing.
+- **v0.3.2** — Bridge parity for panels (`add_panel` MCP tool); smoke-test coverage for panels; `add_lumber` MCP Literal extended to include the v0.3.1 lumber additions.
+- **v0.3.3** — **Fill operator** for sheets and panels: lay sheets edge-to-edge across a span using the sheet's *width* (local Y) as spacing. Useful for sheathing a wall or covering a roof in one shot. Distinct from the OC duplicator, which uses center-to-center spacing along local X for studs.
+- **v0.4** — "Frame a wall" composite operator (plates + studs + corners in one shot).
+- **v0.5** — Door / window openings (king studs, jacks, headers, cripples).
+- **Later** — additional sheet sizes (4x10, 4x12), 5/8" sheet thickness, addon preferences for thickness overrides, ribbed-profile metal panel geometry to replace the v0.3 flat-slab placeholder.
 
 ## License
 
