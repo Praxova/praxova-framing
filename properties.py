@@ -5,6 +5,8 @@ deprecated for add-on use. The proper pattern is to register a PropertyGroup
 and attach it via PointerProperty - which is what this module does.
 """
 
+from math import ceil
+
 import bpy
 from bpy.props import (
     BoolProperty,
@@ -14,6 +16,39 @@ from bpy.props import (
     EnumProperty,
 )
 
+from . import templates
+
+
+# ---------------------------------------------------------------------------
+# Update callbacks
+# ---------------------------------------------------------------------------
+
+def _on_fill_span_change(self, context):
+    """Auto-compute fill_count = ceil(fill_span_in / width) for the active obj.
+
+    Runs whenever fill_span_in changes (preset button press, manual edit).
+    Silent no-op when no Praxova SHEET or PANEL is active - the user is
+    free to type a span first and select the source after, in which case
+    they'll need to nudge the span to re-fire this callback.
+
+    Writes via the dict-style assignment (`self["fill_count"] = ...`) rather
+    than attribute assignment to avoid going through Blender's property
+    setter machinery, which can interact poorly with UI redraws when the
+    callback chain gets long.
+    """
+    obj = context.active_object
+    if obj is None:
+        return
+    width_in = templates.fill_axis_width_in(obj)
+    if width_in <= 0:
+        return
+    # IntProperty bounds clamp - protects against absurd typed spans.
+    self["fill_count"] = int(max(1, min(500, ceil(self.fill_span_in / width_in))))
+
+
+# ---------------------------------------------------------------------------
+# Object tag
+# ---------------------------------------------------------------------------
 
 class PraxovaLumberProps(bpy.types.PropertyGroup):
     """Per-object tag identifying a Praxova-managed material.
@@ -106,9 +141,14 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
     )
 
 
+# ---------------------------------------------------------------------------
+# Scene state
+# ---------------------------------------------------------------------------
+
 class PraxovaSceneProps(bpy.types.PropertyGroup):
     """Scene-level UI state for the N-panel."""
 
+    # --- OC duplicator (existing) ---
     spacing_in: FloatProperty(  # noqa: F821
         name="Spacing (in)",
         description="On-center spacing in inches",
@@ -132,6 +172,38 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
             ('LEFT',  "Left",  "Duplicate along -local X"),
         ],
         default='RIGHT',
+    )
+
+    # --- Fill / edge-to-edge duplicator (v0.3.3) ---
+    # fill_span_in is a UI helper; its update callback recomputes fill_count
+    # from the active object's width. The operator uses fill_count directly,
+    # so editing fill_count is the authoritative override.
+    fill_span_in: FloatProperty(  # noqa: F821
+        name="Fill Length (in)",
+        description="Target span to cover. Auto-computes Fill Count from "
+                    "the active object's width. Edit Fill Count after to "
+                    "override the auto-computed value.",
+        default=192.0,  # 16 ft - common wall span
+        min=1.0,
+        soft_max=1200.0,  # 100 ft soft cap
+        precision=2,
+        update=_on_fill_span_change,
+    )
+    fill_count: IntProperty(  # noqa: F821
+        name="Fill Count",
+        description="Number of edge-to-edge duplicates to create",
+        default=4,  # 16ft / 48" = 4 for a 4x8 sheet
+        min=1,
+        max=500,
+    )
+    fill_direction: EnumProperty(  # noqa: F821
+        name="Fill Direction",
+        description="Duplicate edge-to-edge along +local Y (forward) or -local Y (back)",
+        items=[
+            ('FORWARD', "Forward", "Duplicate along +local Y"),
+            ('BACK',    "Back",    "Duplicate along -local Y"),
+        ],
+        default='FORWARD',
     )
 
     # --- v0.3: MCP bridge ---
