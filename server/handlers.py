@@ -430,6 +430,97 @@ def duplicate_oc(params: dict) -> dict:
     }
 
 
+def duplicate_e2e(params: dict) -> dict:
+    """Duplicate `target_name` (or active) edge-to-edge along its local Y.
+
+    Mirrors duplicate_oc's contract but with no spacing parameter - spacing
+    is automatically the source's own width (48" for a 4x8 sheet, 36" for
+    a metal panel). Same constraint that the UI Fill operator has, and
+    intentionally so: keeping the bridge tool and the UI tool in lockstep
+    means an LLM agent and a human will get the same result for the same
+    inputs. For custom-spaced arrays, use duplicate_oc.
+
+    Refuses LUMBER targets with INVALID_PARAMS - lumber's local-Y is its
+    cross-section width (3.5" for a 2x4), not a meaningful fill spacing.
+    Validating here gives the LLM a clean error code, rather than waiting
+    for the operator to fail and surfacing as APP_OPERATOR_FAILED.
+    """
+    count = _require(params, "count", int)
+    if count < 1 or count > 500:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS, "count must be between 1 and 500",
+        )
+    direction = _optional(
+        params, "direction", str, default="FORWARD",
+        choices=("FORWARD", "BACK"),
+    )
+    target_name = _optional(params, "target_name", str, default=None)
+
+    scene = bpy.context.scene
+
+    # Resolve target object.
+    if target_name is not None:
+        target = scene.objects.get(target_name)
+        if target is None:
+            raise bridge.RPCError(
+                APP_OBJECT_NOT_FOUND,
+                f"No object named {target_name!r} in scene",
+            )
+        for o in bpy.context.selected_objects:
+            o.select_set(False)
+        target.select_set(True)
+        bpy.context.view_layer.objects.active = target
+    else:
+        target = bpy.context.view_layer.objects.active
+        if target is None:
+            raise bridge.RPCError(
+                APP_NO_ACTIVE_OBJECT,
+                "No active object to fill. "
+                "Pass 'target_name' or select a sheet or panel in Blender first.",
+            )
+
+    # Validate target is SHEET or PANEL. Clean error code here is more
+    # useful to LLM agents than the operator's generic APP_OPERATOR_FAILED.
+    tag = getattr(target, "praxova_lumber", None)
+    if tag is None or not tag.is_lumber:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"Target {target.name!r} is not a Praxova-tagged piece. "
+            f"Add a sheet or panel first via add_sheet or add_panel.",
+        )
+    if tag.category not in {'SHEET', 'PANEL'}:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"Fill works on sheets and panels, not {tag.category.lower()}. "
+            f"For lumber arrays, use duplicate_oc with explicit spacing.",
+        )
+
+    # Capture the width before the operator runs - the operator uses it
+    # but doesn't return it, and callers (especially LLM agents) often
+    # want to verify what spacing was actually applied.
+    width_in = templates.fill_axis_width_in(target)
+
+    # Configure scene-level operator inputs. (No spacing field; the
+    # operator derives it from the active object's width.)
+    sp = scene.praxova_framing
+    sp.fill_count = count
+    sp.fill_direction = direction
+
+    before = {o.name for o in scene.objects}
+    result = bpy.ops.praxova.duplicate_e2e('EXEC_DEFAULT')
+    _check_op_result(result, "praxova.duplicate_e2e")
+    after = {o.name for o in scene.objects}
+    new_names = sorted(after - before)
+
+    return {
+        "source": target.name,
+        "width_in": width_in,
+        "count": count,
+        "direction": direction,
+        "new_objects": new_names,
+    }
+
+
 # ===========================================================================
 # Cut list
 # ===========================================================================
@@ -477,7 +568,7 @@ def ping(params: dict) -> dict:
     """Liveness probe. Useful for the MCP server to verify connectivity."""
     return {
         "ok": True,
-        "addon_version": "0.3.2",
+        "addon_version": "0.3.4",
         "method_count": len(METHODS),
     }
 
@@ -495,6 +586,7 @@ METHODS = {
     "add_sheet": add_sheet,
     "add_panel": add_panel,
     "duplicate_oc": duplicate_oc,
+    "duplicate_e2e": duplicate_e2e,
     "generate_cutlist": generate_cutlist,
     "set_imperial_units": set_imperial_units,
 }
