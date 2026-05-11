@@ -2,6 +2,25 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.3.4] — 2026-05-11
+
+### Added
+- **Bridge `duplicate_e2e` MCP tool.** Completes bridge parity for the v0.3.3 Fill operator. Required: `count` (1-500). Optional: `direction` (FORWARD/BACK, default FORWARD), `target_name`. **No spacing parameter** — spacing is automatically the source's own width, matching the UI's behavior exactly. LLM agents that need custom-spaced arrays continue to use `duplicate_oc`. Brings the bridge surface to eleven methods: `ping`, `list_materials`, `list_objects`, `get_scene_info`, `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `duplicate_e2e`, `generate_cutlist`, `set_imperial_units`.
+- **Smoke test `duplicate_e2e` step.** New `[8]` step fills 3 panels forward from the metal panel, asserting `source`, `width_in == 36.0`, `count`, `direction`, and `len(new_objects) == 3`. Subsequent step numbers shift; `[9] list_objects` count assertion goes from 7 to 10; `[10] generate_cutlist` now also verifies the metal panel appears with count 4 in the cut-list body (confirming fill duplicates carry their cut-list tags through `obj.copy()` and group correctly).
+- **Smoke test LUMBER-refusal guard.** New `[12]` step calls `duplicate_e2e` on a lumber object and asserts the response is `-32602 INVALID_PARAMS` with a "lumber" mention in the message. Pins the bridge-side LUMBER refusal in place against future refactors.
+- **Smoke test version pin.** `[1] ping` now asserts `addon_version == "0.3.4"` and `method_count == 11`. Catches stale Blender builds loaded against the test — the most common cause of confusing smoke-test failures.
+
+### Changed
+- **`mcp_server` package version** 0.3.2 → 0.3.4 (skipping 0.3.3 since that was a UI-only cycle with no MCP-side changes; manifest and Python package versions are now back in sync).
+- **Bridge `ping`** reports `addon_version: "0.3.4"` (was `"0.3.2"`).
+- **Module docstrings** of `mcp_server/server.py` and `smoke_test.py` updated to mention fill alongside the existing capabilities.
+- **README** MCP-bridge usage line lists all eleven tools (`duplicate_e2e` added); roadmap marks v0.3.4 done.
+
+### Architecture notes
+- Bridge validation pattern for `duplicate_e2e` mirrors `duplicate_oc`'s: required `count` bound-checked (1-500), optional `direction` and `target_name`, target resolved either by name or via the active object with appropriate `APP_NO_ACTIVE_OBJECT` / `APP_OBJECT_NOT_FOUND` error codes. The LUMBER refusal happens in the bridge handler rather than letting the operator's `report()` bubble up as `APP_OPERATOR_FAILED` — clean error codes are more useful to LLM agents than generic operator-failed messages.
+- The response includes `width_in`, the actual spacing used. Useful for the client to verify (especially in tests) what the operator decided to do, since the source's own width isn't directly visible from the parameters.
+- This release completes the v0.3.x "feature in vN, bridge parity in vN+1" cycle that began with v0.3.1 (UI: panels) → v0.3.2 (bridge: `add_panel`) → v0.3.3 (UI: fill) → v0.3.4 (bridge: `duplicate_e2e`). v0.4 starts a new feature cycle.
+
 ## [0.3.3] — 2026-05-10
 
 ### Added
