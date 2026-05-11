@@ -8,10 +8,11 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.3.2 RPC surface end-to-end: ping, scene info,
-material catalog, lumber/sheet/panel placement, on-center duplication,
-cut-list generation (verifying all three sections appear), and two
-error paths.
+Covers the full v0.3.4 RPC surface end-to-end: ping (with addon_version
+and method_count assertions), scene info, material catalog, lumber /
+sheet / panel placement, on-center duplication, edge-to-edge fill,
+cut-list generation (verifying all three sections appear), and three
+error paths including the LUMBER refusal for duplicate_e2e.
 """
 
 from __future__ import annotations
@@ -64,6 +65,15 @@ def run(host: str, port: int) -> int:
         r = cli.call("ping")
         print(f"  -> {r}")
         assert r["ok"] is True
+        # v0.3.4: ping reports addon_version and method_count. Strict
+        # assertion here catches version drift between the addon and
+        # the test - exactly when a stale build is loaded in Blender.
+        assert r["addon_version"] == "0.3.4", (
+            f"expected addon_version 0.3.4, got {r['addon_version']!r}"
+        )
+        assert r["method_count"] == 11, (
+            f"expected 11 methods, got {r['method_count']}"
+        )
 
         print("\n[2] get_scene_info")
         r = cli.call("get_scene_info")
@@ -120,6 +130,7 @@ def run(host: str, port: int) -> int:
             "location_m": [0.0, 2.0, 0.0],
         })
         print(f"  -> {r}")
+        panel_name = r["name"]
         assert r["category"] == "PANEL"
         assert r["label"] == '36" Metal x 8 V'
         # _serialize_object should now expose panel-specific fields, not the
@@ -130,12 +141,31 @@ def run(host: str, port: int) -> int:
             "panel object leaked sheet_material - _serialize_object regressed"
         )
 
-        print("\n[8] list_objects (praxova only)")
+        print("\n[8] duplicate_e2e 3x forward on the metal panel")
+        # v0.3.4: bridge parity for the Fill operator. Spacing is the
+        # source's own width (36" for this panel) - no spacing_in
+        # parameter, by design.
+        r = cli.call("duplicate_e2e", {
+            "target_name": panel_name,
+            "count": 3,
+            "direction": "FORWARD",
+        })
+        print(f"  -> {r}")
+        assert r["source"] == panel_name
+        assert r["width_in"] == 36.0, (
+            f"expected width_in 36.0 for 36\" panel, got {r['width_in']}"
+        )
+        assert r["count"] == 3
+        assert r["direction"] == "FORWARD"
+        assert len(r["new_objects"]) == 3
+
+        print("\n[9] list_objects (praxova only)")
         r = cli.call("list_objects")
         print(f"  -> {r['count']} tagged objects")
-        assert r["count"] == 7  # 1 stud + 4 dupes + 1 sheet + 1 panel
+        # 1 stud + 4 OC dupes + 1 sheet + 1 panel + 3 fill dupes = 10
+        assert r["count"] == 10
 
-        print("\n[9] generate_cutlist")
+        print("\n[10] generate_cutlist")
         r = cli.call("generate_cutlist")
         print("  -> cutlist body:")
         for line in r["text"].splitlines():
@@ -145,14 +175,45 @@ def run(host: str, port: int) -> int:
         assert "LUMBER" in r["text"]
         assert "SHEETS" in r["text"]
         assert "PANELS" in r["text"]
+        # The fill operator should have brought the panel count from 1 to 4.
+        # Format from ops_cutlist: "  <qty>  x  <label>" with the label
+        # at the end. Look for the count line for the panel label.
+        panel_line = next(
+            (line for line in r["text"].splitlines()
+             if '36" Metal x 8 V' in line),
+            None,
+        )
+        assert panel_line is not None, "panel line missing from cut list"
+        assert " 4 " in panel_line or "4  x" in panel_line, (
+            f"expected 4 panels in cut list, got line: {panel_line!r}"
+        )
 
-        print("\n[10] error path: unknown lumber")
+        print("\n[11] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[11] error path: bad method")
+        print("\n[12] error path: duplicate_e2e on lumber (should refuse)")
+        # The LUMBER refusal is enforced in the bridge handler so the
+        # error carries a clean INVALID_PARAMS code instead of the
+        # operator's APP_OPERATOR_FAILED.
+        try:
+            cli.call("duplicate_e2e", {
+                "target_name": first_stud,
+                "count": 2,
+            })
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert "-32602" in err_text or "INVALID_PARAMS" in err_text, (
+                f"expected INVALID_PARAMS code, got: {err_text!r}"
+            )
+            assert "lumber" in err_text.lower(), (
+                f"expected error to mention lumber, got: {err_text!r}"
+            )
+
+        print("\n[13] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:
