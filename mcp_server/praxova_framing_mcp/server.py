@@ -2,7 +2,7 @@
 
 Exposes the in-Blender bridge as a set of MCP tools so an LLM client (Claude
 Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
-on-center, and generate cut lists in a live Blender session.
+on-center, fill edge-to-edge, and generate cut lists in a live Blender session.
 
 Configuration (env vars, read at startup):
     PRAXOVA_BRIDGE_HOST     default: 127.0.0.1
@@ -106,11 +106,11 @@ def list_objects(praxova_only: bool = True) -> dict:
     pass praxova_only=False to include everything in the scene.
 
     Each Praxova object includes 'name' (use as target_name for
-    duplicate_oc), 'category' ('LUMBER', 'SHEET', or 'PANEL'), 'label',
-    'orientation', 'location_m', 'dimensions_m', and category-specific
-    fields: nominal_size and length_in for lumber, sheet_material and
-    sheet_thickness_callout and sheet_size_key for sheets, panel_material
-    and panel_size_key for panels.
+    duplicate_oc or duplicate_e2e), 'category' ('LUMBER', 'SHEET', or
+    'PANEL'), 'label', 'orientation', 'location_m', 'dimensions_m', and
+    category-specific fields: nominal_size and length_in for lumber,
+    sheet_material and sheet_thickness_callout and sheet_size_key for
+    sheets, panel_material and panel_size_key for panels.
 
     Returns:
         count: number of objects in the result
@@ -303,6 +303,53 @@ def duplicate_oc(
     if target_name is not None:
         params["target_name"] = target_name
     return _call("duplicate_oc", params)
+
+
+@mcp.tool()
+def duplicate_e2e(
+    count: int,
+    direction: Literal["FORWARD", "BACK"] = "FORWARD",
+    target_name: str | None = None,
+) -> dict:
+    """Duplicate a sheet or panel edge-to-edge along its local Y axis.
+
+    The Fill operator. Pick a source sheet or panel, get N copies marching
+    along its local +Y (Forward) or -Y (Back) at edge-to-edge spacing.
+    Use to sheathe a wall or cover a roof in one call.
+
+    Spacing is automatic - it's the source's own width, retrieved from
+    the tag (48" for a 4x8 sheet, 36" for a metal panel). If you need a
+    specific span instead of a count, do `count = ceil(span_in / width)`
+    where width comes from list_materials (sheet_sizes.width_in or
+    panel_sizes.coverage_width_in). For custom-spaced arrays where the
+    step isn't the source's own width (e.g. studs at 16" OC), use
+    duplicate_oc with explicit spacing instead.
+
+    Lumber is refused with INVALID_PARAMS: a 2x4's local-Y is 3.5" (its
+    cross-section width), which isn't a meaningful fill spacing. The
+    error message redirects to duplicate_oc.
+
+    Args:
+        count: Number of new pieces to create (1-500).
+        direction: FORWARD = +local Y; BACK = -local Y. Default FORWARD.
+        target_name: Source to duplicate. Pass the 'name' returned by
+            add_sheet or add_panel. If omitted, uses Blender's currently
+            active object - which must still be a sheet or panel.
+
+    Returns:
+        source: name of the source object
+        width_in: the spacing that was actually used (so you can verify)
+        count: matches input
+        direction: matches input
+        new_objects: sorted list of new object names
+    """
+    params: dict = {
+        "count": count,
+        "direction": direction,
+    }
+    if target_name is not None:
+        params["target_name"] = target_name
+    return _call("duplicate_e2e", params)
 
 
 # ===========================================================================
