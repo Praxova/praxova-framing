@@ -8,11 +8,12 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.3.4 RPC surface end-to-end: ping (with addon_version
-and method_count assertions), scene info, material catalog, lumber /
-sheet / panel placement, on-center duplication, edge-to-edge fill,
-cut-list generation (verifying all three sections appear), and three
-error paths including the LUMBER refusal for duplicate_e2e.
+Covers the v0.3.4 RPC surface end-to-end (unchanged in v0.4.0 - bridge
+parity for frame_wall lands in v0.4.1): ping (with addon_version and
+method_count assertions), scene info, material catalog, lumber / sheet
+/ panel placement, on-center duplication, edge-to-edge fill, cut-list
+generation (verifying all three sections appear), and three error
+paths including the LUMBER refusal for duplicate_e2e.
 """
 
 from __future__ import annotations
@@ -68,8 +69,10 @@ def run(host: str, port: int) -> int:
         # v0.3.4: ping reports addon_version and method_count. Strict
         # assertion here catches version drift between the addon and
         # the test - exactly when a stale build is loaded in Blender.
-        assert r["addon_version"] == "0.3.4", (
-            f"expected addon_version 0.3.4, got {r['addon_version']!r}"
+        # v0.4.0: version bumped to 0.4.0, method count unchanged (the
+        # frame_wall MCP tool lands in v0.4.1).
+        assert r["addon_version"] == "0.4.0", (
+            f"expected addon_version 0.4.0, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 11, (
             f"expected 11 methods, got {r['method_count']}"
@@ -171,7 +174,10 @@ def run(host: str, port: int) -> int:
         for line in r["text"].splitlines():
             print(f"     {line}")
         # All three sections should appear when all three categories
-        # are populated.
+        # are populated. v0.4.0 split LUMBER into two subsections
+        # ("LUMBER - CUT LIST" and "LUMBER - ORDER SUMMARY"); the
+        # substring "LUMBER" still appears in both, so this assertion
+        # passes unchanged.
         assert "LUMBER" in r["text"]
         assert "SHEETS" in r["text"]
         assert "PANELS" in r["text"]

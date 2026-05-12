@@ -2,6 +2,42 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.4.0] — 2026-05-12
+
+### Added
+- **"Frame a Wall" composite operator** (`praxova.frame_wall`). The first composition operator in the add-on — everything before this placed or duplicated a single tagged piece. Reads scene-level parameters (length, height, stud size, OC spacing, top + bottom plate counts) and creates a new Empty parent at world origin with N studs and M plates parented underneath. Stud layout follows standard sheathing-aligned convention: end studs flush with wall ends, intermediate studs at OC measured from `x=0`, the final bay tight when wall length isn't a multiple of spacing — preserves 4'/8' sheathing seam alignment. v0.4 scope is a single isolated wall with plain end studs; corner stud treatments (three-stud, California corner) and door/window openings are deferred to later cycles.
+- **N-panel "Wall Framing" section** between Fill Edge-to-Edge and Cut List. Property inputs for all six wall parameters, a live preview line that mirrors the operator's validation chain (`Preview: 7 studs x 91.5", 3 plates x 96"` for valid inputs; `Height too short for 4.5" plate stack` or `Length < 3" needed for end studs` for invalid), and a `Frame Wall` button. The preview calls `templates.stud_positions` on every redraw so the count reflects the actual operator behavior including tight-final-bay handling, not a simplified estimate.
+- **Stock vs. cut length distinction on lumber tags.** New `stock_length_in` FloatProperty alongside `length_in`. A `frame_wall` stud at 91.5" cut from 8' stock stores `length_in=91.5, stock_length_in=96.0`. `length_in` remains the placement/geometry dimension; `stock_length_in` is what you actually purchase. `add_lumber` sets both to the same value since it places stock as-is, with no cut.
+- **Cut list two-subsection LUMBER output.** The LUMBER section now renders as:
+
+  ```
+  LUMBER — CUT LIST
+        3  x  2x4x8 H
+        8  x  2x4x8 V  → cut to 91.5"
+
+  LUMBER — ORDER SUMMARY
+       11  x  2x4x8  (3 H, 8 V)
+  ```
+
+  CUT LIST is per-piece detail for the saw; ORDER SUMMARY aggregates by stock SKU across orientations — what you actually take to the lumberyard. Pieces where `length_in == stock_length_in` (no cut) appear in CUT LIST without the `→ cut to N"` annotation. SHEETS and PANELS sections are unchanged; neither has a cut-from-stock concept in v0.4.
+- **`templates.next_wall_name(existing_names)`** — pure helper picking the lowest unused `Wall_NN` name. Fills gaps when walls are deleted and re-created (`Wall_01` and `Wall_03` present → returns `Wall_02`), matching human expectation better than `max(N) + 1`.
+- **`templates.stud_positions(length_in, spacing_oc_in, stud_thickness_in)`** — pure helper returning left-edge x-coordinates following sheathing-aligned framing convention. A 96" wall at 16 OC with 1.5" thick studs returns 7 stud positions with centers at 0.75, 16, 32, 48, 64, 80, 95.25.
+- **`templates.select_stock_length_in(nominal, cut_length_in)`** — pure helper returning the smallest `LENGTHS_BY_TYPE[nominal]` stock that fits a cut. Raises `ValueError` for unknown nominal or for cuts longer than any available stock (e.g. a 200" 2x4 cut — max 2x4 stock is 16 ft = 192").
+- **Six new fields on `PraxovaSceneProps`** for the wall framing UI: `wall_length_in`, `wall_height_in`, `wall_nominal`, `wall_spacing_oc_in`, `wall_top_plate_count`, `wall_bottom_plate_count`. The `wall_nominal` enum items derive from `templates.LUMBER_TYPES` at class definition time so the dropdown stays in sync with the catalog.
+
+### Changed
+- **`PraxovaLumberProps.length_in`** is now `FloatProperty` (was `IntProperty`). Required for fractional inch values like 91.5" from `frame_wall` studs. Existing v0.3.x objects with integer values read back as floats with no data loss — Blender's property system stores values in a generic property bag, and int→float widening is implicit. Going the other direction (float→int) would lose precision; that's why we widened rather than narrowed.
+- **`stock_length_in` defaults to 0.0 for v0.3.x-era objects** that pre-date the field. The cut list's `_effective_stock_length_in` helper treats 0 as "no explicit stock, treat as equal to `length_in` (no cut)", matching v0.3.x behavior where `add_lumber` always placed stock as-is. Backward-compat by design rather than by data migration.
+- **Smoke test `addon_version` pin** "0.3.4" → "0.4.0". Method count stays at 11 — the `frame_wall` MCP tool lands in v0.4.1 per the "UI in vN, bridge parity in vN+1" cadence.
+- **README** Status line updated, new "Frame a Wall" bullet in *What it does*, `stock_length_in` added to the data-model table with the updated `length_in` description (cut vs stock), cut-list section documents the two-subsection LUMBER format, roadmap marks v0.4 done and adds an explicit v0.4.1 bridge-parity entry.
+
+### Architecture notes
+- **Composite operator separation of concerns.** `ops_frame.py` is a new module distinct from `ops_add.py` (single-piece placement) and `ops_duplicate.py` / `ops_fill.py` (single-axis arrays). The naming convention is `ops_<verb>.py` — add, duplicate, fill, frame, cutlist, units. Future cycles will add door/window openings and corner stud treatments in the same module.
+- **Pure-function helpers in `templates.py`.** The three new helpers have no `bpy.` references, so the math is reasonable about without Blender in the loop. They live in a new "Composite framing helpers (v0.4)" section between mesh construction and the v0.1 backward-compat aliases. Future composite operators will add their helpers in the same section. Promotion to a separate `helpers.py` module is deferred until that section earns its own file.
+- **Empty parent at world origin, children placed in world coordinates.** The wall Empty lands at `(0, 0, 0)` and each plate/stud is created with its world-coordinate `location` set explicitly. Then `child.parent = empty` happens after placement. Because the parent is at origin, the child's local location equals its world location — no `matrix_parent_inverse` fiddling required. The user transforms the Empty afterward to position the wall in the larger model; children follow.
+- **Mesh namespace partitioned by operator.** `add_lumber` meshes use `praxova_mesh_<label>` (e.g. `praxova_mesh_2x4x8_V`); `frame_wall` meshes use `praxova_mesh_wall_<role>_<nominal>_<length_in>` (e.g. `praxova_mesh_wall_stud_2x4_91.5`). No collisions even when dimensions coincide. Two `frame_wall` calls with identical parameters share meshes naturally.
+- **`frame_wall` MCP tool deferred to v0.4.1** per the "UI parity in vN, bridge parity in vN+1" cadence established starting v0.3.2. v0.4.0 is strictly UI; v0.4.1 will add the bridge handler, the FastMCP tool, and the smoke-test extension that exercises it, bringing method count 11 → 12.
+
 ## [0.3.4] — 2026-05-11
 
 ### Added
