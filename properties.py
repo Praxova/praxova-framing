@@ -10,6 +10,7 @@ from math import ceil
 import bpy
 from bpy.props import (
     BoolProperty,
+    CollectionProperty,
     StringProperty,
     IntProperty,
     FloatProperty,
@@ -17,6 +18,33 @@ from bpy.props import (
 )
 
 from . import templates
+
+
+# ---------------------------------------------------------------------------
+# Shared enum-items source
+# ---------------------------------------------------------------------------
+
+# Module-level constant list of (key, label, description) tuples for the
+# lumber-type enums. Multiple PropertyGroups need to drive a dropdown over
+# the same LUMBER_TYPES catalog (PraxovaSceneProps.wall_nominal,
+# PraxovaWallOpening.header_nominal), so the items live here in one place.
+# Strings are stored at module scope so Blender's enum machinery doesn't
+# garbage-collect them between callbacks (the documented bpy.props pitfall
+# with dynamic items callbacks).
+_LUMBER_TYPE_ITEMS: list[tuple[str, str, str]] = [
+    (nominal, nominal, f"{nominal} dimensional lumber")
+    for nominal in templates.LUMBER_TYPES
+]
+
+
+def _lumber_type_items_callback(self, context):
+    """Items callback for lumber-type EnumProperty fields.
+
+    Used by PraxovaSceneProps.wall_nominal and PraxovaWallOpening.header_nominal
+    so both dropdowns stay in sync with templates.LUMBER_TYPES via the single
+    module-level _LUMBER_TYPE_ITEMS list.
+    """
+    return _LUMBER_TYPE_ITEMS
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +188,81 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
 
 
 # ---------------------------------------------------------------------------
+# Wall opening (v0.5)
+# ---------------------------------------------------------------------------
+
+class PraxovaWallOpening(bpy.types.PropertyGroup):
+    """One door or window opening within a wall framed by frame_wall.
+
+    Held in a CollectionProperty on PraxovaSceneProps. The frame_wall
+    operator reads the collection and places king studs, jacks, headers,
+    rough sills (windows), and cripples around each opening.
+
+    Geometry convention: all dimensions and offsets are in inches, with
+    x_offset_in measured from the wall's left edge (x=0) to the left edge
+    of the rough opening, and sill_height_in measured from the bottom of
+    the bottom plate stack (z=0 of the wall).
+    """
+
+    opening_type: EnumProperty(  # noqa: F821
+        name="Opening Type",
+        items=[
+            ('DOOR',   "Door",   "Door opening - RO starts at bottom plate"),
+            ('WINDOW', "Window", "Window opening - rough sill at sill_height_in"),
+        ],
+        default='DOOR',
+    )
+    x_offset_in: FloatProperty(  # noqa: F821
+        name="X Offset (in)",
+        description="Distance from wall left edge to left edge of rough opening",
+        min=0.0,
+        default=0.0,
+        unit='LENGTH',
+    )
+    ro_width_in: FloatProperty(  # noqa: F821
+        name="RO Width (in)",
+        min=1.0,
+        default=38.0,
+        unit='LENGTH',
+    )
+    ro_height_in: FloatProperty(  # noqa: F821
+        name="RO Height (in)",
+        min=1.0,
+        default=82.0,
+        unit='LENGTH',
+        description=(
+            "Clear opening height between rough sill top (or bottom "
+            "plate) and header bottom"
+        ),
+    )
+    sill_height_in: FloatProperty(  # noqa: F821
+        name="Sill Height (in)",
+        min=0.0,
+        default=36.0,
+        unit='LENGTH',
+        description=(
+            "For windows: z-coord of rough sill top, measured from "
+            "bottom of bottom plate. Ignored for doors."
+        ),
+    )
+    header_nominal: EnumProperty(  # noqa: F821
+        name="Header Size",
+        items=_lumber_type_items_callback,
+        default='2x4',
+        description=(
+            "Header lumber size. Defaults to wall nominal; upsize for "
+            "real load spans per IRC R602.7."
+        ),
+    )
+    jack_count: IntProperty(  # noqa: F821
+        name="Jacks Per Side",
+        min=1,
+        max=3,
+        default=1,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scene state
 # ---------------------------------------------------------------------------
 
@@ -248,17 +351,16 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
         soft_max=240.0,  # 20 ft soft cap (high-ceiling great room)
         precision=2,
     )
-    # wall_nominal items are derived from templates.LUMBER_TYPES at class
-    # definition time, so the dropdown stays in sync with the catalog. The
-    # dict's small-to-large insertion order is preserved (Python 3.7+),
+    # wall_nominal items are sourced from the module-level
+    # _lumber_type_items_callback so the dropdown stays in sync with the
+    # templates.LUMBER_TYPES catalog. The same callback feeds
+    # PraxovaWallOpening.header_nominal (v0.5) - one source of truth.
+    # The dict's small-to-large insertion order is preserved (Python 3.7+),
     # matching the existing Add menu order.
     wall_nominal: EnumProperty(  # noqa: F821
         name="Stud Size",
         description="Dimensional lumber size used for studs and plates",
-        items=[
-            (nominal, nominal, f"{nominal} dimensional lumber")
-            for nominal in templates.LUMBER_TYPES
-        ],
+        items=_lumber_type_items_callback,
         default='2x4',
     )
     wall_spacing_oc_in: FloatProperty(  # noqa: F821
@@ -282,6 +384,24 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
         default=1,
         min=1,
         max=4,
+    )
+
+    # --- Wall openings (v0.5) ---
+    # CollectionProperty of PraxovaWallOpening — each entry describes one
+    # door or window opening within the wall. The frame_wall operator
+    # iterates this list and places king studs, jacks, headers, rough
+    # sills, and cripples per the geometry of each opening. The active
+    # index drives the N-panel's UIList selection so the detail panel
+    # below the list shows the highlighted opening's fields. Because
+    # CollectionProperty(type=...) references PraxovaWallOpening, that
+    # class MUST register before this one in __init__.register().
+    wall_openings: CollectionProperty(  # noqa: F821
+        type=PraxovaWallOpening,
+        name="Wall Openings",
+    )
+    wall_openings_active: IntProperty(  # noqa: F821
+        name="Active Opening",
+        default=0,
     )
 
     # --- v0.3: MCP bridge ---

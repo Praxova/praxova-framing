@@ -39,7 +39,10 @@ def register():
 
     static_classes = [
         # Property groups MUST register before anything that references them.
+        # PraxovaWallOpening must register before PraxovaSceneProps because
+        # PraxovaSceneProps.wall_openings is a CollectionProperty of it (v0.5).
         properties.PraxovaLumberProps,
+        properties.PraxovaWallOpening,
         properties.PraxovaSceneProps,
         # Operators.
         ops_add.PRAXOVA_OT_add_lumber,
