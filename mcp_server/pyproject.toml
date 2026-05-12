@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "praxova-framing-mcp"
-version = "0.3.4"
-description = "MCP server fronting the Praxova Framing Blender add-on - drive lumber, sheets, panels, OC duplication, fill, and cut-list generation from an LLM agent"
+version = "0.4.1"
+description = "MCP server fronting the Praxova Framing Blender add-on - drive lumber, sheets, panels, OC duplication, fill, wall framing, and cut-list generation from an LLM agent"
 readme = "README.md"
 authors = [{ name = "Alton Lord", email = "adlord@gmail.com" }]
 license = { text = "GPL-2.0-or-later" }

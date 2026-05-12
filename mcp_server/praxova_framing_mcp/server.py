@@ -2,7 +2,8 @@
 
 Exposes the in-Blender bridge as a set of MCP tools so an LLM client (Claude
 Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
-on-center, fill edge-to-edge, and generate cut lists in a live Blender session.
+on-center, fill edge-to-edge, frame a wall (v0.4.1), and generate cut lists
+in a live Blender session.
 
 Configuration (env vars, read at startup):
     PRAXOVA_BRIDGE_HOST     default: 127.0.0.1
@@ -353,6 +354,103 @@ def duplicate_e2e(
 
 
 # ===========================================================================
+# Composite framing
+# ===========================================================================
+
+@mcp.tool()
+def frame_wall(
+    length_in: float,
+    height_in: float,
+    nominal: Literal[
+        "1x2", "2x3", "2x4", "2x6", "2x8", "2x10", "2x12",
+        "4x4", "4x6", "6x6",
+    ] = "2x4",
+    spacing_oc_in: float = 16.0,
+    top_plate_count: int = 2,
+    bottom_plate_count: int = 1,
+    location_m: list[float] | None = None,
+) -> dict:
+    """Frame a single wall - plates + studs + Empty parent.
+
+    The first composite operator on the bridge: builds top plates,
+    bottom plates, and studs for a single isolated wall, parented to a
+    new Empty for one-handle transform. Sheathing-aligned stud layout:
+    end studs flush with wall ends, intermediate studs at on-center
+    spacing measured from x=0, the final bay tight when length isn't a
+    multiple of spacing. The flush-end convention preserves 4'/8'
+    sheathing seam alignment.
+
+    Geometry conventions:
+        +X = wall length, +Y = wall thickness, +Z = wall height.
+        The Empty parent lands at world (0, 0, 0) by default; pass
+        location_m to place it elsewhere. Children stay parented and
+        follow the Empty - no per-child updates needed.
+
+    Stock vs cut length: studs are cut down from the smallest stock
+    that fits. For an 8' wall with 1 bottom + 2 top plates of 2x4, the
+    studs are 91.5" cut from 96" (8 ft) stock. Plates run the full wall
+    length from the same nominal's stock. The returned stud_stock_in
+    and plate_stock_in tell you what to order from the lumberyard.
+
+    Args:
+        length_in: Wall length along +X in inches. Must be > 0 and at
+            least 2 × stud thickness so end studs don't overlap.
+        height_in: Wall height (floor to top of top plate) in inches.
+            Must leave room for at least some stud after the plate
+            stack: height_in > (top_plate_count + bottom_plate_count)
+            × thickness.
+        nominal: Stud size from LUMBER_TYPES. All studs and plates are
+            this same dimensional lumber. Default 2x4 (US residential
+            standard). v0.4 single-wall scope assumes one nominal per
+            wall - mixing sizes (e.g. 2x4 studs with 2x6 plates) is
+            deferred to v0.5 openings or later.
+        spacing_oc_in: On-center stud spacing in inches. Default 16.0
+            (residential standard). 24" is also common (commercial,
+            advanced framing).
+        top_plate_count: Number of top plates. Default 2 (US residential
+            load-bearing standard); 1 for a non-load-bearing partition
+            wall. Range 1-4.
+        bottom_plate_count: Number of bottom plates. Default 1
+            (standard). Range 1-4.
+        location_m: Optional [x, y, z] world-space meters for the Empty
+            parent. If omitted, the Empty lands at world origin and you
+            transform it in Blender (or via a separate API call)
+            afterward.
+
+    Returns:
+        wall_name: name of the new Empty parent (e.g. "Wall_03")
+        length_in, height_in, nominal, spacing_oc_in, top_plate_count,
+            bottom_plate_count: echoes of input with defaults filled in
+        n_studs: number of studs placed (computed via the same
+            sheathing-aligned algorithm the operator uses)
+        n_plates: top_plate_count + bottom_plate_count
+        stud_length_in: cut length of each stud (height - plate stack)
+        stud_stock_in: purchased stock the studs are cut from (smallest
+            standard length that fits)
+        plate_stock_in: purchased stock the plates are cut from (typical
+            8' / 12' / 16' wall lengths have plates running full stock)
+        new_objects: sorted list of every new object name (the Empty
+            plus all plate and stud children)
+
+    Raises INVALID_PARAMS (-32602) for impossible geometry: wall too
+    short for two end studs, wall too short for the plate stack, or
+    stud/plate length exceeding any available stock for the chosen
+    nominal.
+    """
+    params: dict = {
+        "length_in": length_in,
+        "height_in": height_in,
+        "nominal": nominal,
+        "spacing_oc_in": spacing_oc_in,
+        "top_plate_count": top_plate_count,
+        "bottom_plate_count": bottom_plate_count,
+    }
+    if location_m is not None:
+        params["location_m"] = location_m
+    return _call("frame_wall", params)
+
+
+# ===========================================================================
 # Cut list
 # ===========================================================================
 
@@ -368,7 +466,12 @@ def generate_cutlist() -> dict:
 
     The body has up to three sections - LUMBER, SHEETS, PANELS - each
     listed alphabetically by canonical label, with subtotals when more
-    than one section is populated, plus a grand total.
+    than one section is populated, plus a grand total. As of v0.4 the
+    LUMBER section renders as two subsections: CUT LIST (per-piece with
+    a 'cut to N"' annotation when a piece is shorter than its stock) and
+    ORDER SUMMARY (aggregated by stock SKU across orientations, with an
+    orientation parenthetical for traceability) - what you take to the
+    lumberyard.
 
     Errors with code -32003 if no Praxova-tagged material exists in the
     scene (place lumber, sheets, or panels first).

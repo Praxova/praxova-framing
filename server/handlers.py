@@ -20,6 +20,7 @@ from mathutils import Vector
 
 from . import bridge
 from .. import templates
+from .. import __version__
 from ..ops_cutlist import TEXT_DATABLOCK_NAME, _disk_path_for_current_blend
 
 
@@ -522,6 +523,177 @@ def duplicate_e2e(params: dict) -> dict:
 
 
 # ===========================================================================
+# Composite framing (v0.4.1 bridge parity for v0.4 frame_wall operator)
+# ===========================================================================
+
+def frame_wall(params: dict) -> dict:
+    """Frame a single wall - plates + studs + Empty parent.
+
+    Required:
+        length_in (number > 0): wall length along +X in inches.
+        height_in (number > 0): wall height (floor to top of top plate)
+            in inches.
+    Optional:
+        nominal (str, default "2x4"): stud size from LUMBER_TYPES.
+        spacing_oc_in (number > 0, default 16.0): on-center stud spacing
+            in inches (typically 16 for residential, 24 for some commercial).
+        top_plate_count (int 1-4, default 2): 2 for load-bearing (US
+            residential standard), 1 for non-load-bearing partition.
+        bottom_plate_count (int 1-4, default 1): typically 1.
+        location_m (3-element [x,y,z] list, default [0, 0, 0]): world
+            location for the new wall Empty parent. Children's local
+            positions stay wall-relative.
+
+    Returns:
+        wall_name (the new Empty), echoes of all input params, n_studs
+        (computed from length / spacing / thickness), n_plates
+        (top + bottom), stud_length_in (cut length after the plate stack),
+        stud_stock_in (smallest stock the studs are cut from),
+        plate_stock_in (same for plates), new_objects (sorted Empty + all
+        child names).
+
+    Pre-validates the same cross-field constraints the operator does
+    (known nominal, length >= 2*thickness, stud length positive, stock
+    fits within LENGTHS_BY_TYPE) so the LLM gets clean INVALID_PARAMS
+    error codes rather than the operator's generic APP_OPERATOR_FAILED.
+    The operator's internal validation is still defense in depth.
+    """
+    # --- Required ---
+    length_in = _require(params, "length_in", (int, float))
+    if isinstance(length_in, bool) or length_in <= 0:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS, "length_in must be > 0",
+        )
+    length_in = float(length_in)
+
+    height_in = _require(params, "height_in", (int, float))
+    if isinstance(height_in, bool) or height_in <= 0:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS, "height_in must be > 0",
+        )
+    height_in = float(height_in)
+
+    # --- Optional ---
+    nominal = _optional(
+        params, "nominal", str, default="2x4",
+        choices=tuple(templates.LUMBER_TYPES),
+    )
+
+    spacing_oc_in = _optional(
+        params, "spacing_oc_in", (int, float), default=16.0,
+    )
+    if isinstance(spacing_oc_in, bool) or spacing_oc_in <= 0:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS, "spacing_oc_in must be > 0",
+        )
+    spacing_oc_in = float(spacing_oc_in)
+
+    top_plate_count = _optional(
+        params, "top_plate_count", int, default=2,
+    )
+    if top_plate_count < 1 or top_plate_count > 4:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            "top_plate_count must be between 1 and 4",
+        )
+
+    bottom_plate_count = _optional(
+        params, "bottom_plate_count", int, default=1,
+    )
+    if bottom_plate_count < 1 or bottom_plate_count > 4:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            "bottom_plate_count must be between 1 and 4",
+        )
+
+    location = _location_param(params)
+
+    # --- Cross-field validation (mirrors ops_frame.py) ---
+    # Pre-validating here means INVALID_PARAMS instead of
+    # APP_OPERATOR_FAILED when the wall is geometrically impossible -
+    # cleaner error codes for the LLM. Operator still validates as
+    # defense in depth.
+    thickness_in, _width_in = templates.LUMBER_TYPES[nominal]
+
+    if length_in < 2 * thickness_in:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"length_in={length_in:g} too short for two end studs of "
+            f"{thickness_in:g}\" thickness ({nominal})",
+        )
+
+    plate_total_in = (top_plate_count + bottom_plate_count) * thickness_in
+    stud_length_in = height_in - plate_total_in
+    if stud_length_in <= 0:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"height_in={height_in:g} too short for "
+            f"{top_plate_count + bottom_plate_count} plates of "
+            f"{thickness_in:g}\" thickness ({plate_total_in:g}\" total)",
+        )
+
+    try:
+        plate_stock_in = templates.select_stock_length_in(nominal, length_in)
+        stud_stock_in = templates.select_stock_length_in(
+            nominal, stud_length_in,
+        )
+    except ValueError as e:
+        raise bridge.RPCError(bridge.INVALID_PARAMS, str(e))
+
+    # --- Configure scene PropertyGroup and call the operator ---
+    scene = bpy.context.scene
+    sp = scene.praxova_framing
+    sp.wall_length_in = length_in
+    sp.wall_height_in = height_in
+    sp.wall_nominal = nominal
+    sp.wall_spacing_oc_in = spacing_oc_in
+    sp.wall_top_plate_count = top_plate_count
+    sp.wall_bottom_plate_count = bottom_plate_count
+
+    before = {o.name for o in scene.objects}
+    result = bpy.ops.praxova.frame_wall('EXEC_DEFAULT')
+    _check_op_result(result, "praxova.frame_wall")
+    after = {o.name for o in scene.objects}
+    new_names = sorted(after - before)
+
+    # The operator sets the new Empty as the active object. Reposition
+    # it if location_m was passed; children stay parented so they follow
+    # the Empty without needing per-child updates.
+    empty = bpy.context.view_layer.objects.active
+    if empty is None:
+        raise bridge.RPCError(
+            bridge.INTERNAL_ERROR,
+            "frame_wall finished but produced no active object",
+        )
+    if location is not None:
+        empty.location = location
+
+    # Stud count is deterministic from inputs - compute via
+    # stud_positions rather than filtering child names by substring,
+    # which would be fragile if the naming convention changes.
+    n_studs = len(
+        templates.stud_positions(length_in, spacing_oc_in, thickness_in),
+    )
+    n_plates = top_plate_count + bottom_plate_count
+
+    return {
+        "wall_name": empty.name,
+        "length_in": length_in,
+        "height_in": height_in,
+        "nominal": nominal,
+        "spacing_oc_in": spacing_oc_in,
+        "top_plate_count": top_plate_count,
+        "bottom_plate_count": bottom_plate_count,
+        "n_studs": n_studs,
+        "n_plates": n_plates,
+        "stud_length_in": stud_length_in,
+        "stud_stock_in": stud_stock_in,
+        "plate_stock_in": plate_stock_in,
+        "new_objects": new_names,
+    }
+
+
+# ===========================================================================
 # Cut list
 # ===========================================================================
 
@@ -567,16 +739,18 @@ def set_imperial_units(params: dict) -> dict:
 def ping(params: dict) -> dict:
     """Liveness probe. Useful for the MCP server to verify connectivity.
 
-    The reported addon_version tracks the manifest version (blender_manifest.toml)
-    and is bumped on every release including UI-only cycles. The smoke test
-    asserts against this value to catch "stale build loaded in Blender".
-    A planned cleanup in v0.4.1 will move this to a single Python __version__
-    constant imported from the package __init__, so the bridge code no longer
-    carries its own copy.
+    The reported addon_version is imported from the package's __version__
+    constant in __init__.py, bumped on every release including UI-only
+    cycles. blender_manifest.toml is the canonical version for Blender's
+    extension loader (read at install time, not by Python); __version__
+    in __init__.py is the canonical version for Python code. The two must
+    be bumped together each release but Python callers have a single
+    source of truth - the late-cycle bug from v0.4.0 (bridge hardcoded
+    its own "0.3.4" while the manifest moved to "0.4.0") can't recur.
     """
     return {
         "ok": True,
-        "addon_version": "0.4.0",
+        "addon_version": __version__,
         "method_count": len(METHODS),
     }
 
@@ -595,6 +769,7 @@ METHODS = {
     "add_panel": add_panel,
     "duplicate_oc": duplicate_oc,
     "duplicate_e2e": duplicate_e2e,
+    "frame_wall": frame_wall,
     "generate_cutlist": generate_cutlist,
     "set_imperial_units": set_imperial_units,
 }

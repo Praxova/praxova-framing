@@ -8,12 +8,13 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the v0.3.4 RPC surface end-to-end (unchanged in v0.4.0 - bridge
-parity for frame_wall lands in v0.4.1): ping (with addon_version and
-method_count assertions), scene info, material catalog, lumber / sheet
-/ panel placement, on-center duplication, edge-to-edge fill, cut-list
-generation (verifying all three sections appear), and three error
-paths including the LUMBER refusal for duplicate_e2e.
+Covers the full v0.4.1 RPC surface end-to-end (12 methods): ping (with
+addon_version and method_count assertions), scene info, material
+catalog, lumber / sheet / panel placement, on-center duplication,
+edge-to-edge fill, wall framing (v0.4.1 - new), cut-list generation
+(verifying three sections plus the v0.4 'cut to N"' annotation on
+frame_wall studs), and three error paths including the LUMBER refusal
+for duplicate_e2e.
 """
 
 from __future__ import annotations
@@ -69,13 +70,14 @@ def run(host: str, port: int) -> int:
         # v0.3.4: ping reports addon_version and method_count. Strict
         # assertion here catches version drift between the addon and
         # the test - exactly when a stale build is loaded in Blender.
-        # v0.4.0: version bumped to 0.4.0, method count unchanged (the
-        # frame_wall MCP tool lands in v0.4.1).
-        assert r["addon_version"] == "0.4.0", (
-            f"expected addon_version 0.4.0, got {r['addon_version']!r}"
+        # v0.4.0: version bumped to 0.4.0. v0.4.1: method_count 11 -> 12
+        # for the new frame_wall handler; addon_version 0.4.0 -> 0.4.1
+        # alongside the manifest and __init__.py __version__.
+        assert r["addon_version"] == "0.4.1", (
+            f"expected addon_version 0.4.1, got {r['addon_version']!r}"
         )
-        assert r["method_count"] == 11, (
-            f"expected 11 methods, got {r['method_count']}"
+        assert r["method_count"] == 12, (
+            f"expected 12 methods, got {r['method_count']}"
         )
 
         print("\n[2] get_scene_info")
@@ -162,13 +164,58 @@ def run(host: str, port: int) -> int:
         assert r["direction"] == "FORWARD"
         assert len(r["new_objects"]) == 3
 
-        print("\n[9] list_objects (praxova only)")
+        print("\n[9] frame_wall 48\"x96\" 2x4 at 24 OC (defaults for plates)")
+        # v0.4.1: bridge parity for the v0.4 frame_wall operator. Small
+        # test wall (48" x 96") at 24 OC keeps the math easy to verify:
+        # 3 stud positions at left-edge x = 0.0, 23.25, 46.5 (centers
+        # at 0.75, 24, 47.25), stud length 91.5" (96 - 3*1.5 plate stack),
+        # both plates and studs cut from 8' (96") 2x4 stock.
+        r = cli.call("frame_wall", {
+            "length_in": 48.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 24.0,
+            # default top_plate_count=2, bottom_plate_count=1
+        })
+        print(f"  -> {r}")
+        assert r["wall_name"].startswith("Wall_"), (
+            f"wall name should match Wall_NN, got {r['wall_name']!r}"
+        )
+        assert r["nominal"] == "2x4"
+        assert r["n_studs"] == 3, (
+            f"48\" wall at 24 OC should produce 3 studs, got {r['n_studs']}"
+        )
+        assert r["n_plates"] == 3, (
+            f"2 top + 1 bottom = 3 plates, got {r['n_plates']}"
+        )
+        assert r["stud_length_in"] == 91.5, (
+            f"stud_length_in should be 91.5 (96 - 4.5 plate stack), got {r['stud_length_in']}"
+        )
+        assert r["stud_stock_in"] == 96.0, (
+            f"smallest 2x4 stock fitting 91.5 is 8' = 96\", got {r['stud_stock_in']}"
+        )
+        assert r["plate_stock_in"] == 96.0, (
+            f"smallest 2x4 stock fitting 48 is 8' = 96\", got {r['plate_stock_in']}"
+        )
+        # new_objects: 1 Empty parent + 3 studs + 3 plates = 7 names.
+        # The Empty itself is included because the before/after diff
+        # over scene.objects catches every new scene member.
+        assert len(r["new_objects"]) == 7, (
+            f"expected 7 new objects (1 Empty + 3 studs + 3 plates), "
+            f"got {len(r['new_objects'])}: {r['new_objects']}"
+        )
+
+        print("\n[10] list_objects (praxova only)")
         r = cli.call("list_objects")
         print(f"  -> {r['count']} tagged objects")
-        # 1 stud + 4 OC dupes + 1 sheet + 1 panel + 3 fill dupes = 10
-        assert r["count"] == 10
+        # 1 stud + 4 OC dupes + 1 sheet + 1 panel + 3 fill dupes
+        # + 3 frame_wall studs + 3 frame_wall plates = 16.
+        # The frame_wall Empty parent is NOT counted - praxova_only=True
+        # filters to tag.is_lumber, which the Empty doesn't carry (only
+        # the plates and studs do).
+        assert r["count"] == 16
 
-        print("\n[10] generate_cutlist")
+        print("\n[11] generate_cutlist")
         r = cli.call("generate_cutlist")
         print("  -> cutlist body:")
         for line in r["text"].splitlines():
@@ -181,6 +228,14 @@ def run(host: str, port: int) -> int:
         assert "LUMBER" in r["text"]
         assert "SHEETS" in r["text"]
         assert "PANELS" in r["text"]
+        # v0.4.1: the frame_wall studs (cut 91.5" from 96" stock) should
+        # appear in the CUT LIST subsection with the "cut to N\""
+        # annotation. Pins the stock-vs-cut distinction in place against
+        # future regressions to the cutlist rendering.
+        assert "cut to 91.5" in r["text"], (
+            "expected 'cut to 91.5\"' annotation for frame_wall studs in "
+            "the LUMBER - CUT LIST subsection"
+        )
         # The fill operator should have brought the panel count from 1 to 4.
         # Format from ops_cutlist: "  <qty>  x  <label>" with the label
         # at the end. Look for the count line for the panel label.
@@ -194,13 +249,13 @@ def run(host: str, port: int) -> int:
             f"expected 4 panels in cut list, got line: {panel_line!r}"
         )
 
-        print("\n[11] error path: unknown lumber")
+        print("\n[12] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[12] error path: duplicate_e2e on lumber (should refuse)")
+        print("\n[13] error path: duplicate_e2e on lumber (should refuse)")
         # The LUMBER refusal is enforced in the bridge handler so the
         # error carries a clean INVALID_PARAMS code instead of the
         # operator's APP_OPERATOR_FAILED.
@@ -219,7 +274,7 @@ def run(host: str, port: int) -> int:
                 f"expected error to mention lumber, got: {err_text!r}"
             )
 
-        print("\n[13] error path: bad method")
+        print("\n[14] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:
