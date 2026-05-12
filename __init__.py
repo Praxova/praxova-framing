@@ -9,6 +9,13 @@ a cut-list generator, and (v0.3) a localhost JSON-RPC bridge so an
 external MCP server can drive the same operators from an LLM agent.
 """
 
+# PEP 8: module-level dunders go after the docstring and before any imports
+# (except __future__). This is the canonical version for Python code -
+# imported by server/handlers.py's ping() so the bridge doesn't carry its
+# own copy. blender_manifest.toml is the canonical version for Blender's
+# extension loader; the two must be bumped together each release.
+__version__ = "0.4.0"
+
 import bpy
 
 from . import (

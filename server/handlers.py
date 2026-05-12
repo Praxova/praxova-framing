@@ -20,6 +20,7 @@ from mathutils import Vector
 
 from . import bridge
 from .. import templates
+from .. import __version__
 from ..ops_cutlist import TEXT_DATABLOCK_NAME, _disk_path_for_current_blend
 
 
@@ -567,16 +568,18 @@ def set_imperial_units(params: dict) -> dict:
 def ping(params: dict) -> dict:
     """Liveness probe. Useful for the MCP server to verify connectivity.
 
-    The reported addon_version tracks the manifest version (blender_manifest.toml)
-    and is bumped on every release including UI-only cycles. The smoke test
-    asserts against this value to catch "stale build loaded in Blender".
-    A planned cleanup in v0.4.1 will move this to a single Python __version__
-    constant imported from the package __init__, so the bridge code no longer
-    carries its own copy.
+    The reported addon_version is imported from the package's __version__
+    constant in __init__.py, bumped on every release including UI-only
+    cycles. blender_manifest.toml is the canonical version for Blender's
+    extension loader (read at install time, not by Python); __version__
+    in __init__.py is the canonical version for Python code. The two must
+    be bumped together each release but Python callers have a single
+    source of truth - the late-cycle bug from v0.4.0 (bridge hardcoded
+    its own "0.3.4" while the manifest moved to "0.4.0") can't recur.
     """
     return {
         "ok": True,
-        "addon_version": "0.4.0",
+        "addon_version": __version__,
         "method_count": len(METHODS),
     }
 
