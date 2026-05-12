@@ -353,6 +353,319 @@ def select_stock_length_in(nominal: str, cut_length_in: float) -> float:
     )
 
 
+# ===========================================================================
+# Opening helpers (v0.5)
+# ===========================================================================
+
+# Pure functions consumed by ops_frame.PRAXOVA_OT_frame_wall when the
+# scene has one or more wall openings. Same separation-of-concerns as the
+# v0.4 composite helpers above: no bpy. references, so the math can be
+# reasoned about (and unit-tested) without Blender in the loop. The
+# operator does the bpy. plumbing — mesh construction, tagging, parenting.
+#
+# Geometry conventions (single wall, origin at z=0 = bottom of wall, x=0
+# = wall left edge, y=0 = wall front face):
+#   - Plate / stud / rough-sill thickness is LUMBER_TYPES[wall_nominal][0]
+#     (1.5" for 2x walls — the design's implicit target).
+#   - Header laid on edge: vertical extent = LUMBER_TYPES[header_nominal][1]
+#     (the wider cross-section dim — 3.5" for 2x4, 5.5" for 2x6, etc.).
+#   - Header Y stackup hardcoded to 1.5 + 0.5 + 1.5 = 3.5" flush to y=0
+#     regardless of wall depth, matching the design's "(2) 2x + 1/2" ply
+#     spacer" residential convention. For deeper walls the gap is on +Y.
+
+# Spacer plywood thickness in inches. 1/2" plywood scrap from sheathing
+# offcuts is the residential framing convention for header build-up.
+_HEADER_SPACER_THICKNESS_IN = 0.5
+
+# Minimum cripple length below which the zone is suppressed entirely
+# (avoids placing absurdly short pieces).
+_MIN_CRIPPLE_LENGTH_IN = 1.5
+
+
+def recommend_jack_count(ro_width_in: float) -> int:
+    """Jack stud count per side for a rough opening.
+
+    Returns 2 for openings >= 72" (6'), else 1. IRC R602.7 convention for
+    typical 2x4/2x6 walls with conventional loading. The frame_wall
+    operator uses this as the default when a new opening is added; the
+    user can override per-opening via the UIList.
+    """
+    return 2 if ro_width_in >= 72.0 else 1
+
+
+def opening_framing_layout(
+    opening,
+    wall_nominal: str,
+    wall_height_in: float,
+    top_plate_count: int,
+    bottom_plate_count: int,
+) -> dict:
+    """Compute all x/z coordinates and cut lengths for one opening.
+
+    Pure geometry: takes an opening descriptor (anything with the seven
+    PraxovaWallOpening fields — opening_type, x_offset_in, ro_width_in,
+    ro_height_in, sill_height_in, header_nominal, jack_count) plus the
+    wall's scalar parameters, and returns a dict with everything the
+    operator needs to place king studs, jacks, header members, header
+    spacer, optional rough sill, and optional cripples.
+
+    The returned dict's key set matches the design doc's "Opening
+    framing layout" table. For doors (opening_type == 'DOOR'),
+    rough_sill_* and cripple_bottom_zone tuple entries are None. For
+    cripple zones whose vertical length falls below the minimum
+    (_MIN_CRIPPLE_LENGTH_IN), the corresponding tuple is (None, None).
+
+    Args:
+        opening: duck-typed opening with seven PraxovaWallOpening fields.
+        wall_nominal: lumber size key for the wall (e.g. "2x4").
+        wall_height_in: total wall height in inches (floor to top of
+            top plate stack).
+        top_plate_count: number of top plates.
+        bottom_plate_count: number of bottom plates.
+
+    Returns:
+        Dict per the design doc's geometry table. All lengths and coords
+        are in inches.
+    """
+    t = LUMBER_TYPES[wall_nominal][0]
+    header_member_z_height = LUMBER_TYPES[opening.header_nominal][1]
+
+    opening_type = opening.opening_type
+    x_offset = float(opening.x_offset_in)
+    ro_width = float(opening.ro_width_in)
+    ro_height = float(opening.ro_height_in)
+    jack_count = int(opening.jack_count)
+    # sill_height is wall-relative; for doors it's pinned to 0 regardless
+    # of the field value (the design says it's ignored for doors).
+    sill_height = (
+        float(opening.sill_height_in) if opening_type == 'WINDOW' else 0.0
+    )
+
+    # --- Z coords (origin at wall bottom) ---
+    z_bottom_of_top_plates = wall_height_in - top_plate_count * t
+    z_top_of_bottom_plates = bottom_plate_count * t
+    z_header_bottom = sill_height + ro_height
+    z_header_top = z_header_bottom + header_member_z_height
+
+    if opening_type == 'WINDOW':
+        z_rough_sill_top = sill_height
+        z_rough_sill_bottom = sill_height - t
+        rough_sill_x_start = x_offset
+        rough_sill_x_end = x_offset + ro_width
+    else:
+        z_rough_sill_top = None
+        z_rough_sill_bottom = None
+        rough_sill_x_start = None
+        rough_sill_x_end = None
+
+    # --- X coords (left to right): king | jacks | RO | jacks | king ---
+    king_left_x = x_offset - jack_count * t - t
+    jack_left_xs = [x_offset - i * t for i in range(1, jack_count + 1)]
+    jack_right_xs = [
+        x_offset + ro_width + i * t for i in range(0, jack_count)
+    ]
+    king_right_x = x_offset + ro_width + jack_count * t + t
+
+    # Header sits on the jacks: spans outer left jack left edge to outer
+    # right jack right edge.
+    header_x_start = x_offset - jack_count * t
+    header_x_end = x_offset + ro_width + jack_count * t
+    header_member_length_in = header_x_end - header_x_start
+
+    # Header Y stackup: member 1 at y=[0, 1.5], spacer at y=[1.5, 2.0],
+    # member 2 at y=[2.0, 3.5]. Hardcoded per the design.
+    spacer_y_start = t  # for 2x walls this is 1.5
+    spacer_y_end = spacer_y_start + _HEADER_SPACER_THICKNESS_IN
+
+    # --- Cripple zones ---
+    top_zone_length = z_bottom_of_top_plates - z_header_top
+    if top_zone_length >= _MIN_CRIPPLE_LENGTH_IN:
+        cripple_top_zone = (z_header_top, z_bottom_of_top_plates)
+    else:
+        cripple_top_zone = (None, None)
+
+    if opening_type == 'WINDOW':
+        bottom_zone_length = z_rough_sill_bottom - z_top_of_bottom_plates
+        if bottom_zone_length >= _MIN_CRIPPLE_LENGTH_IN:
+            cripple_bottom_zone = (z_top_of_bottom_plates, z_rough_sill_bottom)
+        else:
+            cripple_bottom_zone = (None, None)
+    else:
+        cripple_bottom_zone = (None, None)
+
+    # --- Cut lengths ---
+    # Kings span between top of bottom plates and bottom of top plates,
+    # same as regular wall studs (shared mesh).
+    king_length_in = wall_height_in - (top_plate_count + bottom_plate_count) * t
+    # Jacks reach from top of bottom plates up to header bottom.
+    jack_length_in = z_header_bottom - z_top_of_bottom_plates
+
+    return {
+        'king_left_x': king_left_x,
+        'king_right_x': king_right_x,
+        'jack_left_xs': jack_left_xs,
+        'jack_right_xs': jack_right_xs,
+        'header_x_start': header_x_start,
+        'header_x_end': header_x_end,
+        'header_z_top': z_header_top,
+        'header_z_bottom': z_header_bottom,
+        'header_member_length_in': header_member_length_in,
+        'spacer_y_start': spacer_y_start,
+        'spacer_y_end': spacer_y_end,
+        'rough_sill_x_start': rough_sill_x_start,
+        'rough_sill_x_end': rough_sill_x_end,
+        'rough_sill_z_top': z_rough_sill_top,
+        'rough_sill_z_bottom': z_rough_sill_bottom,
+        'king_length_in': king_length_in,
+        'jack_length_in': jack_length_in,
+        'cripple_top_zone': cripple_top_zone,
+        'cripple_bottom_zone': cripple_bottom_zone,
+    }
+
+
+def filter_studs_around_openings(
+    stud_positions: list[float],
+    nominal_thickness_in: float,
+    openings,
+    layout_per_opening: list[dict],
+) -> list[float]:
+    """Drop regular OC stud positions that collide with any king bracket.
+
+    A stud at left-edge x of thickness t collides with an opening's king
+    bracket [king_left_x, king_right_x] when the standard interval-
+    overlap test passes: (x + t > king_left_x) AND (x < king_right_x).
+    Returns the subset of stud_positions that don't collide with any
+    opening's king bracket.
+
+    The openings argument is accepted for interface parity with
+    validate_openings (call sites typically pass the same list) but
+    everything needed for the collision check is in layout_per_opening.
+
+    Args:
+        stud_positions: left-edge x-coords of regular OC studs.
+        nominal_thickness_in: stud thickness (e.g. 1.5 for 2x4).
+        openings: opening descriptors (parallel to layout_per_opening).
+        layout_per_opening: list of dicts from opening_framing_layout,
+            one per opening, in the same order as openings.
+
+    Returns:
+        Subset of stud_positions, in input order, that do not overlap
+        any opening's king bracket range.
+    """
+    del openings  # interface parity; unused inside this function
+    out: list[float] = []
+    for x in stud_positions:
+        x_right = x + nominal_thickness_in
+        collides = False
+        for layout in layout_per_opening:
+            if (
+                x_right > layout['king_left_x']
+                and x < layout['king_right_x']
+            ):
+                collides = True
+                break
+        if not collides:
+            out.append(x)
+    return out
+
+
+def validate_openings(
+    openings,
+    wall_length_in: float,
+    wall_height_in: float,
+    wall_nominal: str,
+    top_plate_count: int,
+    bottom_plate_count: int,
+) -> tuple[bool, str]:
+    """Cross-check the opening list against the wall's scalar params.
+
+    Returns (True, "") on success, or (False, error_message) on the
+    first failure. Error messages use 1-based opening indices ("Opening 2
+    overlaps Opening 1") matching the design doc and what the UI shows
+    in the live preview line.
+
+    Checks in order:
+      1. Each opening's king bracket is within [0, wall_length_in].
+      2. No two king brackets overlap (pairwise interval test).
+      3. Each opening's header top fits under the top plate stack.
+      4. For windows: rough sill bottom clears the bottom plate stack.
+    """
+    t = LUMBER_TYPES[wall_nominal][0]
+    z_top_plates_bottom = wall_height_in - top_plate_count * t
+    z_bottom_plates_top = bottom_plate_count * t
+
+    # Pre-compute per-opening king brackets so checks 1 and 2 can reuse them.
+    brackets: list[tuple[float, float]] = []
+    for op in openings:
+        jc = int(op.jack_count)
+        x_off = float(op.x_offset_in)
+        ro_w = float(op.ro_width_in)
+        kl = x_off - jc * t - t
+        kr = x_off + ro_w + jc * t + t
+        brackets.append((kl, kr))
+
+    # 1. Each opening within the wall.
+    for i, (kl, kr) in enumerate(brackets):
+        if kl < 0 or kr > wall_length_in:
+            return (False, f"Opening {i + 1} extends past wall edge")
+
+    # 2. No two king brackets overlap. Pairwise i<j; report higher index
+    #    as overlapping the lower.
+    n = len(brackets)
+    for i in range(n):
+        kl_i, kr_i = brackets[i]
+        for j in range(i + 1, n):
+            kl_j, kr_j = brackets[j]
+            if kr_j > kl_i and kl_j < kr_i:
+                return (
+                    False,
+                    f"Opening {j + 1} overlaps Opening {i + 1}",
+                )
+
+    # 3. Header top fits under top plates.
+    for i, op in enumerate(openings):
+        sill = (
+            float(op.sill_height_in) if op.opening_type == 'WINDOW' else 0.0
+        )
+        z_header_bottom = sill + float(op.ro_height_in)
+        z_header_top = z_header_bottom + LUMBER_TYPES[op.header_nominal][1]
+        if z_header_top > z_top_plates_bottom:
+            return (
+                False,
+                f"Opening {i + 1} too tall to fit under top plates",
+            )
+
+    # 4. Windows: rough sill bottom clears the bottom plate stack.
+    for i, op in enumerate(openings):
+        if op.opening_type != 'WINDOW':
+            continue
+        if float(op.sill_height_in) - t < z_bottom_plates_top:
+            return (
+                False,
+                f"Opening {i + 1} rough sill overlaps bottom plate stack",
+            )
+
+    return (True, "")
+
+
+def redistribute_openings_evenly(openings, wall_length_in: float) -> None:
+    """Reposition all openings to evenly-spaced layout.
+
+    Sets opening.x_offset_in = (wall_length × (i+1) / (n+1)) - (ro_width / 2)
+    for each opening i in 0..n-1 (where n = number of openings). Used by
+    add_door, add_window, and the explicit Distribute Evenly button.
+    Mutates the CollectionProperty in place. Not pure: writes to the
+    opening fields. Still has no bpy. calls — touches PropertyGroup
+    attributes only, like opening_framing_layout above.
+    """
+    n = len(openings)
+    if n == 0:
+        return
+    for i, opening in enumerate(openings):
+        center_x = wall_length_in * (i + 1) / (n + 1)
+        opening.x_offset_in = max(0.0, center_x - opening.ro_width_in / 2.0)
+
+
 # Backward-compatibility aliases for v0.1 callers.
 make_lumber_mesh = make_box_mesh
 cutlist_label = lumber_cutlist_label
