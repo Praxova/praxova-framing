@@ -8,13 +8,15 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.4.1 RPC surface end-to-end (12 methods): ping (with
+Covers the full v0.5.0 RPC surface end-to-end (12 methods): ping (with
 addon_version and method_count assertions), scene info, material
 catalog, lumber / sheet / panel placement, on-center duplication,
-edge-to-edge fill, wall framing (v0.4.1 - new), cut-list generation
-(verifying three sections plus the v0.4 'cut to N"' annotation on
-frame_wall studs), and three error paths including the LUMBER refusal
-for duplicate_e2e.
+edge-to-edge fill, wall framing (v0.4.1 - bridge parity), cut-list
+generation (verifying three sections plus the v0.4 'cut to N"'
+annotation on frame_wall studs), and three error paths including the
+LUMBER refusal for duplicate_e2e. v0.5 is a UI-only cycle for the new
+door / window openings on frame_wall; bridge parity for the openings
+parameter lands in v0.5.1, so method_count stays at 12 here.
 """
 
 from __future__ import annotations
@@ -71,10 +73,12 @@ def run(host: str, port: int) -> int:
         # assertion here catches version drift between the addon and
         # the test - exactly when a stale build is loaded in Blender.
         # v0.4.0: version bumped to 0.4.0. v0.4.1: method_count 11 -> 12
-        # for the new frame_wall handler; addon_version 0.4.0 -> 0.4.1
-        # alongside the manifest and __init__.py __version__.
-        assert r["addon_version"] == "0.4.1", (
-            f"expected addon_version 0.4.1, got {r['addon_version']!r}"
+        # for the new frame_wall handler; addon_version 0.4.0 -> 0.4.1.
+        # v0.5.0: addon_version 0.4.1 -> 0.5.0 for the door/window
+        # openings UI; method_count stays 12 since bridge parity for the
+        # openings parameter is deferred to v0.5.1.
+        assert r["addon_version"] == "0.5.0", (
+            f"expected addon_version 0.5.0, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 12, (
             f"expected 12 methods, got {r['method_count']}"
