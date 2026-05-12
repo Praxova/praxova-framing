@@ -191,6 +191,131 @@ def add_to_add_menu(self, context):
 
 
 # ===========================================================================
+# Openings UIList + operators (v0.5)
+# ===========================================================================
+
+class PRAXOVA_UL_openings(bpy.types.UIList):
+    """UIList row renderer for PraxovaSceneProps.wall_openings.
+
+    Each row shows the opening type (Door/Win), x-offset, and rough-
+    opening WxH at a glance. The Add Door / Add Window buttons next to
+    the list create new rows; the icons next to each row come from
+    here via item.opening_type.
+    """
+
+    def draw_item(self, context, layout, data, item, icon,
+                  active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            type_short = "Door" if item.opening_type == 'DOOR' else "Win"
+            icon_id = (
+                'MESH_PLANE' if item.opening_type == 'DOOR'
+                else 'OUTLINER_OB_LATTICE'
+            )
+            layout.label(
+                text=(
+                    f"{type_short}  x={item.x_offset_in:.1f}\"  "
+                    f"{item.ro_width_in:.0f}×{item.ro_height_in:.0f}\""
+                ),
+                icon=icon_id,
+            )
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text="D" if item.opening_type == 'DOOR' else "W")
+
+
+class PRAXOVA_OT_add_door(bpy.types.Operator):
+    """Append a door opening with standard 38" x 82" RO defaults."""
+
+    bl_idname = "praxova.add_door"
+    bl_label = "Add Door"
+    bl_description = "Append a door opening with standard 38\" x 82\" RO defaults"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        new = sp.wall_openings.add()
+        new.opening_type = 'DOOR'
+        new.ro_width_in = 38.0
+        new.ro_height_in = 82.0
+        new.sill_height_in = 0.0
+        new.header_nominal = sp.wall_nominal
+        new.jack_count = templates.recommend_jack_count(38.0)
+        templates.redistribute_openings_evenly(
+            sp.wall_openings, sp.wall_length_in,
+        )
+        sp.wall_openings_active = len(sp.wall_openings) - 1
+        return {'FINISHED'}
+
+
+class PRAXOVA_OT_add_window(bpy.types.Operator):
+    """Append a window opening with standard 36" x 48" RO and 36" sill."""
+
+    bl_idname = "praxova.add_window"
+    bl_label = "Add Window"
+    bl_description = (
+        "Append a window opening with standard 36\" x 48\" RO at 36\" sill"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        new = sp.wall_openings.add()
+        new.opening_type = 'WINDOW'
+        new.ro_width_in = 36.0
+        new.ro_height_in = 48.0
+        new.sill_height_in = 36.0
+        new.header_nominal = sp.wall_nominal
+        new.jack_count = templates.recommend_jack_count(36.0)
+        templates.redistribute_openings_evenly(
+            sp.wall_openings, sp.wall_length_in,
+        )
+        sp.wall_openings_active = len(sp.wall_openings) - 1
+        return {'FINISHED'}
+
+
+class PRAXOVA_OT_remove_opening(bpy.types.Operator):
+    """Remove the active opening from the list."""
+
+    bl_idname = "praxova.remove_opening"
+    bl_label = "Remove Opening"
+    bl_description = "Remove the active opening from the list"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return len(context.scene.praxova_framing.wall_openings) > 0
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        idx = sp.wall_openings_active
+        sp.wall_openings.remove(idx)
+        sp.wall_openings_active = max(
+            0, min(idx, len(sp.wall_openings) - 1),
+        )
+        return {'FINISHED'}
+
+
+class PRAXOVA_OT_distribute_openings(bpy.types.Operator):
+    """Reset all opening x-offsets to evenly-spaced layout."""
+
+    bl_idname = "praxova.distribute_openings"
+    bl_label = "Distribute Evenly"
+    bl_description = "Reset all opening x-offsets to evenly-spaced layout"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return len(context.scene.praxova_framing.wall_openings) > 0
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        templates.redistribute_openings_evenly(
+            sp.wall_openings, sp.wall_length_in,
+        )
+        return {'FINISHED'}
+
+
+# ===========================================================================
 # N-panel
 # ===========================================================================
 
@@ -331,6 +456,43 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
         box.prop(scn, "wall_top_plate_count")
         box.prop(scn, "wall_bottom_plate_count")
 
+        # --- Openings sub-section (v0.5) ---
+        # Sub-box inside the Wall Framing box: UIList of openings on the
+        # left, per-row Add Door / Add Window / Remove / Distribute
+        # column on the right, and a detail panel below for the active
+        # opening's fields. When empty, the UIList renders a placeholder
+        # row and only the add buttons are clickable (remove + distribute
+        # are gated by their poll() methods).
+        openings_box = box.box()
+        openings_box.label(text="Openings:", icon='MOD_BOOLEAN')
+
+        row = openings_box.row()
+        row.template_list(
+            "PRAXOVA_UL_openings", "",
+            scn, "wall_openings",
+            scn, "wall_openings_active",
+            rows=3,
+        )
+        col = row.column(align=True)
+        col.operator("praxova.add_door", text="", icon='MESH_PLANE')
+        col.operator("praxova.add_window", text="", icon='OUTLINER_OB_LATTICE')
+        col.operator("praxova.remove_opening", text="", icon='REMOVE')
+        col.separator()
+        col.operator("praxova.distribute_openings", text="", icon='MOD_ARRAY')
+
+        if len(scn.wall_openings) > 0:
+            active = scn.wall_openings[scn.wall_openings_active]
+            detail = openings_box.column(align=True)
+            detail.prop(active, "opening_type")
+            detail.prop(active, "x_offset_in")
+            detail.prop(active, "ro_width_in")
+            detail.prop(active, "ro_height_in")
+            if active.opening_type == 'WINDOW':
+                detail.prop(active, "sill_height_in")
+            detail.prop(active, "header_nominal")
+            detail.prop(active, "jack_count")
+
+        # --- Live preview ---
         nominal = scn.wall_nominal
         if nominal in templates.LUMBER_TYPES:
             plate_thickness_in = templates.LUMBER_TYPES[nominal][0]
@@ -354,6 +516,48 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
                          "needed for end studs",
                     icon='ERROR',
                 )
+            elif len(scn.wall_openings) > 0:
+                # v0.5: with openings, validate first so the user sees
+                # the specific failing opening before any count summary.
+                openings = list(scn.wall_openings)
+                ok, msg = templates.validate_openings(
+                    openings,
+                    scn.wall_length_in, scn.wall_height_in, nominal,
+                    scn.wall_top_plate_count, scn.wall_bottom_plate_count,
+                )
+                if not ok:
+                    preview_col.label(text=msg, icon='ERROR')
+                else:
+                    raw_xs = templates.stud_positions(
+                        scn.wall_length_in,
+                        scn.wall_spacing_oc_in,
+                        plate_thickness_in,
+                    )
+                    layouts = [
+                        templates.opening_framing_layout(
+                            op, nominal, scn.wall_height_in,
+                            scn.wall_top_plate_count,
+                            scn.wall_bottom_plate_count,
+                        )
+                        for op in openings
+                    ]
+                    filtered_xs = templates.filter_studs_around_openings(
+                        raw_xs, plate_thickness_in, openings, layouts,
+                    )
+                    n_plates = (
+                        scn.wall_top_plate_count
+                        + scn.wall_bottom_plate_count
+                    )
+                    preview_col.label(
+                        text=(
+                            f"Preview: {len(filtered_xs)} studs + "
+                            f"{len(openings)} opening"
+                            f"{'s' if len(openings) != 1 else ''}, "
+                            f"{n_plates} plates × "
+                            f"{scn.wall_length_in:g}\""
+                        ),
+                        icon='INFO',
+                    )
             else:
                 stud_xs = templates.stud_positions(
                     scn.wall_length_in,

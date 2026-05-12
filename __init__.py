@@ -60,6 +60,16 @@ def register():
         # v0.3: MCP bridge operators.
         _server.PRAXOVA_OT_start_bridge,
         _server.PRAXOVA_OT_stop_bridge,
+        # v0.5: Wall opening operators + UIList. The four add/remove/
+        # distribute operators and the UIList class must be registered
+        # before PRAXOVA_PT_main_panel because the panel's draw()
+        # references them by bl_idname (Blender resolves at draw time,
+        # but registering ahead of the panel keeps the listing tidy).
+        ui.PRAXOVA_OT_add_door,
+        ui.PRAXOVA_OT_add_window,
+        ui.PRAXOVA_OT_remove_opening,
+        ui.PRAXOVA_OT_distribute_openings,
+        ui.PRAXOVA_UL_openings,
         # UI - parent submenu, sheets submenu, panels submenu, main panel.
         ui.PRAXOVA_MT_add_lumber_submenu,
         ui.PRAXOVA_MT_sheets_submenu,
