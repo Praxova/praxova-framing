@@ -70,12 +70,11 @@ def run(host: str, port: int) -> int:
         # v0.3.4: ping reports addon_version and method_count. Strict
         # assertion here catches version drift between the addon and
         # the test - exactly when a stale build is loaded in Blender.
-        # v0.4.0: version bumped to 0.4.0; v0.4.1: method_count 11 -> 12
-        # for the new frame_wall handler. The addon_version pin stays at
-        # "0.4.0" until the v0.4.1 final commit bumps both manifest and
-        # __version__ to 0.4.1 together.
-        assert r["addon_version"] == "0.4.0", (
-            f"expected addon_version 0.4.0, got {r['addon_version']!r}"
+        # v0.4.0: version bumped to 0.4.0. v0.4.1: method_count 11 -> 12
+        # for the new frame_wall handler; addon_version 0.4.0 -> 0.4.1
+        # alongside the manifest and __init__.py __version__.
+        assert r["addon_version"] == "0.4.1", (
+            f"expected addon_version 0.4.1, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 12, (
             f"expected 12 methods, got {r['method_count']}"

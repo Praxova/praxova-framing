@@ -2,6 +2,26 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.4.1] — 2026-05-12
+
+### Added
+- **Bridge `frame_wall` MCP tool.** Completes bridge parity for the v0.4 composite operator. Required: `length_in` (number > 0) and `height_in` (number > 0). Optional: `nominal` (default `"2x4"`), `spacing_oc_in` (default 16.0), `top_plate_count` (default 2, range 1–4), `bottom_plate_count` (default 1, range 1–4), `location_m` (default world origin). Returns the new Empty parent's name, echoes of all inputs with defaults filled in, `n_studs` (from `stud_positions`), `n_plates` (= top + bottom), `stud_length_in`, `stud_stock_in`, and `plate_stock_in` (for material ordering), plus `new_objects` (sorted list of Empty + all child names). Brings the bridge surface to twelve methods: `ping`, `list_materials`, `list_objects`, `get_scene_info`, `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `duplicate_e2e`, `frame_wall`, `generate_cutlist`, `set_imperial_units`.
+- **Bridge `frame_wall` pre-validation.** Same cross-field validation as the operator (nominal in `LUMBER_TYPES`, `length_in >= 2 * thickness_in`, stud length positive after the plate stack, both stud and plate stock fit `LENGTHS_BY_TYPE[nominal]`) so impossible geometry surfaces as a clean `-32602 INVALID_PARAMS` error rather than the operator's `-32004 APP_OPERATOR_FAILED`. The operator's internal validation remains as defense in depth.
+- **Smoke test `frame_wall` step.** New `[9]` step frames a 48" × 96" 2x4 wall at 24" OC with default plate counts, asserting `wall_name`, `n_studs == 3`, `n_plates == 3`, `stud_length_in == 91.5`, both stock fields equal 96.0, and `len(new_objects) == 7` (1 Empty + 3 studs + 3 plates). Subsequent step numbers shift; `[10] list_objects` count assertion goes from 10 to 16. `[11] generate_cutlist` adds an assertion that `"cut to 91.5"` appears in the body, pinning the v0.4 stock-vs-cut annotation in the LUMBER — CUT LIST subsection against future regressions.
+- **`__version__` constant in `__init__.py`.** Single source of truth for the Python side. Imported by `server/handlers.py` so `ping()` no longer carries its own copy. PEP 8 §2 placement: after the module docstring, before any other imports except `__future__`.
+
+### Changed
+- **`mcp_server` package version** 0.3.4 → 0.4.1 (skipping 0.4.0, which was a UI-only cycle with no MCP-side changes; the git tag on `main` is the canonical record of cycle correspondence). Project description also updated to mention "wall framing" alongside the existing capabilities.
+- **Smoke test `addon_version` pin** "0.4.0" → "0.4.1". Method count 11 → 12. Module docstring updated to "v0.4.1 RPC surface (12 methods)".
+- **`server/handlers.py:ping()`** imports `__version__` from `__init__.py` instead of returning a hardcoded string. Resolves the late-cycle bug pattern from v0.4.0 (the bridge said `"0.3.4"` while the manifest said `"0.4.0"` — a UI-only cycle hadn't bumped the hardcoded copy). With this commit, the only two places that hold the version number are `blender_manifest.toml` (canonical for Blender's extension loader) and `__init__.py`'s `__version__` (canonical for Python code), and they must always move together. The `ping()` docstring updated accordingly.
+- **README** Status line updated to v0.4.1; MCP bridge tool list now includes `frame_wall`; the "currently UI-only" caveat removed; roadmap v0.4.1 marked done.
+
+### Architecture notes
+- **`UI in vN, bridge parity in vN+1` cadence held.** v0.4 shipped `frame_wall` as a UI-only operator; v0.4.1 adds the bridge handler, the FastMCP tool, and the smoke-test step that exercises it end-to-end. Same pattern as v0.3.1→v0.3.2 (panels) and v0.3.3→v0.3.4 (fill).
+- **Composite-operator bridge return shape.** Beyond the input echoes, the response includes derived fields the LLM would otherwise have to compute itself (or query for): `n_studs` (from the same `stud_positions` algorithm the operator uses), `n_plates`, `stud_length_in` (height minus the plate stack), `stud_stock_in` and `plate_stock_in` (smallest-stock-that-fits via `select_stock_length_in`). For an LLM agent that's about to recommend a material order, having both cut and stock dimensions in the response means no follow-up round-trip.
+- **Empty-parent placement after the operator runs.** The `frame_wall` operator creates the Empty at world origin; the bridge handler repositions it via `empty.location = location_m` *after* the operator runs, with all children already parented. Children's world positions follow the Empty without per-child updates — Blender's parent-child transform inheritance does the work.
+- **Computed stud count rather than child-name filtering.** The handler returns `n_studs = len(templates.stud_positions(...))`, computed directly from the same pure function the operator uses, rather than counting child Objects whose names contain `"Stud"`. The naming convention is `praxova_mesh_wall_stud_<nominal>_<length_in>` today but could change; the function call won't.
+
 ## [0.4.0] — 2026-05-12
 
 ### Added

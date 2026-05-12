@@ -2,7 +2,7 @@
 
 A Blender add-on for fast construction framing in 3D — lumber, sheet, and panel templates with one-click on-center duplication, edge-to-edge fill for sheets and panels, a single-shot "frame a wall" composite operator (v0.4), cut-list export with cut/order summaries, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
 
-**Status:** Beta (v0.4.0). Pre-1.0 — APIs and the per-object data model may change between minor versions.
+**Status:** Beta (v0.4.1). Pre-1.0 — APIs and the per-object data model may change between minor versions.
 
 ## What it does
 
@@ -130,9 +130,9 @@ The in-Blender bridge listens on localhost only. All `bpy` mutation is serialize
 To use:
 
 1. N-panel → **MCP Bridge** → **Start Bridge** in Blender.
-2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `duplicate_e2e`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
+2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `duplicate_e2e`, `frame_wall`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
 
-For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running. Note: `frame_wall` is currently UI-only — bridge parity (12th method) lands in v0.4.1.
+For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running.
 
 ## Roadmap
 
@@ -142,7 +142,7 @@ For protocol-level testing without an LLM client, run `smoke_test.py` from the r
 - ✅ **v0.3.3** — Fill Edge-to-Edge operator (`duplicate_e2e`) for sheets and panels; N-panel "Fill Edge-to-Edge" section with preset spans, auto-computed count, and Forward/Back direction.
 - ✅ **v0.3.4** — Bridge parity for the Fill operator (`duplicate_e2e` MCP tool); smoke-test coverage for fill including a LUMBER-refusal guard; bridge surface now eleven methods.
 - ✅ **v0.4** — "Frame a Wall" composite operator (plates + studs + Empty parent in one shot). Sheathing-aligned stud layout, stock vs. cut length distinction on lumber tags, two-subsection LUMBER cut list (CUT LIST + ORDER SUMMARY).
-- **v0.4.1** — Bridge parity for `frame_wall` (12th MCP method); smoke-test extension exercising it.
+- ✅ **v0.4.1** — Bridge parity for `frame_wall` (12th MCP method); pre-validation surfacing impossible geometry as clean `INVALID_PARAMS`; smoke-test extension exercising the new tool end-to-end; `__version__` constant in `__init__.py` so the bridge `ping()` no longer carries its own hardcoded version string.
 - **v0.5** — Door / window openings (king studs, jacks, headers, cripples).
 - **Later** — Corner stud treatments (three-stud corners, California corners); additional sheet sizes (4x10, 4x12), 5/8" sheet thickness, addon preferences for thickness overrides, ribbed-profile metal panel geometry to replace the v0.3 flat-slab placeholder.
 
