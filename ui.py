@@ -314,6 +314,66 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
         # since both are array-style operations.
         box.operator("praxova.duplicate_e2e", icon='MOD_ARRAY', text="Fill")
 
+        # --- Wall framing (v0.4) ---
+        # Composite operator: places plates and studs at world origin,
+        # parented to a new Empty. Single isolated wall in v0.4; corner
+        # treatments and door/window openings come in later cycles.
+        # The preview line below the inputs computes the same validation
+        # the operator does (without actually building anything) so the
+        # user sees "height too short for plate stack" before clicking.
+        box = layout.box()
+        box.label(text="Wall Framing", icon='MOD_BUILD')
+
+        box.prop(scn, "wall_length_in")
+        box.prop(scn, "wall_height_in")
+        box.prop(scn, "wall_nominal")
+        box.prop(scn, "wall_spacing_oc_in")
+        box.prop(scn, "wall_top_plate_count")
+        box.prop(scn, "wall_bottom_plate_count")
+
+        nominal = scn.wall_nominal
+        if nominal in templates.LUMBER_TYPES:
+            plate_thickness_in = templates.LUMBER_TYPES[nominal][0]
+            plate_stack_in = (
+                scn.wall_top_plate_count + scn.wall_bottom_plate_count
+            ) * plate_thickness_in
+            stud_length_in = scn.wall_height_in - plate_stack_in
+
+            preview_col = box.column(align=True)
+            preview_col.scale_y = 0.8
+
+            if stud_length_in <= 0:
+                preview_col.label(
+                    text=f"Height too short for "
+                         f"{plate_stack_in:g}\" plate stack",
+                    icon='ERROR',
+                )
+            elif scn.wall_length_in < 2 * plate_thickness_in:
+                preview_col.label(
+                    text=f"Length < {2 * plate_thickness_in:g}\" "
+                         "needed for end studs",
+                    icon='ERROR',
+                )
+            else:
+                stud_xs = templates.stud_positions(
+                    scn.wall_length_in,
+                    scn.wall_spacing_oc_in,
+                    plate_thickness_in,
+                )
+                n_studs = len(stud_xs)
+                n_plates = (
+                    scn.wall_top_plate_count + scn.wall_bottom_plate_count
+                )
+                preview_col.label(
+                    text=f"Preview: {n_studs} studs x "
+                         f"{stud_length_in:g}\", "
+                         f"{n_plates} plates x "
+                         f"{scn.wall_length_in:g}\"",
+                    icon='INFO',
+                )
+
+        box.operator("praxova.frame_wall", icon='MOD_BUILD')
+
         # --- Cut list ---
         box = layout.box()
         box.label(text="Cut List", icon='TEXT')
