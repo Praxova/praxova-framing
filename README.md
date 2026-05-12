@@ -1,15 +1,16 @@
 # Praxova Framing
 
-A Blender add-on for fast construction framing in 3D — lumber, sheet, and panel templates with one-click on-center duplication, edge-to-edge fill for sheets and panels, cut-list export, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
+A Blender add-on for fast construction framing in 3D — lumber, sheet, and panel templates with one-click on-center duplication, edge-to-edge fill for sheets and panels, a single-shot "frame a wall" composite operator (v0.4), cut-list export with cut/order summaries, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
 
-**Status:** Beta (v0.3.4). Pre-1.0 — APIs and the per-object data model may change between minor versions.
+**Status:** Beta (v0.4.0). Pre-1.0 — APIs and the per-object data model may change between minor versions.
 
 ## What it does
 
 - **Tagged templates** for dimensional lumber (1x2 / 2x3 / 2x4 / 2x6 / 2x8 / 2x10 / 2x12 / 4x4 / 4x6 / 6x6), sheet goods (plywood and OSB at 1/2" and 3/4" performance categories, 4x8 size), and metal roofing/siding panels (36" coverage width at 8' / 12' / 16' lengths). Geometry is *actual* dimensions; cut-list labels use *nominal* / call-out sizes.
 - **On-center duplicator** with two preset rows: stud/joist spacing in inches (12" / 16" / 19.2" / 24") and post/timber spacing in feet (8' / 10'). Plus count and Right/Left direction. Steps along the source's local X axis — the lumber thin axis for stud-spacing workflows. Each duplicate is a separate Object (so the cut list is correct), but they share mesh data (so it's memory-efficient).
 - **Fill Edge-to-Edge duplicator** for sheets and panels. Steps along the source's local Y axis at edge-to-edge spacing — the source's own width. Six preset spans (8'/12'/16'/20'/24'/32') auto-compute count from the active object's width. Use to sheathe a wall or cover a roof in one click. Refuses lumber active objects with a pointer back to the OC duplicator.
-- **Cut list** generator that walks the scene, counts tagged objects by label, and writes to both an in-Blender Text datablock and a `.txt` file next to your `.blend`. Three sections: LUMBER, SHEETS, PANELS, with subtotals when more than one is populated.
+- **Frame a Wall** (v0.4) — single composite operator that places top plates, bottom plates, and studs for a wall, parented to a new Empty for one-handle transform. Sheathing-aligned stud layout: end studs flush with wall ends, intermediate studs at on-center spacing measured from `x=0`, final bay tight when length isn't a multiple of spacing. N-panel section drives length, height, stud size, OC spacing, and top + bottom plate counts; a live preview shows the resulting stud count and length before you click. Single isolated wall in v0.4 — corners and openings come in later cycles.
+- **Cut list** generator that walks the scene, counts tagged objects by label, and writes to both an in-Blender Text datablock and a `.txt` file next to your `.blend`. Three sections: LUMBER, SHEETS, PANELS. LUMBER renders two subsections (v0.4+): CUT LIST (per-piece with cut-from-stock annotations) and ORDER SUMMARY (aggregated by stock SKU across orientations).
 - **Add-menu integration** — `Add → Praxova Lumber → ...` for lumber, sheets, and panels, in vertical and horizontal orientations.
 - **MCP bridge** (v0.3) — an in-Blender JSON-RPC bridge plus a separate-process MCP server (`mcp_server/`) so an LLM agent can drive every operator above through a chat interface.
 
@@ -51,6 +52,8 @@ Same convention for all materials:
 
 Origin at min corner (0, 0, 0). Click the 3D cursor where you want the bottom-front-left corner of the piece.
 
+For `frame_wall` (v0.4): the bottom-front-left corner of the framed wall lands at world `(0, 0, 0)`, with the wall length along +X, thickness along +Y, height along +Z. The wall Empty is at origin; the user transforms it afterward to position the wall in the larger model.
+
 ## Working with linked-mesh duplicates
 
 Each Praxova template (a `2x4x8 V`, a `36" Metal x 12 V`, etc.) is built once as a single mesh datablock. Every subsequent placement — via the on-center duplicator, the edge-to-edge fill duplicator, Shift-D, or a re-add of the same template — creates a new **Object** that *links* to the same **Mesh**. Two instances. One mesh. This keeps memory low and editing fast (change the mesh once and every instance updates).
@@ -68,7 +71,8 @@ Each placed piece carries a `praxova_lumber` PropertyGroup with:
 is_lumber:                bool    # "is Praxova-managed"
 category:                 'LUMBER' | 'SHEET' | 'PANEL'
 nominal_size:             "2x4", "4x6", ...           (lumber only)
-length_in:                96, 120, ...                (lumber only)
+length_in:                96.0, 91.5, ...             (lumber only - final cut length)
+stock_length_in:          96.0, 120.0, ...            (lumber only - purchased stock, v0.4+)
 sheet_material:           'PLYWOOD' | 'OSB'           (sheet only)
 sheet_thickness_callout:  "1/2", "3/4"                (sheet only)
 sheet_size_key:           "4x8"                       (sheet only)
@@ -77,6 +81,8 @@ panel_size_key:           "36x8" / "36x12" / "36x16"  (panel only)
 orientation:              'VERTICAL' | 'HORIZONTAL'
 cutlist_label:            "2x4x8 V" / "1/2\" PLY 4x8 V" / "36\" Metal x 8 V"
 ```
+
+For v0.4+, `length_in` is the final cut dimension (e.g., 91.5" for a stud in an 8' wall with a single bottom plate and two top plates) and `stock_length_in` is the purchased stock the piece was cut from (96" / 8'). For pieces placed via `add_lumber` the two are equal — no cut. For pieces from `frame_wall` they can differ, and the cut-list ORDER SUMMARY aggregates by `stock_length_in` while the CUT LIST shows the `length_in` cut detail.
 
 Filter for cut-list construction or external scripts:
 
@@ -92,6 +98,21 @@ N-panel → **Cut List → Generate Cut List**. Output goes to:
 2. A **`<blendfile>_cutlist.txt`** file alongside the .blend (only if the .blend has been saved). Status bar message shows the exact path.
 
 Output is split into LUMBER, SHEETS, and PANELS sections, with subtotals when more than one category is present, plus a grand total.
+
+The LUMBER section (v0.4+) renders two subsections:
+
+```
+LUMBER — CUT LIST
+      3  x  2x4x8 H
+      8  x  2x4x8 V  → cut to 91.5"
+
+LUMBER — ORDER SUMMARY
+     11  x  2x4x8  (3 H, 8 V)
+```
+
+**CUT LIST** is per-piece detail for the saw — each stock label appears once per distinct cut length, with a `→ cut to N"` annotation when the cut is shorter than the stock (i.e., produced by `frame_wall` or another composite operator). **ORDER SUMMARY** aggregates by stock SKU (nominal + stock length in feet) across orientations, with an orientation parenthetical for traceability — what you actually take to the lumberyard.
+
+SHEETS and PANELS sections retain the single-section format from v0.3.x; neither has a cut-from-stock concept in v0.4.
 
 ## MCP bridge (v0.3)
 
@@ -111,7 +132,7 @@ To use:
 1. N-panel → **MCP Bridge** → **Start Bridge** in Blender.
 2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `duplicate_e2e`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
 
-For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running.
+For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running. Note: `frame_wall` is currently UI-only — bridge parity (12th method) lands in v0.4.1.
 
 ## Roadmap
 
@@ -120,9 +141,10 @@ For protocol-level testing without an LLM client, run `smoke_test.py` from the r
 - ✅ **v0.3.2** — Bridge parity for panels (`add_panel` MCP tool); smoke-test coverage for panels; `add_lumber` MCP Literal extended to include the v0.3.1 lumber additions; `_serialize_object` fixed for the PANEL category.
 - ✅ **v0.3.3** — Fill Edge-to-Edge operator (`duplicate_e2e`) for sheets and panels; N-panel "Fill Edge-to-Edge" section with preset spans, auto-computed count, and Forward/Back direction.
 - ✅ **v0.3.4** — Bridge parity for the Fill operator (`duplicate_e2e` MCP tool); smoke-test coverage for fill including a LUMBER-refusal guard; bridge surface now eleven methods.
-- **v0.4** — "Frame a wall" composite operator (plates + studs + corners in one shot).
+- ✅ **v0.4** — "Frame a Wall" composite operator (plates + studs + Empty parent in one shot). Sheathing-aligned stud layout, stock vs. cut length distinction on lumber tags, two-subsection LUMBER cut list (CUT LIST + ORDER SUMMARY).
+- **v0.4.1** — Bridge parity for `frame_wall` (12th MCP method); smoke-test extension exercising it.
 - **v0.5** — Door / window openings (king studs, jacks, headers, cripples).
-- **Later** — additional sheet sizes (4x10, 4x12), 5/8" sheet thickness, addon preferences for thickness overrides, ribbed-profile metal panel geometry to replace the v0.3 flat-slab placeholder.
+- **Later** — Corner stud treatments (three-stud corners, California corners); additional sheet sizes (4x10, 4x12), 5/8" sheet thickness, addon preferences for thickness overrides, ribbed-profile metal panel geometry to replace the v0.3 flat-slab placeholder.
 
 ## License
 

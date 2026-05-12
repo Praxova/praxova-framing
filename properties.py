@@ -84,10 +84,28 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
         description='Nominal cross-section, e.g. "2x4" or "6x6"',
         default="",
     )
-    length_in: IntProperty(  # noqa: F821
+    length_in: FloatProperty(  # noqa: F821
         name="Length (inches)",
-        description="Length of this lumber piece in inches",
-        default=0,
+        description=(
+            "Final cut length of this lumber piece in inches. For pieces "
+            "used at full stock length (e.g. via add_lumber) this equals "
+            "stock_length_in. For pieces cut down by a composite operator "
+            "(e.g. studs from frame_wall) this is the cut dimension."
+        ),
+        default=0.0,
+        precision=4,
+    )
+    stock_length_in: FloatProperty(  # noqa: F821
+        name="Stock Length (inches)",
+        description=(
+            "Length of the purchased stock this piece is cut from, in "
+            "inches. Drives the cut list's ORDER SUMMARY aggregation. "
+            "Defaults to 0.0 for v0.3.x-era objects that pre-date this "
+            "field; the cut list treats 0 as 'no explicit stock, treat as "
+            "equal to length_in (no cut)'."
+        ),
+        default=0.0,
+        precision=4,
     )
 
     # --- Sheet-specific fields (used when category == 'SHEET') ---
@@ -204,6 +222,66 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
             ('BACK',    "Back",    "Duplicate along -local Y"),
         ],
         default='FORWARD',
+    )
+
+    # --- Wall framing (v0.4) ---
+    # Drives the frame_wall composite operator. Geometry convention: the
+    # bottom-front-left corner of the framed wall lands at world origin
+    # (an Empty parent at that position); the user transforms the parent
+    # afterward to place the wall in the larger model. Cross-field
+    # validation (height must leave room for at least some stud given the
+    # plate stack) lives in the operator's execute(), not here, because
+    # PropertyGroup bounds can't reference other fields.
+    wall_length_in: FloatProperty(  # noqa: F821
+        name="Wall Length (in)",
+        description="Wall length along +X in inches",
+        default=96.0,  # 8 ft
+        min=12.0,
+        soft_max=1200.0,  # 100 ft soft cap
+        precision=2,
+    )
+    wall_height_in: FloatProperty(  # noqa: F821
+        name="Wall Height (in)",
+        description="Wall height (floor to top of top plate) in inches",
+        default=96.0,  # 8 ft
+        min=12.0,
+        soft_max=240.0,  # 20 ft soft cap (high-ceiling great room)
+        precision=2,
+    )
+    # wall_nominal items are derived from templates.LUMBER_TYPES at class
+    # definition time, so the dropdown stays in sync with the catalog. The
+    # dict's small-to-large insertion order is preserved (Python 3.7+),
+    # matching the existing Add menu order.
+    wall_nominal: EnumProperty(  # noqa: F821
+        name="Stud Size",
+        description="Dimensional lumber size used for studs and plates",
+        items=[
+            (nominal, nominal, f"{nominal} dimensional lumber")
+            for nominal in templates.LUMBER_TYPES
+        ],
+        default='2x4',
+    )
+    wall_spacing_oc_in: FloatProperty(  # noqa: F821
+        name="Stud Spacing OC (in)",
+        description="On-center stud spacing in inches (typically 16 or 24)",
+        default=16.0,
+        min=0.001,
+        soft_max=48.0,
+        precision=2,
+    )
+    wall_top_plate_count: IntProperty(  # noqa: F821
+        name="Top Plate Count",
+        description="Number of top plates (2 for load-bearing, 1 for partition)",
+        default=2,
+        min=1,
+        max=4,
+    )
+    wall_bottom_plate_count: IntProperty(  # noqa: F821
+        name="Bottom Plate Count",
+        description="Number of bottom plates (typically 1)",
+        default=1,
+        min=1,
+        max=4,
     )
 
     # --- v0.3: MCP bridge ---

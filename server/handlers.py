@@ -565,10 +565,18 @@ def set_imperial_units(params: dict) -> dict:
 # ===========================================================================
 
 def ping(params: dict) -> dict:
-    """Liveness probe. Useful for the MCP server to verify connectivity."""
+    """Liveness probe. Useful for the MCP server to verify connectivity.
+
+    The reported addon_version tracks the manifest version (blender_manifest.toml)
+    and is bumped on every release including UI-only cycles. The smoke test
+    asserts against this value to catch "stale build loaded in Blender".
+    A planned cleanup in v0.4.1 will move this to a single Python __version__
+    constant imported from the package __init__, so the bridge code no longer
+    carries its own copy.
+    """
     return {
         "ok": True,
-        "addon_version": "0.3.4",
+        "addon_version": "0.4.0",
         "method_count": len(METHODS),
     }
 
