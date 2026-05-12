@@ -29,6 +29,12 @@ class PRAXOVA_OT_add_lumber(bpy.types.Operator):
     Mesh datablocks are shared across all instances of the same template
     (linked data). Each Object still owns its own custom properties, so
     sharing meshes does not break cut-list tagging.
+
+    Stock vs cut semantics (v0.4):
+        add_lumber places a piece of purchased stock as-is, with no cut, so
+        stock_length_in == length_in. Composite operators that cut pieces
+        down from longer stock (e.g. frame_wall) set these differently;
+        the cut list's two-section output uses both fields.
     """
 
     bl_idname = "praxova.add_lumber"
@@ -84,7 +90,11 @@ class PRAXOVA_OT_add_lumber(bpy.types.Operator):
         tag.is_lumber = True
         tag.category = 'LUMBER'
         tag.nominal_size = self.nominal
-        tag.length_in = length_in
+        tag.length_in = float(length_in)
+        # add_lumber places stock as-is: no cut, so stock equals cut length.
+        # Set explicitly rather than relying on the cut list's v0.3.x
+        # fallback (stock_length_in == 0 -> treat as length_in).
+        tag.stock_length_in = float(length_in)
         tag.orientation = self.orientation
         tag.cutlist_label = label
 

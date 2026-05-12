@@ -6,6 +6,25 @@ Output goes to two places:
 
 The disk file is named '<blendfile_basename>_cutlist.txt' and lives in the
 same directory as the .blend.
+
+LUMBER OUTPUT FORMAT (v0.4):
+    LUMBER \u2014 CUT LIST
+    ----------------------
+       3  x  2x4x8 H
+       8  x  2x4x8 V  \u2192 cut to 91.5"
+
+    LUMBER \u2014 ORDER SUMMARY
+    ---------------------------
+      11  x  2x4x8  (3 H, 8 V)
+
+The CUT LIST shows per-piece detail with a '-> cut to N"' annotation when
+the final cut length is shorter than the purchased stock. The ORDER SUMMARY
+aggregates by stock SKU (nominal + stock length in feet) across orientations
+with an orientation parenthetical for traceability - what you actually
+take to the lumberyard.
+
+SHEET and PANEL sections retain the v0.3.x single-section format. Neither
+has a cut-from-stock concept in v0.4.
 """
 
 import os
@@ -17,6 +36,39 @@ import bpy
 
 TEXT_DATABLOCK_NAME = "Praxova Cut List"
 
+
+# ---------------------------------------------------------------------------
+# Tag helpers
+# ---------------------------------------------------------------------------
+
+def _effective_stock_length_in(tag) -> float:
+    """Return stock length, falling back to length_in when not explicitly set.
+
+    The stock_length_in field was added in v0.4. Objects tagged by v0.3.x
+    builds of the add-on don't have it - it reads back as 0.0 (FloatProperty
+    default). For those, stock equals the cut length (no cut), which matches
+    v0.3.x behavior where add_lumber always placed stock as-is.
+    """
+    if tag.stock_length_in > 0:
+        return tag.stock_length_in
+    return float(tag.length_in)
+
+
+def _format_inches(val: float) -> str:
+    """Format an inch dimension without trailing zeros.
+
+    91.5 -> '91.5', 96.0 -> '96', 91.625 -> '91.625'.
+    Three decimals is enough for common framing fractions (.0625, .125,
+    .375, .5, .625, .75, .875).
+    """
+    if val == int(val):
+        return str(int(val))
+    return f"{val:.3f}".rstrip("0").rstrip(".")
+
+
+# ---------------------------------------------------------------------------
+# Sort keys
+# ---------------------------------------------------------------------------
 
 def _lumber_sort_key(label: str):
     """Sort lumber labels by nominal size, then length, then orientation."""
@@ -75,7 +127,11 @@ def _panel_sort_key(label: str):
 
 
 def _format_section(title: str, counter: Counter, sort_key) -> tuple[list[str], int]:
-    """Render a cut-list section (header + entries) and return its total."""
+    """Render a single-list cut-list section (header + entries).
+
+    Used for SHEETS and PANELS. LUMBER uses _format_lumber_sections
+    instead because it renders two subsections (cut list + order summary).
+    """
     if not counter:
         return [], 0
     lines = [title, "-" * len(title)]
@@ -87,13 +143,114 @@ def _format_section(title: str, counter: Counter, sort_key) -> tuple[list[str], 
     return lines, total
 
 
+# ---------------------------------------------------------------------------
+# Lumber two-section rendering (v0.4)
+# ---------------------------------------------------------------------------
+
+def _format_lumber_sections(pieces: list[dict]) -> tuple[list[str], int]:
+    """Render the LUMBER \u2014 CUT LIST and LUMBER \u2014 ORDER SUMMARY subsections.
+
+    Args:
+        pieces: list of per-piece dicts with keys:
+            label        - stock cutlist label, e.g. "2x4x8 V"
+            nominal      - e.g. "2x4"
+            cut_in       - float, final cut length in inches
+            stock_in     - float, purchased stock length in inches
+            orient_short - "V" or "H"
+
+    Returns:
+        (lines, total_piece_count). Total is the number of physical pieces;
+        it equals the sum of either subsection's counts since they describe
+        the same pieces grouped differently.
+    """
+    if not pieces:
+        return [], 0
+
+    # Cut list aggregation: key = (label, cut_in, stock_in). Two pieces
+    # with identical stock label AND identical cut length collapse into
+    # one row; identical label but different cuts (e.g. 91.5" vs 89" cuts
+    # of the same 2x4x8 V) appear as separate rows, which is what you want
+    # at the saw.
+    cut_counter: dict[tuple[str, float, float], int] = {}
+
+    # Order aggregation: key = (nominal_sort_tuple, stock_ft).
+    # Value = {orient_short: count}. Numeric nominal tuple so '2x10' sorts
+    # after '2x4' instead of alphabetically.
+    order_data: dict[tuple[tuple[int, int], int], dict[str, int]] = {}
+
+    for p in pieces:
+        cut_key = (p['label'], p['cut_in'], p['stock_in'])
+        cut_counter[cut_key] = cut_counter.get(cut_key, 0) + 1
+
+        try:
+            a, b = p['nominal'].split('x')
+            nominal_tuple: tuple[int, int] = (int(a), int(b))
+        except (ValueError, IndexError):
+            nominal_tuple = (999, 999)
+        stock_ft = int(round(p['stock_in'] / 12))
+        order_key = (nominal_tuple, stock_ft)
+        bucket = order_data.setdefault(order_key, {})
+        bucket[p['orient_short']] = bucket.get(p['orient_short'], 0) + 1
+
+    lines: list[str] = []
+
+    # --- Subsection 1: CUT LIST ---
+    cut_title = "LUMBER \u2014 CUT LIST"
+    lines.append(cut_title)
+    lines.append("-" * len(cut_title))
+
+    total = 0
+    cut_sorted = sorted(
+        cut_counter.items(),
+        key=lambda kv: _lumber_sort_key(kv[0][0]) + (kv[0][1],),
+    )
+    for (label, cut_in, stock_in), qty in cut_sorted:
+        total += qty
+        # Epsilon comparison: floats stored on a FloatProperty can pick up
+        # tiny rounding error. 0.01" is well below any practical cut
+        # precision so it doesn't suppress real cuts.
+        if cut_in < stock_in - 0.01:
+            display = f'{label}  \u2192 cut to {_format_inches(cut_in)}"'
+        else:
+            display = label
+        lines.append(f"  {qty:4d}  x  {display}")
+
+    # --- Subsection 2: ORDER SUMMARY ---
+    lines.append("")
+    order_title = "LUMBER \u2014 ORDER SUMMARY"
+    lines.append(order_title)
+    lines.append("-" * len(order_title))
+
+    for (nominal_tuple, stock_ft), orients in sorted(order_data.items()):
+        nominal_str = f"{nominal_tuple[0]}x{nominal_tuple[1]}"
+        sku = f"{nominal_str}x{stock_ft}"
+        total_sku = sum(orients.values())
+        if len(orients) > 1:
+            # Sort V before H for consistent reading order.
+            ordered_orients = sorted(
+                orients.keys(), key=lambda o: (o != 'V', o),
+            )
+            breakdown = ", ".join(
+                f"{orients[o]} {o}" for o in ordered_orients
+            )
+            lines.append(f"  {total_sku:4d}  x  {sku}  ({breakdown})")
+        else:
+            lines.append(f"  {total_sku:4d}  x  {sku}")
+
+    return lines, total
+
+
+# ---------------------------------------------------------------------------
+# Report assembly
+# ---------------------------------------------------------------------------
+
 def _build_report() -> tuple[str, int, dict[str, int]]:
     """Walk the scene and assemble the cut-list report text.
 
     Returns:
         (full_text, grand_total, totals_by_category).
     """
-    lumber_counter: Counter = Counter()
+    lumber_pieces: list[dict] = []
     sheet_counter: Counter = Counter()
     panel_counter: Counter = Counter()
 
@@ -106,7 +263,15 @@ def _build_report() -> tuple[str, int, dict[str, int]]:
         elif tag.category == 'PANEL':
             panel_counter[tag.cutlist_label] += 1
         else:
-            lumber_counter[tag.cutlist_label] += 1
+            cut_in = round(float(tag.length_in), 4)
+            stock_in = round(_effective_stock_length_in(tag), 4)
+            lumber_pieces.append({
+                'label': tag.cutlist_label,
+                'nominal': tag.nominal_size,
+                'cut_in': cut_in,
+                'stock_in': stock_in,
+                'orient_short': 'V' if tag.orientation == 'VERTICAL' else 'H',
+            })
 
     filename = bpy.path.basename(bpy.data.filepath) or "(unsaved)"
     timestamp = datetime.now().isoformat(timespec='seconds')
@@ -119,9 +284,7 @@ def _build_report() -> tuple[str, int, dict[str, int]]:
         "",
     ]
 
-    lumber_lines, lumber_total = _format_section(
-        "LUMBER", lumber_counter, _lumber_sort_key,
-    )
+    lumber_lines, lumber_total = _format_lumber_sections(lumber_pieces)
     sheet_lines, sheet_total = _format_section(
         "SHEETS", sheet_counter, _sheet_sort_key,
     )

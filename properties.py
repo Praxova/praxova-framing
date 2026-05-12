@@ -84,10 +84,28 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
         description='Nominal cross-section, e.g. "2x4" or "6x6"',
         default="",
     )
-    length_in: IntProperty(  # noqa: F821
+    length_in: FloatProperty(  # noqa: F821
         name="Length (inches)",
-        description="Length of this lumber piece in inches",
-        default=0,
+        description=(
+            "Final cut length of this lumber piece in inches. For pieces "
+            "used at full stock length (e.g. via add_lumber) this equals "
+            "stock_length_in. For pieces cut down by a composite operator "
+            "(e.g. studs from frame_wall) this is the cut dimension."
+        ),
+        default=0.0,
+        precision=4,
+    )
+    stock_length_in: FloatProperty(  # noqa: F821
+        name="Stock Length (inches)",
+        description=(
+            "Length of the purchased stock this piece is cut from, in "
+            "inches. Drives the cut list's ORDER SUMMARY aggregation. "
+            "Defaults to 0.0 for v0.3.x-era objects that pre-date this "
+            "field; the cut list treats 0 as 'no explicit stock, treat as "
+            "equal to length_in (no cut)'."
+        ),
+        default=0.0,
+        precision=4,
     )
 
     # --- Sheet-specific fields (used when category == 'SHEET') ---
