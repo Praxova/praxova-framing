@@ -1,5 +1,7 @@
 """Lumber, sheet-good, and panel dimension data and mesh construction."""
 
+import re
+
 import bpy
 
 
@@ -224,6 +226,131 @@ def make_box_mesh(
     mesh.from_pydata(verts, [], faces)
     mesh.update()
     return mesh
+
+
+# ===========================================================================
+# Composite framing helpers (v0.4)
+# ===========================================================================
+
+# Pure functions consumed by ops_frame.PRAXOVA_OT_frame_wall. They're kept
+# pure (no bpy. references) so the math can be reasoned about without
+# Blender in the loop. The operator handles the bpy. plumbing - mesh
+# construction, tagging, parenting, scene linking.
+
+_WALL_NAME_PATTERN = re.compile(r'^Wall_(\d+)$')
+
+
+def next_wall_name(existing_names) -> str:
+    """Return the next available 'Wall_NN' name not in existing_names.
+
+    Picks the lowest unused positive integer N and formats as 'Wall_NN'
+    with two-digit zero-padding for N < 100. Fills gaps: if Wall_01 and
+    Wall_03 exist, returns 'Wall_02'. Gap-filling matches what a human
+    expects when walls are deleted and re-created; the alternative of
+    always picking max(N)+1 leaves growing holes in the numbering.
+
+    Args:
+        existing_names: iterable of strings, typically
+            {obj.name for obj in bpy.context.scene.objects}.
+
+    Returns:
+        A string like 'Wall_01' or 'Wall_42'. For N >= 100, the leading
+        zero pad is dropped naturally by Python's :02d format spec
+        (e.g. 'Wall_100' rather than 'Wall_00').
+    """
+    used: set[int] = set()
+    for name in existing_names:
+        m = _WALL_NAME_PATTERN.match(name)
+        if m:
+            used.add(int(m.group(1)))
+    n = 1
+    while n in used:
+        n += 1
+    return f"Wall_{n:02d}"
+
+
+def stud_positions(
+    length_in: float,
+    spacing_oc_in: float,
+    stud_thickness_in: float,
+) -> list[float]:
+    """Return x-coordinates of the LEFT EDGE of each stud in a wall.
+
+    Standard sheathing-aligned convention:
+      - End studs are flush with the wall ends: left end stud at x=0
+        (right edge at stud_thickness), right end stud at
+        x=(length - stud_thickness) (right edge at length).
+      - Intermediate studs are at on-center spacing measured from x=0:
+        centers at spacing, 2*spacing, 3*spacing, ...
+      - An intermediate stud is included only if its right edge is
+        strictly less than the right end stud's left edge. The final
+        bay before the right end stud is allowed to be tight (narrower
+        than spacing_oc); this is normal for wall lengths that aren't
+        a multiple of spacing_oc and preserves 4'/8' sheathing seams.
+
+    The function does not validate that length_in >= 2 * stud_thickness_in
+    or that any of the inputs are positive - the caller is responsible
+    for sane bounds. For absurd inputs (e.g. length < stud_thickness)
+    the returned list will contain coincident or negative-position
+    entries, which the caller should detect upstream.
+
+    Args:
+        length_in: wall length in inches.
+        spacing_oc_in: on-center stud spacing in inches.
+        stud_thickness_in: stud cross-section thickness along the wall
+            length axis (e.g. 1.5 for a 2x4).
+
+    Returns:
+        List of float x-coordinates, sorted ascending. Always contains
+        at least 2 entries (the two end studs).
+
+    Examples:
+        96" wall, 16 OC, 1.5" thick studs -> 7 studs:
+            [0.0, 15.25, 31.25, 47.25, 63.25, 79.25, 94.5]
+        (left-edge positions; centers are at 0.75, 16, 32, 48, 64, 80, 95.25)
+    """
+    half_t = stud_thickness_in / 2.0
+    right_end_left_edge = length_in - stud_thickness_in
+
+    positions: list[float] = [0.0]
+    c = spacing_oc_in  # center of the next intermediate stud
+    while c + half_t < right_end_left_edge:
+        positions.append(c - half_t)
+        c += spacing_oc_in
+    positions.append(right_end_left_edge)
+    return positions
+
+
+def select_stock_length_in(nominal: str, cut_length_in: float) -> float:
+    """Return the smallest stock length in inches that fits cut_length_in.
+
+    Picks from LENGTHS_BY_TYPE[nominal] (feet) and converts to inches.
+    Used by frame_wall to determine the purchased stock for each cut piece.
+
+    Args:
+        nominal: lumber size key (must be in LUMBER_TYPES / LENGTHS_BY_TYPE).
+        cut_length_in: required cut length in inches.
+
+    Returns:
+        Smallest stock length in inches that is >= cut_length_in. For a
+        91.5" cut of 2x4, returns 96.0 (8 ft). For a 108" cut of 2x4,
+        returns 120.0 (10 ft).
+
+    Raises:
+        ValueError: if the nominal is unknown or no available stock length
+            is long enough to accommodate the cut.
+    """
+    available_ft = LENGTHS_BY_TYPE.get(nominal)
+    if not available_ft:
+        raise ValueError(f"Unknown or empty stock list for nominal {nominal!r}")
+    available_in = sorted(ft * 12 for ft in available_ft)
+    for stock_in in available_in:
+        if stock_in >= cut_length_in:
+            return float(stock_in)
+    raise ValueError(
+        f"No stock length for {nominal} fits a cut of {cut_length_in}\". "
+        f"Available stock (ft): {sorted(available_ft)}."
+    )
 
 
 # Backward-compatibility aliases for v0.1 callers.
