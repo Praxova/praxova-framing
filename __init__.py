@@ -4,9 +4,9 @@ Praxova Framing - construction modeling helper for Blender.
 Provides tagged lumber templates (1x2 through 6x6), sheet goods (plywood
 and OSB at 1/2" and 3/4"), metal roofing/siding panels (36" x 8/12/16 ft),
 an on-center spacing duplicator, an edge-to-edge fill duplicator for
-sheets and panels (v0.3.3), a cut-list generator, and (v0.3) a localhost
-JSON-RPC bridge so an external MCP server can drive the same operators
-from an LLM agent.
+sheets and panels (v0.3.3), a 'frame a wall' composite operator (v0.4),
+a cut-list generator, and (v0.3) a localhost JSON-RPC bridge so an
+external MCP server can drive the same operators from an LLM agent.
 """
 
 import bpy
@@ -16,6 +16,7 @@ from . import (
     ops_add,
     ops_duplicate,
     ops_fill,
+    ops_frame,
     ops_cutlist,
     ops_units,
     ui,
@@ -42,6 +43,8 @@ def register():
         # v0.3.3: Fill (edge-to-edge) operators.
         ops_fill.PRAXOVA_OT_set_fill_span,
         ops_fill.PRAXOVA_OT_duplicate_e2e,
+        # v0.4: Composite framing operators.
+        ops_frame.PRAXOVA_OT_frame_wall,
         ops_cutlist.PRAXOVA_OT_generate_cutlist,
         ops_units.PRAXOVA_OT_set_imperial_units,
         # v0.3: MCP bridge operators.
