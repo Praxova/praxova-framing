@@ -2,8 +2,8 @@
 
 Exposes the in-Blender bridge as a set of MCP tools so an LLM client (Claude
 Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
-on-center, fill edge-to-edge, frame a wall (v0.4.1), and generate cut lists
-in a live Blender session.
+on-center, fill edge-to-edge, frame a wall with optional door and window
+openings (v0.5.1), and generate cut lists in a live Blender session.
 
 Configuration (env vars, read at startup):
     PRAXOVA_BRIDGE_HOST     default: 127.0.0.1
@@ -369,16 +369,24 @@ def frame_wall(
     top_plate_count: int = 2,
     bottom_plate_count: int = 1,
     location_m: list[float] | None = None,
+    openings: list[dict] | None = None,
 ) -> dict:
-    """Frame a single wall - plates + studs + Empty parent.
+    """Frame a single wall - plates + studs + optional openings + Empty parent.
 
-    The first composite operator on the bridge: builds top plates,
-    bottom plates, and studs for a single isolated wall, parented to a
-    new Empty for one-handle transform. Sheathing-aligned stud layout:
-    end studs flush with wall ends, intermediate studs at on-center
-    spacing measured from x=0, the final bay tight when length isn't a
-    multiple of spacing. The flush-end convention preserves 4'/8'
-    sheathing seam alignment.
+    Builds top plates, bottom plates, and studs for a single isolated
+    wall, parented to a new Empty for one-handle transform. Sheathing-
+    aligned stud layout: end studs flush with wall ends, intermediate
+    studs at on-center spacing measured from x=0, the final bay tight
+    when length isn't a multiple of spacing — preserves 4'/8' sheathing
+    seam alignment.
+
+    v0.5.1 adds the optional `openings` parameter — a list of door and
+    window opening dicts. Each opening produces king studs, jack studs,
+    a (2) 2x lumber + 1/2" plywood spacer header build-up, an optional
+    rough sill (windows), and cripples above the header and below the
+    rough sill. Regular OC studs that would collide with any king
+    bracket are dropped automatically (so n_studs reports the survivors,
+    not the raw OC count).
 
     Geometry conventions:
         +X = wall length, +Y = wall thickness, +Z = wall height.
@@ -386,11 +394,12 @@ def frame_wall(
         location_m to place it elsewhere. Children stay parented and
         follow the Empty - no per-child updates needed.
 
-    Stock vs cut length: studs are cut down from the smallest stock
-    that fits. For an 8' wall with 1 bottom + 2 top plates of 2x4, the
-    studs are 91.5" cut from 96" (8 ft) stock. Plates run the full wall
-    length from the same nominal's stock. The returned stud_stock_in
-    and plate_stock_in tell you what to order from the lumberyard.
+    Stock vs cut length: every cut piece is sourced from the smallest
+    stock that fits. For an 8' wall with 1 bottom + 2 top plates of 2x4,
+    studs are 91.5" cut from 96" (8 ft) stock. The returned
+    stud_stock_in and plate_stock_in tell you what to order from the
+    lumberyard. Jack, header, and cripple stock sizes follow the same
+    rule and surface in the cut list.
 
     Args:
         length_in: Wall length along +X in inches. Must be > 0 and at
@@ -399,11 +408,9 @@ def frame_wall(
             Must leave room for at least some stud after the plate
             stack: height_in > (top_plate_count + bottom_plate_count)
             × thickness.
-        nominal: Stud size from LUMBER_TYPES. All studs and plates are
-            this same dimensional lumber. Default 2x4 (US residential
-            standard). v0.4 single-wall scope assumes one nominal per
-            wall - mixing sizes (e.g. 2x4 studs with 2x6 plates) is
-            deferred to v0.5 openings or later.
+        nominal: Stud size from LUMBER_TYPES. All studs, kings, jacks,
+            and cripples use this nominal; plates too. Default 2x4
+            (US residential standard).
         spacing_oc_in: On-center stud spacing in inches. Default 16.0
             (residential standard). 24" is also common (commercial,
             advanced framing).
@@ -416,26 +423,106 @@ def frame_wall(
             parent. If omitted, the Empty lands at world origin and you
             transform it in Blender (or via a separate API call)
             afterward.
+        openings: Optional list of door and window opening dicts. Each:
+
+            {
+              "type":            "door" | "window",      # REQUIRED
+              "x_offset_in":     number >= 0,            # REQUIRED
+              "ro_width_in":     number > 0,             # REQUIRED
+              "ro_height_in":    number > 0,             # REQUIRED
+              "sill_height_in":  number >= 0,            # REQUIRED for window,
+                                                          #   optional for door
+                                                          #   (default 0.0)
+              "header_nominal":  "2x4" | "2x6" | ...,    # OPTIONAL; defaults
+                                                          #   to wall `nominal`
+              "jack_count":      1 | 2 | 3,              # OPTIONAL; defaults
+                                                          #   to 2 if RO ≥ 72"
+                                                          #   else 1
+            }
+
+            Field semantics:
+              - type: "door" or "window" — lowercase on the wire.
+              - x_offset_in: wall-left to RO-left in inches.
+              - ro_width_in, ro_height_in: rough opening size in inches.
+                ro_height_in is clear from rough sill top (or bottom plate
+                top for doors) to header bottom.
+              - sill_height_in: z-coord of the rough sill top measured
+                from bottom of bottom plate. Required for windows; for
+                doors any provided value is ignored (doors sit on the
+                bottom plate).
+              - header_nominal: defaults to the wall `nominal` — this
+                default is GEOMETRIC, not structural. For real load spans
+                see README "Header sizing" and IRC R602.7.
+              - jack_count: 1 or 2 per side is conventional; defaults to
+                2 for RO ≥ 72" per IRC R602.7 typical loading.
+
+            Examples:
+
+            Single 36"×80" door centered in a 96" wall:
+              openings=[{
+                "type": "door",
+                "x_offset_in": 30.0,
+                "ro_width_in": 36.0,
+                "ro_height_in": 80.0,
+              }]
+
+            Door + window in the same wall (jack_count auto-derived,
+            header_nominal defaults to "2x4"):
+              openings=[
+                {"type": "door",  "x_offset_in": 12.0,
+                 "ro_width_in": 36.0, "ro_height_in": 82.0},
+                {"type": "window", "x_offset_in": 60.0,
+                 "ro_width_in": 36.0, "ro_height_in": 48.0,
+                 "sill_height_in": 36.0},
+              ]
+
+            Validation: each opening dict is checked for required fields,
+            types, and choice membership with 1-based opening indices in
+            error messages ("Opening 2: ..."). Cross-field rules (within
+            wall, no pairwise overlap, header fits under top plates,
+            window sill clears bottom plate) run against the same
+            validator the in-Blender N-panel preview uses, so an LLM
+            agent and a human see identical failure modes.
 
     Returns:
         wall_name: name of the new Empty parent (e.g. "Wall_03")
         length_in, height_in, nominal, spacing_oc_in, top_plate_count,
             bottom_plate_count: echoes of input with defaults filled in
-        n_studs: number of studs placed (computed via the same
-            sheathing-aligned algorithm the operator uses)
+        n_studs: REGULAR OC stud count AFTER filtering around any king
+            brackets. With openings, kings/jacks/cripples are counted
+            separately in openings_summary below. With no openings, this
+            matches the raw OC count.
         n_plates: top_plate_count + bottom_plate_count
-        stud_length_in: cut length of each stud (height - plate stack)
-        stud_stock_in: purchased stock the studs are cut from (smallest
-            standard length that fits)
-        plate_stock_in: purchased stock the plates are cut from (typical
-            8' / 12' / 16' wall lengths have plates running full stock)
-        new_objects: sorted list of every new object name (the Empty
-            plus all plate and stud children)
+        stud_length_in: cut length of each regular stud (height - plate
+            stack)
+        stud_stock_in, plate_stock_in: purchased stock the studs and
+            plates are cut from (smallest standard length that fits)
+        n_openings: always present (0 when openings omitted)
+        openings_summary: always present (empty list when none). One dict
+            per opening with the ACTUAL values used after default-fill:
+
+              {
+                "type":              "door" | "window",
+                "jack_count":        int,
+                "header_nominal":    str,
+                "jack_length_in":    float,
+                "header_length_in":  float,
+                "n_header_cripples": int,  # 0 if cripple zone too short
+                "n_sill_cripples":   int,  # 0 for doors
+              }
+
+        new_objects: sorted list of every new object name — the Empty,
+            all plates, all regular studs, plus per-opening kings, jacks,
+            two header members, the untagged 1/2" plywood spacer, an
+            optional rough sill (windows), and any header / sill
+            cripples.
 
     Raises INVALID_PARAMS (-32602) for impossible geometry: wall too
-    short for two end studs, wall too short for the plate stack, or
+    short for two end studs, wall too short for the plate stack,
     stud/plate length exceeding any available stock for the chosen
-    nominal.
+    nominal, per-opening dict shape errors (with 1-based index), or
+    cross-field opening errors (overlap, off-wall, header too tall,
+    sill in plate).
     """
     params: dict = {
         "length_in": length_in,
@@ -447,6 +534,8 @@ def frame_wall(
     }
     if location_m is not None:
         params["location_m"] = location_m
+    if openings is not None:
+        params["openings"] = openings
     return _call("frame_wall", params)
 
 
