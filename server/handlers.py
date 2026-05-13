@@ -101,6 +101,139 @@ def _location_param(params: dict) -> Vector | None:
 
 
 # ---------------------------------------------------------------------------
+# Wall opening param validation (v0.5.1)
+# ---------------------------------------------------------------------------
+
+def _opening_number(op_dict: dict, idx: int, field: str, *,
+                    required: bool, allow_zero: bool) -> float | None:
+    """Pull a numeric field out of one opening dict with consistent error
+    messaging. idx is 1-based for client-facing messages. allow_zero=True
+    means >= 0 is permitted; False means strictly > 0.
+    """
+    val = op_dict.get(field)
+    if val is None:
+        if required:
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f'Opening {idx}: missing required "{field}"',
+            )
+        return None
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f'Opening {idx}: "{field}" must be a number, '
+            f'got {type(val).__name__}',
+        )
+    if allow_zero:
+        if val < 0:
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f'Opening {idx}: "{field}" must be >= 0',
+            )
+    else:
+        if val <= 0:
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f'Opening {idx}: "{field}" must be > 0',
+            )
+    return float(val)
+
+
+def _parse_openings(raw, wall_nominal: str) -> list[dict]:
+    """Validate and normalize the wire-format openings list.
+
+    Returns a list of dicts with all defaults filled in and the wire-format
+    lowercase "door"/"window" translated to internal 'DOOR'/'WINDOW' for
+    PraxovaWallOpening.opening_type. 1-based opening indices in error
+    messages match what the UI's live preview shows.
+
+    The cross-field rules (within wall, no overlap, fits under top plates,
+    sill clears bottom plate) are NOT checked here — those run after the
+    CollectionProperty is populated, via templates.validate_openings, so
+    the bridge and the UI share one validator.
+    """
+    if not isinstance(raw, list):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f'"openings" must be a list of opening dicts, '
+            f'got {type(raw).__name__}',
+        )
+    out: list[dict] = []
+    for i, op in enumerate(raw, start=1):
+        if not isinstance(op, dict):
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f"Opening {i}: must be a dict, got {type(op).__name__}",
+            )
+
+        t = op.get("type")
+        if not isinstance(t, str) or t not in ("door", "window"):
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f'Opening {i}: "type" must be "door" or "window"',
+            )
+
+        x_offset_in = _opening_number(
+            op, i, "x_offset_in", required=True, allow_zero=True,
+        )
+        ro_width_in = _opening_number(
+            op, i, "ro_width_in", required=True, allow_zero=False,
+        )
+        ro_height_in = _opening_number(
+            op, i, "ro_height_in", required=True, allow_zero=False,
+        )
+
+        # sill_height_in is required for windows, optional (default 0)
+        # for doors per the design doc — doors sit on the bottom plate.
+        if t == "window":
+            sill_height_in = _opening_number(
+                op, i, "sill_height_in", required=True, allow_zero=True,
+            )
+        else:
+            sh = _opening_number(
+                op, i, "sill_height_in", required=False, allow_zero=True,
+            )
+            sill_height_in = 0.0 if sh is None else sh
+
+        # header_nominal defaults to wall_nominal (the spec's
+        # "geometric default, not structural" rule).
+        header_nominal = op.get("header_nominal")
+        if header_nominal is None:
+            header_nominal = wall_nominal
+        elif (not isinstance(header_nominal, str)
+                or header_nominal not in templates.LUMBER_TYPES):
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f'Opening {i}: "header_nominal" must be one of '
+                f'{sorted(templates.LUMBER_TYPES)}',
+            )
+
+        # jack_count defaults via recommend_jack_count (2 for ≥72" RO).
+        jack_count = op.get("jack_count")
+        if jack_count is None:
+            jack_count = templates.recommend_jack_count(ro_width_in)
+        elif (isinstance(jack_count, bool)
+                or not isinstance(jack_count, int)
+                or jack_count not in (1, 2, 3)):
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f'Opening {i}: "jack_count" must be 1, 2, or 3',
+            )
+
+        out.append({
+            "opening_type": "DOOR" if t == "door" else "WINDOW",
+            "type_lower": t,
+            "x_offset_in": x_offset_in,
+            "ro_width_in": ro_width_in,
+            "ro_height_in": ro_height_in,
+            "sill_height_in": sill_height_in,
+            "header_nominal": header_nominal,
+            "jack_count": jack_count,
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Object serialization
 # ---------------------------------------------------------------------------
 
@@ -527,7 +660,7 @@ def duplicate_e2e(params: dict) -> dict:
 # ===========================================================================
 
 def frame_wall(params: dict) -> dict:
-    """Frame a single wall - plates + studs + Empty parent.
+    """Frame a single wall - plates + studs + optional openings + Empty parent.
 
     Required:
         length_in (number > 0): wall length along +X in inches.
@@ -543,20 +676,51 @@ def frame_wall(params: dict) -> dict:
         location_m (3-element [x,y,z] list, default [0, 0, 0]): world
             location for the new wall Empty parent. Children's local
             positions stay wall-relative.
+        openings (list of opening dicts, default []): door and window
+            openings on the wall. v0.5.1 bridge parity for the v0.5 UI
+            feature. Each dict:
+
+                type (str, REQUIRED): "door" or "window" (lowercase).
+                x_offset_in (number >= 0, REQUIRED): distance from wall
+                    left edge to left edge of the rough opening.
+                ro_width_in (number > 0, REQUIRED): rough opening width.
+                ro_height_in (number > 0, REQUIRED): rough opening height
+                    (clear from rough sill top / bottom plate top to
+                    header bottom).
+                sill_height_in (number >= 0, REQUIRED for type="window",
+                    optional for type="door" — defaults to 0.0 for doors
+                    since doors sit on the bottom plate): z-coord of the
+                    rough sill top measured from bottom of bottom plate.
+                header_nominal (str, OPTIONAL, defaults to `nominal`):
+                    header lumber size from LUMBER_TYPES. The default is
+                    GEOMETRIC, not structural — for real load spans see
+                    README "Header sizing" and IRC R602.7.
+                jack_count (int in {1, 2, 3}, OPTIONAL, defaults via
+                    recommend_jack_count: 2 for openings >= 72", else 1):
+                    jacks per side.
+
+    Validation order: scalar params first (same v0.4.1 checks for nominal,
+    length/thickness, stud length, stock fit), then each opening dict
+    (required fields, types, choice membership) with 1-based opening
+    indices, then cross-field opening checks via templates.validate_openings
+    — the same validator the v0.5 N-panel preview uses, so an LLM agent and
+    a human in Blender see identical failure modes for the same inputs.
 
     Returns:
         wall_name (the new Empty), echoes of all input params, n_studs
-        (computed from length / spacing / thickness), n_plates
+        (computed from length / spacing / thickness — REGULAR OC STUDS
+        AFTER FILTERING around king brackets; kings/jacks/cripples
+        counted separately via openings_summary), n_plates
         (top + bottom), stud_length_in (cut length after the plate stack),
         stud_stock_in (smallest stock the studs are cut from),
-        plate_stock_in (same for plates), new_objects (sorted Empty + all
-        child names).
-
-    Pre-validates the same cross-field constraints the operator does
-    (known nominal, length >= 2*thickness, stud length positive, stock
-    fits within LENGTHS_BY_TYPE) so the LLM gets clean INVALID_PARAMS
-    error codes rather than the operator's generic APP_OPERATOR_FAILED.
-    The operator's internal validation is still defense in depth.
+        plate_stock_in (same for plates), n_openings (always present, 0
+        when openings omitted), openings_summary (always present, [] when
+        none; one dict per opening with type, jack_count, header_nominal,
+        jack_length_in, header_length_in, n_header_cripples,
+        n_sill_cripples — actual values used after default-fill),
+        new_objects (sorted Empty + all child names, including kings,
+        jacks, headers, the untagged 1/2" plywood spacer block, optional
+        rough sills, and cripples).
     """
     # --- Required ---
     length_in = _require(params, "length_in", (int, float))
@@ -608,6 +772,19 @@ def frame_wall(params: dict) -> dict:
 
     location = _location_param(params)
 
+    # --- v0.5.1: per-opening dict validation ---
+    # Type checks, choice membership, and default-fill (header_nominal,
+    # jack_count, doors' sill_height_in). Cross-field rules (within
+    # wall, overlap, header height) happen after the CollectionProperty
+    # is populated, via templates.validate_openings — same validator
+    # the UI uses, so identical error messages for the LLM and a human.
+    raw_openings = _optional(params, "openings", list, default=None)
+    parsed_openings: list[dict] = (
+        _parse_openings(raw_openings, nominal)
+        if raw_openings is not None
+        else []
+    )
+
     # --- Cross-field validation (mirrors ops_frame.py) ---
     # Pre-validating here means INVALID_PARAMS instead of
     # APP_OPERATOR_FAILED when the wall is geometrically impossible -
@@ -650,6 +827,33 @@ def frame_wall(params: dict) -> dict:
     sp.wall_top_plate_count = top_plate_count
     sp.wall_bottom_plate_count = bottom_plate_count
 
+    # v0.5.1: clear any prior openings state (a previous frame_wall call
+    # in the same session would have left entries) and repopulate from
+    # the validated parsed list. Empty list when openings was omitted
+    # exits the v0.4.1 no-openings flow on the operator side.
+    sp.wall_openings.clear()
+    for parsed in parsed_openings:
+        item = sp.wall_openings.add()
+        item.opening_type = parsed["opening_type"]
+        item.x_offset_in = parsed["x_offset_in"]
+        item.ro_width_in = parsed["ro_width_in"]
+        item.ro_height_in = parsed["ro_height_in"]
+        item.sill_height_in = parsed["sill_height_in"]
+        item.header_nominal = parsed["header_nominal"]
+        item.jack_count = parsed["jack_count"]
+
+    # Cross-field opening validation — same source of truth the UI's
+    # live preview uses (templates.validate_openings already emits the
+    # 1-based "Opening N ..." prefix).
+    if parsed_openings:
+        ok, msg = templates.validate_openings(
+            list(sp.wall_openings),
+            length_in, height_in, nominal,
+            top_plate_count, bottom_plate_count,
+        )
+        if not ok:
+            raise bridge.RPCError(bridge.INVALID_PARAMS, msg)
+
     before = {o.name for o in scene.objects}
     result = bpy.ops.praxova.frame_wall('EXEC_DEFAULT')
     _check_op_result(result, "praxova.frame_wall")
@@ -671,10 +875,57 @@ def frame_wall(params: dict) -> dict:
     # Stud count is deterministic from inputs - compute via
     # stud_positions rather than filtering child names by substring,
     # which would be fragile if the naming convention changes.
-    n_studs = len(
-        templates.stud_positions(length_in, spacing_oc_in, thickness_in),
+    # v0.5.1: with openings, n_studs is REGULAR studs only (after
+    # filtering around king brackets). Kings, jacks, and cripples are
+    # counted separately via openings_summary below.
+    raw_stud_xs = templates.stud_positions(
+        length_in, spacing_oc_in, thickness_in,
     )
+    if parsed_openings:
+        opening_layouts = [
+            templates.opening_framing_layout(
+                item, nominal, height_in,
+                top_plate_count, bottom_plate_count,
+            )
+            for item in sp.wall_openings
+        ]
+        filtered_stud_xs = templates.filter_studs_around_openings(
+            raw_stud_xs, thickness_in, list(sp.wall_openings),
+            opening_layouts,
+        )
+        n_studs = len(filtered_stud_xs)
+    else:
+        opening_layouts = []
+        n_studs = len(raw_stud_xs)
     n_plates = top_plate_count + bottom_plate_count
+
+    # v0.5.1: per-opening summary. Cripple counts mirror the operator's
+    # placement logic: OC stud positions whose full thickness fits inside
+    # the king-bracket inner range (between the two king inner edges).
+    openings_summary: list[dict] = []
+    for parsed, layout in zip(parsed_openings, opening_layouts):
+        k_left_in = layout["king_left_x"] + thickness_in
+        k_right_in = layout["king_right_x"] - thickness_in
+        cripples_at_oc = sum(
+            1 for x in raw_stud_xs
+            if x >= k_left_in and x + thickness_in <= k_right_in
+        )
+        top_zone = layout["cripple_top_zone"]
+        n_header_cripples = cripples_at_oc if top_zone[0] is not None else 0
+        if parsed["opening_type"] == "WINDOW":
+            bot_zone = layout["cripple_bottom_zone"]
+            n_sill_cripples = cripples_at_oc if bot_zone[0] is not None else 0
+        else:
+            n_sill_cripples = 0
+        openings_summary.append({
+            "type": parsed["type_lower"],
+            "jack_count": parsed["jack_count"],
+            "header_nominal": parsed["header_nominal"],
+            "jack_length_in": layout["jack_length_in"],
+            "header_length_in": layout["header_member_length_in"],
+            "n_header_cripples": n_header_cripples,
+            "n_sill_cripples": n_sill_cripples,
+        })
 
     return {
         "wall_name": empty.name,
@@ -689,6 +940,8 @@ def frame_wall(params: dict) -> dict:
         "stud_length_in": stud_length_in,
         "stud_stock_in": stud_stock_in,
         "plate_stock_in": plate_stock_in,
+        "n_openings": len(parsed_openings),
+        "openings_summary": openings_summary,
         "new_objects": new_names,
     }
 
