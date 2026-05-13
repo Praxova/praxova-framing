@@ -28,23 +28,17 @@ from . import templates
 # lumber-type enums. Multiple PropertyGroups need to drive a dropdown over
 # the same LUMBER_TYPES catalog (PraxovaSceneProps.wall_nominal,
 # PraxovaWallOpening.header_nominal), so the items live here in one place.
-# Strings are stored at module scope so Blender's enum machinery doesn't
-# garbage-collect them between callbacks (the documented bpy.props pitfall
-# with dynamic items callbacks).
+#
+# Passed directly as items=_LUMBER_TYPE_ITEMS (a static list) rather than
+# via a callback because Blender 5.x enforces "default must be an integer
+# when items is a function" — a callback would force us to drop our
+# string default='2x4' or convert it to a numeric ID. A module-level
+# list keeps both behaviors: string default works, AND a single source
+# of truth feeds both fields.
 _LUMBER_TYPE_ITEMS: list[tuple[str, str, str]] = [
     (nominal, nominal, f"{nominal} dimensional lumber")
     for nominal in templates.LUMBER_TYPES
 ]
-
-
-def _lumber_type_items_callback(self, context):
-    """Items callback for lumber-type EnumProperty fields.
-
-    Used by PraxovaSceneProps.wall_nominal and PraxovaWallOpening.header_nominal
-    so both dropdowns stay in sync with templates.LUMBER_TYPES via the single
-    module-level _LUMBER_TYPE_ITEMS list.
-    """
-    return _LUMBER_TYPE_ITEMS
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +241,7 @@ class PraxovaWallOpening(bpy.types.PropertyGroup):
     )
     header_nominal: EnumProperty(  # noqa: F821
         name="Header Size",
-        items=_lumber_type_items_callback,
+        items=_LUMBER_TYPE_ITEMS,
         default='2x4',
         description=(
             "Header lumber size. Defaults to wall nominal; upsize for "
@@ -351,16 +345,15 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
         soft_max=240.0,  # 20 ft soft cap (high-ceiling great room)
         precision=2,
     )
-    # wall_nominal items are sourced from the module-level
-    # _lumber_type_items_callback so the dropdown stays in sync with the
-    # templates.LUMBER_TYPES catalog. The same callback feeds
-    # PraxovaWallOpening.header_nominal (v0.5) - one source of truth.
-    # The dict's small-to-large insertion order is preserved (Python 3.7+),
-    # matching the existing Add menu order.
+    # wall_nominal items come from the module-level _LUMBER_TYPE_ITEMS
+    # list so the dropdown stays in sync with templates.LUMBER_TYPES.
+    # PraxovaWallOpening.header_nominal (v0.5) shares the same list -
+    # one source of truth. The dict's small-to-large insertion order is
+    # preserved (Python 3.7+), matching the existing Add menu order.
     wall_nominal: EnumProperty(  # noqa: F821
         name="Stud Size",
         description="Dimensional lumber size used for studs and plates",
-        items=_lumber_type_items_callback,
+        items=_LUMBER_TYPE_ITEMS,
         default='2x4',
     )
     wall_spacing_oc_in: FloatProperty(  # noqa: F821
