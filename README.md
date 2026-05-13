@@ -2,7 +2,7 @@
 
 A Blender add-on for fast construction framing in 3D — lumber, sheet, and panel templates with one-click on-center duplication, edge-to-edge fill for sheets and panels, a single-shot "frame a wall" composite operator (v0.4), cut-list export with cut/order summaries, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
 
-**Status:** Beta (v0.5.0). Pre-1.0 — APIs and the per-object data model may change between minor versions.
+**Status:** Beta (v0.5.1). Pre-1.0 — APIs and the per-object data model may change between minor versions.
 
 ## What it does
 
@@ -147,6 +147,8 @@ To use:
 1. N-panel → **MCP Bridge** → **Start Bridge** in Blender.
 2. From the MCP client, call any of: `add_lumber`, `add_sheet`, `add_panel`, `duplicate_oc`, `duplicate_e2e`, `frame_wall`, `generate_cutlist`, `set_imperial_units`, `list_materials`, `list_objects`, `get_scene_info`.
 
+As of v0.5.1, `frame_wall` accepts an optional `openings` array — a list of door and window opening dicts mirroring the in-Blender Openings UIList. Each dict carries `type` (`"door"` or `"window"`), `x_offset_in`, `ro_width_in`, `ro_height_in`, optional `sill_height_in` (required for windows), optional `header_nominal` (defaults to wall nominal), and optional `jack_count` (defaults to 2 for openings ≥72", else 1). The response gains `n_openings` plus an `openings_summary` with per-opening jack length, header length, and cripple counts. See the FastMCP tool docstring in `mcp_server/praxova_framing_mcp/server.py` for the full schema and worked examples.
+
 For protocol-level testing without an LLM client, run `smoke_test.py` from the repo root with the bridge running.
 
 ## Roadmap
@@ -159,7 +161,7 @@ For protocol-level testing without an LLM client, run `smoke_test.py` from the r
 - ✅ **v0.4** — "Frame a Wall" composite operator (plates + studs + Empty parent in one shot). Sheathing-aligned stud layout, stock vs. cut length distinction on lumber tags, two-subsection LUMBER cut list (CUT LIST + ORDER SUMMARY).
 - ✅ **v0.4.1** — Bridge parity for `frame_wall` (12th MCP method); pre-validation surfacing impossible geometry as clean `INVALID_PARAMS`; smoke-test extension exercising the new tool end-to-end; `__version__` constant in `__init__.py` so the bridge `ping()` no longer carries its own hardcoded version string.
 - ✅ **v0.5** — Door / window openings on `frame_wall`: `PraxovaWallOpening` PropertyGroup, N-panel UIList with Add Door / Add Window / Remove / Distribute, opening-aware live preview, five pure helper functions in `templates.py` (`recommend_jack_count`, `opening_framing_layout`, `filter_studs_around_openings`, `validate_openings`, `redistribute_openings_evenly`), kings + jacks + (2) 2x + 1/2" plywood spacer headers + optional rough sills + header / sill cripples placed by the operator. README "Header sizing" section documents the geometric-default-not-structural `header_nominal`.
-- **v0.5.1** — Bridge parity for `frame_wall` openings. Extend the `frame_wall` MCP tool to accept an `openings` array parameter that maps to the same `PraxovaWallOpening` field set; pre-validation surfacing per-opening errors as `INVALID_PARAMS`; smoke-test extension framing a wall with a door and a window via the bridge and asserting the new piece types (jacks, headers, sills, cripples) appear in the cut list.
+- ✅ **v0.5.1** — Bridge parity for `frame_wall` openings: the bridge handler and FastMCP tool accept an `openings` array mirroring the v0.5 `PraxovaWallOpening` field set; per-opening dict validation surfaces shape errors as `INVALID_PARAMS` with 1-based indices; cross-field rules reuse `templates.validate_openings` so the bridge and the in-Blender preview share one validator; return shape gains `n_openings` and `openings_summary` (per-opening jack length, header length, header/sill cripple counts); smoke-test step `[10]` frames a wall with a centered 38"×82" door and pins the OC stud filter (4 survivors), cripple count (3), and the `"cut to 80.5"` / `"cut to 41"` / `"cut to 7.5"` annotations in the cut list. Method count stays 12 — `frame_wall` is extended, not added.
 - **Later** — Corner stud treatments (three-stud corners, California corners); additional sheet sizes (4x10, 4x12), 5/8" sheet thickness, addon preferences for thickness overrides, ribbed-profile metal panel geometry to replace the v0.3 flat-slab placeholder.
 
 ## License

@@ -76,10 +76,12 @@ def run(host: str, port: int) -> int:
         # v0.4.0: version bumped to 0.4.0. v0.4.1: method_count 11 -> 12
         # for the new frame_wall handler; addon_version 0.4.0 -> 0.4.1.
         # v0.5.0: addon_version 0.4.1 -> 0.5.0 for the door/window
-        # openings UI; method_count stays 12 since bridge parity for the
-        # openings parameter is deferred to v0.5.1.
-        assert r["addon_version"] == "0.5.0", (
-            f"expected addon_version 0.5.0, got {r['addon_version']!r}"
+        # openings UI; method_count stays 12. v0.5.1: addon_version
+        # 0.5.0 -> 0.5.1 for bridge parity (frame_wall handler gains
+        # the openings parameter); method_count stays 12 since
+        # frame_wall is extended, not added.
+        assert r["addon_version"] == "0.5.1", (
+            f"expected addon_version 0.5.1, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 12, (
             f"expected 12 methods, got {r['method_count']}"
