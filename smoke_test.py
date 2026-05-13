@@ -8,15 +8,16 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.5.0 RPC surface end-to-end (12 methods): ping (with
+Covers the full v0.5.1 RPC surface end-to-end (12 methods): ping (with
 addon_version and method_count assertions), scene info, material
 catalog, lumber / sheet / panel placement, on-center duplication,
-edge-to-edge fill, wall framing (v0.4.1 - bridge parity), cut-list
-generation (verifying three sections plus the v0.4 'cut to N"'
-annotation on frame_wall studs), and three error paths including the
-LUMBER refusal for duplicate_e2e. v0.5 is a UI-only cycle for the new
-door / window openings on frame_wall; bridge parity for the openings
-parameter lands in v0.5.1, so method_count stays at 12 here.
+edge-to-edge fill, wall framing with optional door/window openings
+(v0.5.1 - bridge parity for the v0.5 UI), cut-list generation
+(verifying three sections and the 'cut to N"' annotations for
+frame_wall regular studs and the new v0.5 opening pieces — jacks,
+header members, and cripples), and three error paths including the
+LUMBER refusal for duplicate_e2e. method_count stays at 12 because
+frame_wall is being extended, not added.
 """
 
 from __future__ import annotations
@@ -209,17 +210,108 @@ def run(host: str, port: int) -> int:
             f"got {len(r['new_objects'])}: {r['new_objects']}"
         )
 
-        print("\n[10] list_objects (praxova only)")
+        print("\n[10] frame_wall 96\"x96\" 2x4 at 16 OC with one door")
+        # v0.5.1: bridge parity for the v0.5 opening flow. Test wall is
+        # 96"x96" 2x4 at 16 OC with a centered-ish 38"x82" RO door at
+        # x_offset=29. Math (compute by hand, all values pin against
+        # regressions):
+        #   - stud thickness t = 1.5
+        #   - king bracket: outer [26.0, 70.0], inner [27.5, 68.5]
+        #   - jack length = 82 - 1.5 (bottom plate top) = 80.5
+        #   - header length = 38 + 2 * 1 * 1.5 = 41.0
+        #   - header cripple zone z = (85.5, 93.0), length 7.5 (>= 1.5 min)
+        #   - raw OC stud x lefts: 0, 15.25, 31.25, 47.25, 63.25, 79.25, 94.5
+        #   - filter: studs whose [x, x+1.5] overlaps king bracket [26, 70]
+        #     drops 31.25, 47.25, 63.25 (three of them); keeps 0, 15.25,
+        #     79.25, 94.5 (four)
+        #   - header cripples at OC positions inside inner range
+        #     [27.5, 68.5]: 31.25, 47.25, 63.25 — count 3
+        #   - jack_count auto from recommend_jack_count(38) -> 1 (RO < 72")
+        #   - header_nominal default -> wall nominal "2x4"
+        r = cli.call("frame_wall", {
+            "length_in": 96.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 16.0,
+            "openings": [
+                {
+                    "type": "door",
+                    "x_offset_in": 29.0,
+                    "ro_width_in": 38.0,
+                    "ro_height_in": 82.0,
+                },
+            ],
+        })
+        print(f"  -> {r}")
+        assert r["wall_name"].startswith("Wall_"), (
+            f"wall name should match Wall_NN, got {r['wall_name']!r}"
+        )
+        assert r["n_studs"] == 4, (
+            f"96\" wall at 16 OC with door at x=29 should leave 4 "
+            f"regular studs after king-bracket filtering, got {r['n_studs']}"
+        )
+        assert r["n_plates"] == 3, (
+            f"2 top + 1 bottom = 3 plates, got {r['n_plates']}"
+        )
+        assert r["n_openings"] == 1, (
+            f"expected n_openings=1, got {r['n_openings']}"
+        )
+        assert len(r["openings_summary"]) == 1, (
+            f"expected 1 openings_summary entry, got {len(r['openings_summary'])}"
+        )
+        s = r["openings_summary"][0]
+        assert s["type"] == "door", (
+            f"opening type should echo lowercase 'door', got {s['type']!r}"
+        )
+        assert s["jack_count"] == 1, (
+            f"jack_count auto-derive: recommend_jack_count(38) -> 1 "
+            f"(RO < 72\"), got {s['jack_count']}"
+        )
+        assert s["header_nominal"] == "2x4", (
+            f"header_nominal should default to wall nominal '2x4', "
+            f"got {s['header_nominal']!r}"
+        )
+        assert s["jack_length_in"] == 80.5, (
+            f"jack_length = ro_height - bottom_plate_count*t = 82 - 1.5 "
+            f"= 80.5, got {s['jack_length_in']}"
+        )
+        assert s["header_length_in"] == 41.0, (
+            f"header_length = ro_width + 2*jack_count*t = 38 + 2*1*1.5 "
+            f"= 41.0, got {s['header_length_in']}"
+        )
+        assert s["n_header_cripples"] == 3, (
+            f"3 OC positions (31.25, 47.25, 63.25) fall inside king "
+            f"inner range [27.5, 68.5], got {s['n_header_cripples']}"
+        )
+        assert s["n_sill_cripples"] == 0, (
+            f"door has no rough sill so no sill cripples, "
+            f"got {s['n_sill_cripples']}"
+        )
+        # new_objects: 1 Empty + 4 regular studs + 3 plates + 2 kings
+        # + 2 jacks + 2 header members + 1 header spacer (untagged but
+        # still a scene object) + 3 header cripples = 18.
+        assert len(r["new_objects"]) == 18, (
+            f"expected 18 new objects (1 Empty + 4 regular studs + 3 "
+            f"plates + 2 kings + 2 jacks + 2 headers + 1 spacer + 3 "
+            f"cripples), got {len(r['new_objects'])}: {r['new_objects']}"
+        )
+
+        print("\n[11] list_objects (praxova only)")
         r = cli.call("list_objects")
         print(f"  -> {r['count']} tagged objects")
-        # 1 stud + 4 OC dupes + 1 sheet + 1 panel + 3 fill dupes
-        # + 3 frame_wall studs + 3 frame_wall plates = 16.
-        # The frame_wall Empty parent is NOT counted - praxova_only=True
-        # filters to tag.is_lumber, which the Empty doesn't carry (only
-        # the plates and studs do).
-        assert r["count"] == 16
+        # Existing tagged 16 (after step 9):
+        #   1 stud + 4 OC dupes + 1 sheet + 1 panel + 3 fill dupes
+        #   + 3 frame_wall studs + 3 frame_wall plates = 16.
+        # Step 10 adds 16 NEW tagged pieces:
+        #   4 regular studs + 3 plates + 2 kings + 2 jacks + 2 headers
+        #   + 3 header cripples = 16. The header spacer is UNTAGGED
+        #   (no is_lumber tag) per the v0.5 sheathing-scrap convention,
+        #   so it doesn't show up in praxova_only list_objects. The
+        #   Empty is untagged too.
+        # Total: 16 + 16 = 32.
+        assert r["count"] == 32
 
-        print("\n[11] generate_cutlist")
+        print("\n[12] generate_cutlist")
         r = cli.call("generate_cutlist")
         print("  -> cutlist body:")
         for line in r["text"].splitlines():
@@ -240,6 +332,20 @@ def run(host: str, port: int) -> int:
             "expected 'cut to 91.5\"' annotation for frame_wall studs in "
             "the LUMBER - CUT LIST subsection"
         )
+        # v0.5.1: the opening pieces add three more cut-length annotations
+        # to the CUT LIST subsection — jacks at 80.5", header members at
+        # 41" (integer, so '41' not '41.0' per _format_inches' trailing-
+        # zero strip), and header cripples at 7.5".
+        assert "cut to 80.5" in r["text"], (
+            "expected 'cut to 80.5\"' annotation for jack studs"
+        )
+        assert "cut to 41" in r["text"], (
+            "expected 'cut to 41\"' annotation for header members "
+            "(_format_inches strips trailing zeros from 41.0)"
+        )
+        assert "cut to 7.5" in r["text"], (
+            "expected 'cut to 7.5\"' annotation for header cripples"
+        )
         # The fill operator should have brought the panel count from 1 to 4.
         # Format from ops_cutlist: "  <qty>  x  <label>" with the label
         # at the end. Look for the count line for the panel label.
@@ -253,13 +359,13 @@ def run(host: str, port: int) -> int:
             f"expected 4 panels in cut list, got line: {panel_line!r}"
         )
 
-        print("\n[12] error path: unknown lumber")
+        print("\n[13] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[13] error path: duplicate_e2e on lumber (should refuse)")
+        print("\n[14] error path: duplicate_e2e on lumber (should refuse)")
         # The LUMBER refusal is enforced in the bridge handler so the
         # error carries a clean INVALID_PARAMS code instead of the
         # operator's APP_OPERATOR_FAILED.
@@ -278,7 +384,7 @@ def run(host: str, port: int) -> int:
                 f"expected error to mention lumber, got: {err_text!r}"
             )
 
-        print("\n[14] error path: bad method")
+        print("\n[15] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:
