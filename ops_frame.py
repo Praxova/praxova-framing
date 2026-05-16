@@ -195,7 +195,8 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
         # OWN stud thickness (thickness_in, set above as
         # LUMBER_TYPES[nominal][0]) is what the END-side overrides
         # need to offset by the stud's own x-extent.
-        paired_nominal = paired.praxova_wall.wall_nominal
+        paired_wall = ctx['paired_wall']
+        paired_nominal = paired_wall.praxova_wall.wall_nominal
         wt_other = templates.LUMBER_TYPES[paired_nominal][1]
         geom = templates.l_corner_geometry(
             st_self=thickness_in,
