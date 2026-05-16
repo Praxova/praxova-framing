@@ -8,7 +8,7 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.5.1 RPC surface end-to-end (12 methods): ping (with
+Covers the full v0.6.0 RPC surface end-to-end (12 methods): ping (with
 addon_version and method_count assertions), scene info, material
 catalog, lumber / sheet / panel placement, on-center duplication,
 edge-to-edge fill, wall framing with optional door/window openings
@@ -16,8 +16,10 @@ edge-to-edge fill, wall framing with optional door/window openings
 (verifying three sections and the 'cut to N"' annotations for
 frame_wall regular studs and the new v0.5 opening pieces — jacks,
 header members, and cripples), and three error paths including the
-LUMBER refusal for duplicate_e2e. method_count stays at 12 because
-frame_wall is being extended, not added.
+LUMBER refusal for duplicate_e2e. method_count stays at 12 — v0.6 is
+a UI-only cycle for multi-wall coordination (Building/Level
+containers, L corner joints, frame_building orchestrator); bridge
+parity lands in v0.6.1.
 """
 
 from __future__ import annotations
@@ -78,10 +80,13 @@ def run(host: str, port: int) -> int:
         # v0.5.0: addon_version 0.4.1 -> 0.5.0 for the door/window
         # openings UI; method_count stays 12. v0.5.1: addon_version
         # 0.5.0 -> 0.5.1 for bridge parity (frame_wall handler gains
-        # the openings parameter); method_count stays 12 since
-        # frame_wall is extended, not added.
-        assert r["addon_version"] == "0.5.1", (
-            f"expected addon_version 0.5.1, got {r['addon_version']!r}"
+        # the openings parameter); method_count stays 12. v0.6.0:
+        # addon_version 0.5.1 -> 0.6.0 for multi-wall coordination
+        # (Building/Level, L corner joints, frame_building); UI-only
+        # cycle so method_count stays 12 until v0.6.1 ships bridge
+        # parity for the new operators.
+        assert r["addon_version"] == "0.6.0", (
+            f"expected addon_version 0.6.0, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 12, (
             f"expected 12 methods, got {r['method_count']}"

@@ -2,14 +2,15 @@
 
 A Blender add-on for fast construction framing in 3D — lumber, sheet, and panel templates with one-click on-center duplication, edge-to-edge fill for sheets and panels, a single-shot "frame a wall" composite operator (v0.4), cut-list export with cut/order summaries, and (v0.3) an MCP bridge so an LLM agent like Claude Desktop can drive the same operators.
 
-**Status:** Beta (v0.5.1). Pre-1.0 — APIs and the per-object data model may change between minor versions.
+**Status:** Beta (v0.6.0). Pre-1.0 — APIs and the per-object data model may change between minor versions.
 
 ## What it does
 
 - **Tagged templates** for dimensional lumber (1x2 / 2x3 / 2x4 / 2x6 / 2x8 / 2x10 / 2x12 / 4x4 / 4x6 / 6x6), sheet goods (plywood and OSB at 1/2" and 3/4" performance categories, 4x8 size), and metal roofing/siding panels (36" coverage width at 8' / 12' / 16' lengths). Geometry is *actual* dimensions; cut-list labels use *nominal* / call-out sizes.
 - **On-center duplicator** with two preset rows: stud/joist spacing in inches (12" / 16" / 19.2" / 24") and post/timber spacing in feet (8' / 10'). Plus count and Right/Left direction. Steps along the source's local X axis — the lumber thin axis for stud-spacing workflows. Each duplicate is a separate Object (so the cut list is correct), but they share mesh data (so it's memory-efficient).
 - **Fill Edge-to-Edge duplicator** for sheets and panels. Steps along the source's local Y axis at edge-to-edge spacing — the source's own width. Six preset spans (8'/12'/16'/20'/24'/32') auto-compute count from the active object's width. Use to sheathe a wall or cover a roof in one click. Refuses lumber active objects with a pointer back to the OC duplicator.
-- **Frame a Wall** (v0.4, openings added in v0.5) — single composite operator that places top plates, bottom plates, and studs for a wall, parented to a new Empty for one-handle transform. Sheathing-aligned stud layout: end studs flush with wall ends, intermediate studs at on-center spacing measured from `x=0`, final bay tight when length isn't a multiple of spacing. v0.5 adds optional door and window openings to the same operator: an "Openings" UIList in the N-panel drives king studs, jacks, a (2) 2x + 1/2" plywood spacer header build-up, optional rough sills (windows), and cripples above the header / below the sill. Regular OC studs that would collide with a king bracket are dropped automatically. Single isolated wall in v0.5 — corner stud treatments come in later cycles.
+- **Frame a Wall** (v0.4, openings added in v0.5) — single composite operator that places top plates, bottom plates, and studs for a wall, parented to an Empty for one-handle transform. Sheathing-aligned stud layout: end studs flush with wall ends, intermediate studs at on-center spacing measured from `x=0`, final bay tight when length isn't a multiple of spacing. v0.5 adds optional door and window openings: an "Openings" UIList in the N-panel drives king studs, jacks, a (2) 2x + 1/2" plywood spacer header build-up, optional rough sills (windows), and cripples above the header / below the sill. v0.6 makes the operator context-sensitive — clicking Frame Wall with a wall Empty active re-frames it in place (preserving the Empty so joint references survive), and walls created with a Level active land as children of that Level for multi-wall coordination.
+- **Multi-wall coordination** (v0.6) — Building → Level → Wall hierarchy with L corner joints between walls. A new Building tab in the N-panel hosts container creation, joint management via a UIList, and a Frame Building button that re-frames every wall in the active Level with corner geometry applied (cap plates lap properly per IRC R602.3.2, abutting walls' plates shorten by the main wall's stud thickness, and three-stud corners get the interior filler stud automatically).
 - **Cut list** generator that walks the scene, counts tagged objects by label, and writes to both an in-Blender Text datablock and a `.txt` file next to your `.blend`. Three sections: LUMBER, SHEETS, PANELS. LUMBER renders two subsections (v0.4+): CUT LIST (per-piece with cut-from-stock annotations) and ORDER SUMMARY (aggregated by stock SKU across orientations).
 - **Add-menu integration** — `Add → Praxova Lumber → ...` for lumber, sheets, and panels, in vertical and horizontal orientations.
 - **MCP bridge** (v0.3) — an in-Blender JSON-RPC bridge plus a separate-process MCP server (`mcp_server/`) so an LLM agent can drive every operator above through a chat interface.
@@ -55,6 +56,42 @@ Use the per-opening `header_nominal` override to upsize for real spans and loads
 | 7' – 9'  | (2) 2x12 |
 
 See IRC R602.7 for the prescriptive header tables, your jurisdiction's adopted code for amendments, and an engineer for anything outside the prescriptive tables. The add-on does not validate header sizing against load — it places exactly what you specify.
+
+## Multi-wall coordination
+
+v0.6 adds a Building → Level → Wall container hierarchy and L corner joints. The single-wall workflow from v0.5 is preserved — you don't need a Building to frame one wall — but for anything larger than a single isolated wall, the Building tab gives you joint-aware framing in one click.
+
+### The hierarchy
+
+- **Building** (CUBE Empty) — a structure. Holds one or more Levels.
+- **Level** (SINGLE_ARROW Empty) — one story. Parented under a Building. Walls in the same Level can be joined at corners; the Level's `joints` collection is where those joints live.
+- **Wall** (PLAIN_AXES Empty) — the existing v0.5 frame_wall output, with its own `PraxovaWallProps` PropertyGroup carrying length / height / nominal / OC / openings. Parented under a Level when created with the Level active.
+
+### The N-panel tabs
+
+Two side-by-side panels under the Praxova category:
+
+- **Wall Framing** (the v0.5 tab, renamed) — edits the active wall's params if a wall Empty is selected, otherwise edits scene scratch (which becomes the new wall's params on the next Frame Wall click). Context indicator at the top of the section tells you which.
+- **Building** (new in v0.6) — three nested sections:
+  - **Building**: active Building dropdown + Add Building button + default corner style (for v0.6, three-stud only).
+  - **Level**: active Level dropdown + Add Level button + level index / height + a read-only list of walls in this Level + Frame Building button.
+  - **Joints**: UIList of joints + Add/Remove buttons + active joint detail panel (wall_a + end, wall_b + end, corner style, extending wall). Live validation surfaces the same first-failure message Frame Building would report.
+
+### Joints and the three-stud corner
+
+An L corner joint connects Wall A's `END` (x=wall_length_in) to Wall B's `START` (x=0), or any other end combination. Wall A is the **main** wall — its plates run full length across the corner, and an interior filler stud lands inboard from its end stud to provide drywall backing. Wall B is the **abutting** wall — its bottom plate, lower top plate, and end stud all shorten by Wall A's stud thickness so it lands flush with Wall A's interior face.
+
+The cap plate (topmost top plate) is what gives you continuity across the corner. By default, the **shorter** wall's cap plate runs full length and overlaps the longer wall's lower top plate at the corner — longer walls are harder to splice, so we protect their continuity. The Extending Wall field on each joint lets you override this per-corner.
+
+### Workflow
+
+1. Building tab → **Add Building** — creates `Building_01` + `Level_01`. The active Level is set to the new Level.
+2. Wall Framing tab → set scalar params for the first wall → **Frame Wall**. The new wall lands as a child of `Level_01`.
+3. Move the wall in the viewport (G key, R key), then repeat to add more walls under the same Level.
+4. Building tab → Joints section → **Add Joint** → pick walls A and B in the joint detail panel, pick their ends, leave corner_style and extending_wall on AUTO (or override).
+5. Building tab → **Frame Building** — re-frames every wall in the Level with joint context applied. Three-stud corners appear, cap plates lap, and the cut list now includes `CornerFiller_Joint<NN>` pieces.
+
+Editing an existing wall is straightforward: select the wall Empty in the viewport, the Wall Framing tab now shows that wall's params, change any field (length, height, openings, etc.), click Frame Wall. The wall's children get deleted and rebuilt; the Empty itself is preserved so joint references stay intact. After editing, click Frame Building once more to re-apply joint geometry across the affected walls (v0.6 does not auto-trigger this).
 
 ## Geometry orientation
 
@@ -162,7 +199,10 @@ For protocol-level testing without an LLM client, run `smoke_test.py` from the r
 - ✅ **v0.4.1** — Bridge parity for `frame_wall` (12th MCP method); pre-validation surfacing impossible geometry as clean `INVALID_PARAMS`; smoke-test extension exercising the new tool end-to-end; `__version__` constant in `__init__.py` so the bridge `ping()` no longer carries its own hardcoded version string.
 - ✅ **v0.5** — Door / window openings on `frame_wall`: `PraxovaWallOpening` PropertyGroup, N-panel UIList with Add Door / Add Window / Remove / Distribute, opening-aware live preview, five pure helper functions in `templates.py` (`recommend_jack_count`, `opening_framing_layout`, `filter_studs_around_openings`, `validate_openings`, `redistribute_openings_evenly`), kings + jacks + (2) 2x + 1/2" plywood spacer headers + optional rough sills + header / sill cripples placed by the operator. README "Header sizing" section documents the geometric-default-not-structural `header_nominal`.
 - ✅ **v0.5.1** — Bridge parity for `frame_wall` openings: the bridge handler and FastMCP tool accept an `openings` array mirroring the v0.5 `PraxovaWallOpening` field set; per-opening dict validation surfaces shape errors as `INVALID_PARAMS` with 1-based indices; cross-field rules reuse `templates.validate_openings` so the bridge and the in-Blender preview share one validator; return shape gains `n_openings` and `openings_summary` (per-opening jack length, header length, header/sill cripple counts); smoke-test step `[10]` frames a wall with a centered 38"×82" door and pins the OC stud filter (4 survivors), cripple count (3), and the `"cut to 80.5"` / `"cut to 41"` / `"cut to 7.5"` annotations in the cut list. Method count stays 12 — `frame_wall` is extended, not added.
-- **Later** — Corner stud treatments (three-stud corners, California corners); additional sheet sizes (4x10, 4x12), 5/8" sheet thickness, addon preferences for thickness overrides, ribbed-profile metal panel geometry to replace the v0.3 flat-slab placeholder.
+- ✅ **v0.6** — Multi-wall coordination. Building → Level → Wall container hierarchy with per-wall `PraxovaWallProps` storage; L corner joints with three-stud corner style (interior filler stud + cap plate lap per IRC R602.3.2); in-place wall re-framing that preserves joint `PointerProperty` references; `frame_building` orchestrator that re-frames every wall in the active Level with joint context applied; multi-tab N-panel (Wall Framing tab made context-sensitive + new Building tab with joints UIList + active joint detail). Five pure joint helpers in `templates.py` (`compute_wall_joint_context`, `resolve_extending_wall`, `resolve_corner_style`, `l_corner_geometry`, `validate_joints`) shared between the orchestrator's pre-flight check and the Building tab's live validation indicator. Method count stays 12 — UI-only cycle; bridge parity coming in v0.6.1.
+- **v0.6.1** — Bridge parity for v0.6. Bridge `frame_building` MCP tool plus `add_building` / `add_level` / `add_joint` / `remove_joint` handlers; per-joint dict validation in the bridge mirroring `validate_joints`; bridge surface grows from 12 to 17 methods. Smoke-test extension framing a 2-wall L corner via the bridge and asserting the new `CornerFiller_Joint01` piece appears in the cut list.
+- **v0.7** — T joints + in-line splice; California corner + ladder-blocking corner styles. Both `PraxovaJoint.joint_type` and `PraxovaJoint.corner_style` enums extend rather than break — existing v0.6 joints keep working. v0.7.1 adds bridge parity for the new joint types.
+- **Later** — Multi-story (multiple active Levels per Building); auto-snapping walls to joint world-space positions; floor systems (joists, sheathing, finished flooring); per-floor / per-wall cut list aggregation; adjacent-wall stud alignment; additional sheet sizes (4x10, 4x12), 5/8" sheet thickness, addon preferences for thickness overrides, ribbed-profile metal panel geometry to replace the v0.3 flat-slab placeholder.
 
 ## License
 
