@@ -377,8 +377,12 @@ def run(host: str, port: int) -> int:
             f"wall should report level_name={level_02_name!r}, "
             f"got {r['level_name']!r}"
         )
-        assert abs(r["rotation_deg_z"] - 90.0) < 1e-6, (
-            f"rotation_deg_z should be 90.0, got {r['rotation_deg_z']}"
+        # 1e-4 tolerance: Blender's rotation_euler stores as float32,
+        # so the radians -> degrees round-trip drops a few sig figs.
+        # Observed drift on a clean call is ~2.5e-6 deg; 1e-4 leaves
+        # headroom while still catching obviously-wrong values.
+        assert abs(r["rotation_deg_z"] - 90.0) < 1e-4, (
+            f"rotation_deg_z should be ~90.0, got {r['rotation_deg_z']}"
         )
         assert r["wall_target_used"] is False, (
             f"CREATE call should have wall_target_used=False, "
@@ -415,9 +419,10 @@ def run(host: str, port: int) -> int:
             f"REBUILD should preserve level_name={level_02_name!r}, "
             f"got {r['level_name']!r}"
         )
-        assert abs(r["rotation_deg_z"] - 90.0) < 1e-6, (
+        # Same 1e-4 float32-round-trip tolerance as step [13].
+        assert abs(r["rotation_deg_z"] - 90.0) < 1e-4, (
             f"REBUILD with no rotation_deg_z param should preserve "
-            f"existing 90 deg rotation, got {r['rotation_deg_z']}"
+            f"existing ~90 deg rotation, got {r['rotation_deg_z']}"
         )
 
         print("\n[15] list_objects (praxova only)")
