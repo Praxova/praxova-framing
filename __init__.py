@@ -65,9 +65,13 @@ def register():
         ops_fill.PRAXOVA_OT_duplicate_e2e,
         # v0.4: Composite framing operators.
         ops_frame.PRAXOVA_OT_frame_wall,
-        # v0.6: Building / Level container operators.
+        # v0.6: Building / Level container operators, joint management,
+        # and the multi-wall framing orchestrator.
         ops_frame.PRAXOVA_OT_add_building,
         ops_frame.PRAXOVA_OT_add_level,
+        ops_frame.PRAXOVA_OT_add_joint,
+        ops_frame.PRAXOVA_OT_remove_joint,
+        ops_frame.PRAXOVA_OT_frame_building,
         ops_cutlist.PRAXOVA_OT_generate_cutlist,
         ops_units.PRAXOVA_OT_set_imperial_units,
         # v0.3: MCP bridge operators.

@@ -1058,3 +1058,176 @@ class PRAXOVA_OT_add_level(bpy.types.Operator):
             f"Created {level_name} (index {next_index}) under {building.name}",
         )
         return {'FINISHED'}
+
+
+# ===========================================================================
+# Joint management operators (v0.6)
+# ===========================================================================
+
+class PRAXOVA_OT_add_joint(bpy.types.Operator):
+    """Append a new joint to the active Level's joints collection.
+
+    Default joint type is L_CORNER (only v0.6 type). wall_a and wall_b
+    start unset — the user picks them in the Building tab's joint
+    detail panel (commit 6). frame_building validates that both are set
+    before re-framing.
+    """
+
+    bl_idname = "praxova.add_joint"
+    bl_label = "Add Joint"
+    bl_description = "Append a new joint to the active Level"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sp = context.scene.praxova_framing
+        return (
+            sp.active_level is not None
+            and getattr(sp.active_level, 'praxova_level', None) is not None
+            and sp.active_level.praxova_level.is_level
+        )
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        level = sp.active_level
+        joints = level.praxova_level.joints
+        joints.add()
+        # All fields take PropertyGroup defaults: joint_type='L_CORNER',
+        # wall_a/wall_b unset, wall_a_end='END', wall_b_end='START',
+        # corner_style='AUTO', extending_wall='AUTO'. The user fills
+        # wall_a/wall_b in the Building tab.
+        level.praxova_level.joints_active = len(joints) - 1
+        return {'FINISHED'}
+
+
+class PRAXOVA_OT_remove_joint(bpy.types.Operator):
+    """Remove the active joint from the active Level."""
+
+    bl_idname = "praxova.remove_joint"
+    bl_label = "Remove Joint"
+    bl_description = "Remove the active joint from the active Level"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sp = context.scene.praxova_framing
+        return (
+            sp.active_level is not None
+            and getattr(sp.active_level, 'praxova_level', None) is not None
+            and sp.active_level.praxova_level.is_level
+            and len(sp.active_level.praxova_level.joints) > 0
+        )
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        level = sp.active_level
+        idx = level.praxova_level.joints_active
+        level.praxova_level.joints.remove(idx)
+        level.praxova_level.joints_active = max(
+            0, min(idx, len(level.praxova_level.joints) - 1),
+        )
+        return {'FINISHED'}
+
+
+# ===========================================================================
+# Frame Building orchestrator (v0.6)
+# ===========================================================================
+
+class PRAXOVA_OT_frame_building(bpy.types.Operator):
+    """Re-frame every wall in the active Level with joint context applied.
+
+    The orchestrator for v0.6's multi-wall workflow. Iterates the
+    active Level's wall children, sets each one as the active object,
+    then invokes praxova.frame_wall — which detects in-place mode +
+    Level parent + joints and re-frames the wall with the appropriate
+    plate/stud/filler modifications. Single source of truth for the
+    joint-aware framing math: frame_wall does the work, frame_building
+    just coordinates the sweep.
+
+    Validation runs once up front (active Level set, at least one wall,
+    joints pass templates.validate_joints) so a bad joint surfaces as
+    a single clean error rather than per-wall noise.
+    """
+
+    bl_idname = "praxova.frame_building"
+    bl_label = "Frame Building"
+    bl_description = (
+        "Re-frame every wall in the active Level, applying joint "
+        "context (corner geometry, plate shortening, filler studs)."
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sp = context.scene.praxova_framing
+        return (
+            sp.active_level is not None
+            and getattr(sp.active_level, 'praxova_level', None) is not None
+            and sp.active_level.praxova_level.is_level
+        )
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        level = sp.active_level
+
+        if level is None or not level.praxova_level.is_level:
+            self.report(
+                {'ERROR'},
+                "No active Level. Use the Building tab to select one.",
+            )
+            return {'CANCELLED'}
+
+        # Collect this Level's wall children (Empties with is_wall=True).
+        # Object iteration order on level.children is stable for a given
+        # Blender session, so re-framing is deterministic.
+        walls = [
+            child for child in level.children
+            if getattr(child, 'praxova_wall', None) is not None
+            and child.praxova_wall.is_wall
+        ]
+        if not walls:
+            self.report({'WARNING'}, "Active Level has no walls.")
+            return {'CANCELLED'}
+
+        # Joint validation runs once for the whole list. validate_joints
+        # already returns "Joint N: ..." with 1-based indices that match
+        # what the UI shows in the Building tab.
+        ok, msg = templates.validate_joints(
+            level.praxova_level.joints, walls,
+        )
+        if not ok:
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+
+        # For each wall: make it the active object, then invoke
+        # frame_wall in EXEC_DEFAULT mode. frame_wall sees the wall is a
+        # Praxova-managed wall under a Level with joints and applies
+        # the per-end modifications via _resolve_joint_context.
+        framed_count = 0
+        for wall in walls:
+            for o in context.selected_objects:
+                o.select_set(False)
+            wall.select_set(True)
+            context.view_layer.objects.active = wall
+            result = bpy.ops.praxova.frame_wall('EXEC_DEFAULT')
+            if 'FINISHED' not in result:
+                self.report(
+                    {'ERROR'},
+                    f"frame_wall failed for {wall.name}: {sorted(result)}",
+                )
+                return {'CANCELLED'}
+            framed_count += 1
+
+        # Final selection: the Level Empty, so the user can immediately
+        # add more joints or run frame_building again. Matches the
+        # selection convention the other v0.6 container operators use.
+        _set_active_only(context, level)
+
+        n_joints = len(level.praxova_level.joints)
+        self.report(
+            {'INFO'},
+            f"Framed {framed_count} wall"
+            f"{'s' if framed_count != 1 else ''} "
+            f"with {n_joints} joint{'s' if n_joints != 1 else ''}",
+        )
+        return {'FINISHED'}
