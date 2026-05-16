@@ -8,18 +8,18 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.0 RPC surface end-to-end (12 methods): ping (with
+Covers the full v0.6.1 RPC surface end-to-end (14 methods): ping (with
 addon_version and method_count assertions), scene info, material
 catalog, lumber / sheet / panel placement, on-center duplication,
 edge-to-edge fill, wall framing with optional door/window openings
-(v0.5.1 - bridge parity for the v0.5 UI), cut-list generation
-(verifying three sections and the 'cut to N"' annotations for
-frame_wall regular studs and the new v0.5 opening pieces — jacks,
-header members, and cripples), and three error paths including the
-LUMBER refusal for duplicate_e2e. method_count stays at 12 — v0.6 is
-a UI-only cycle for multi-wall coordination (Building/Level
-containers, L corner joints, frame_building orchestrator); bridge
-parity lands in v0.6.1.
+(v0.5.1 — bridge parity for the v0.5 UI), Building + Level container
+creation and wall framing under a Level with in-place re-framing
+(v0.6.1 — partial bridge parity for v0.6, completing the containers +
+frame_wall extension; joints + frame_building + list_* methods land
+in v0.6.2), cut-list generation (verifying three sections and the
+'cut to N"' annotations for frame_wall regular studs and the v0.5
+opening pieces — jacks, header members, and cripples), and three
+error paths including the LUMBER refusal for duplicate_e2e.
 """
 
 from __future__ import annotations
@@ -81,15 +81,18 @@ def run(host: str, port: int) -> int:
         # openings UI; method_count stays 12. v0.5.1: addon_version
         # 0.5.0 -> 0.5.1 for bridge parity (frame_wall handler gains
         # the openings parameter); method_count stays 12. v0.6.0:
-        # addon_version 0.5.1 -> 0.6.0 for multi-wall coordination
-        # (Building/Level, L corner joints, frame_building); UI-only
-        # cycle so method_count stays 12 until v0.6.1 ships bridge
-        # parity for the new operators.
-        assert r["addon_version"] == "0.6.0", (
-            f"expected addon_version 0.6.0, got {r['addon_version']!r}"
+        # addon_version 0.5.1 -> 0.6.0 for multi-wall coordination;
+        # UI-only cycle so method_count stays 12. v0.6.1: method_count
+        # 12 -> 14 for add_building + add_level handlers (the
+        # container half of v0.6's bridge parity — joints + the
+        # frame_building orchestrator + list_* methods land in v0.6.2,
+        # which will push method_count further); addon_version
+        # 0.6.0 -> 0.6.1.
+        assert r["addon_version"] == "0.6.1", (
+            f"expected addon_version 0.6.1, got {r['addon_version']!r}"
         )
-        assert r["method_count"] == 12, (
-            f"expected 12 methods, got {r['method_count']}"
+        assert r["method_count"] == 14, (
+            f"expected 14 methods, got {r['method_count']}"
         )
 
         print("\n[2] get_scene_info")
@@ -303,22 +306,145 @@ def run(host: str, port: int) -> int:
             f"cripples), got {len(r['new_objects'])}: {r['new_objects']}"
         )
 
-        print("\n[11] list_objects (praxova only)")
-        r = cli.call("list_objects")
-        print(f"  -> {r['count']} tagged objects")
-        # Existing tagged 16 (after step 9):
-        #   1 stud + 4 OC dupes + 1 sheet + 1 panel + 3 fill dupes
-        #   + 3 frame_wall studs + 3 frame_wall plates = 16.
-        # Step 10 adds 16 NEW tagged pieces:
-        #   4 regular studs + 3 plates + 2 kings + 2 jacks + 2 headers
-        #   + 3 header cripples = 16. The header spacer is UNTAGGED
-        #   (no is_lumber tag) per the v0.5 sheathing-scrap convention,
-        #   so it doesn't show up in praxova_only list_objects. The
-        #   Empty is untagged too.
-        # Total: 16 + 16 = 32.
-        assert r["count"] == 32
+        print("\n[11] add_building name='TestBuilding'")
+        # v0.6.1: container bridge parity. add_building creates the
+        # Building Empty plus a default Level child in one call. Both
+        # become the scene's active Building / active Level.
+        r = cli.call("add_building", {"name": "TestBuilding"})
+        print(f"  -> {r}")
+        assert r["building_name"] == "TestBuilding", (
+            f"expected building_name 'TestBuilding', "
+            f"got {r['building_name']!r}"
+        )
+        building_name = r["building_name"]
+        level_01_name = r["level_name"]
+        assert isinstance(level_01_name, str) and level_01_name, (
+            f"expected non-empty level_name string, got {level_01_name!r}"
+        )
+        assert r["level_index"] == 0, (
+            f"default Level should have level_index=0, got {r['level_index']}"
+        )
 
-        print("\n[12] generate_cutlist")
+        print("\n[12] add_level building='TestBuilding'")
+        # Adds a second Level under the same Building. level_index
+        # auto-increments to one higher than the default Level's 0.
+        r = cli.call("add_level", {"building": building_name})
+        print(f"  -> {r}")
+        level_02_name = r["level_name"]
+        assert isinstance(level_02_name, str) and level_02_name, (
+            f"expected non-empty level_name string, got {level_02_name!r}"
+        )
+        assert r["level_index"] == 1, (
+            f"second Level should have level_index=1, got {r['level_index']}"
+        )
+        assert r["building"] == building_name, (
+            f"echoed building should match, got {r['building']!r}"
+        )
+
+        print(f"\n[13] frame_wall under {level_02_name} at 90 deg rotation")
+        # v0.6.1: CREATE path with level + rotation_deg_z. The new wall
+        # Empty is parented under level_02_name and rotated 90 degrees
+        # around Z. spacing_oc_in left at the default 16; for a 48"
+        # wall at 16 OC with 2x4 studs (1.5" thick) stud_positions
+        # produces 4 left-edge x-coords: 0.0, 15.25, 31.25, 46.5 —
+        # NOTE: this differs from the cycle brief's "n_studs == 3"
+        # claim. The brief either intended spacing_oc_in=24 (which
+        # would give 3 studs like step [9]) or miscounted; we follow
+        # the actual math here. The list_objects total at [15] still
+        # works out to 47 either way because [14]'s rebuild adjusts
+        # the lumber count compensatingly.
+        r = cli.call("frame_wall", {
+            "length_in": 48.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+            "level": level_02_name,
+            "rotation_deg_z": 90.0,
+        })
+        print(f"  -> {r}")
+        wall_03_name = r["wall_name"]
+        assert isinstance(wall_03_name, str) and wall_03_name, (
+            f"expected non-empty wall_name string, got {wall_03_name!r}"
+        )
+        assert r["n_studs"] == 4, (
+            f"48\" wall at 16 OC default should produce 4 studs "
+            f"(stud_positions(48,16,1.5)=[0.0,15.25,31.25,46.5]), "
+            f"got {r['n_studs']}"
+        )
+        assert r["n_plates"] == 3, (
+            f"2 top + 1 bottom = 3 plates, got {r['n_plates']}"
+        )
+        assert r["level_name"] == level_02_name, (
+            f"wall should report level_name={level_02_name!r}, "
+            f"got {r['level_name']!r}"
+        )
+        assert abs(r["rotation_deg_z"] - 90.0) < 1e-6, (
+            f"rotation_deg_z should be 90.0, got {r['rotation_deg_z']}"
+        )
+        assert r["wall_target_used"] is False, (
+            f"CREATE call should have wall_target_used=False, "
+            f"got {r['wall_target_used']}"
+        )
+
+        print(f"\n[14] frame_wall wall_target={wall_03_name} length_in=72")
+        # v0.6.1: REBUILD path. wall_target picks in-place mode; only
+        # length_in is provided. height_in, nominal, spacing_oc_in,
+        # plate counts, openings, level, AND rotation are all
+        # preserved. The Empty name persists (joint references and
+        # transforms survive).
+        r = cli.call("frame_wall", {
+            "wall_target": wall_03_name,
+            "length_in": 72.0,
+        })
+        print(f"  -> {r}")
+        assert r["wall_name"] == wall_03_name, (
+            f"REBUILD must preserve Empty name {wall_03_name!r}, "
+            f"got {r['wall_name']!r}"
+        )
+        assert r["length_in"] == 72.0, (
+            f"length_in should be echoed as 72.0, got {r['length_in']}"
+        )
+        assert r["n_studs"] == 6, (
+            f"72\" wall at preserved 16 OC should produce 6 studs "
+            f"(stud_positions(72,16,1.5) = 6 positions), got {r['n_studs']}"
+        )
+        assert r["wall_target_used"] is True, (
+            f"REBUILD call should have wall_target_used=True, "
+            f"got {r['wall_target_used']}"
+        )
+        assert r["level_name"] == level_02_name, (
+            f"REBUILD should preserve level_name={level_02_name!r}, "
+            f"got {r['level_name']!r}"
+        )
+        assert abs(r["rotation_deg_z"] - 90.0) < 1e-6, (
+            f"REBUILD with no rotation_deg_z param should preserve "
+            f"existing 90 deg rotation, got {r['rotation_deg_z']}"
+        )
+
+        print("\n[15] list_objects (praxova only)")
+        r = cli.call("list_objects")
+        print(f"  -> {r['count']} praxova objects")
+        # v0.6.1 changed _is_praxova_managed to include is_wall /
+        # is_level / is_building Empties in addition to v0.4's
+        # is_lumber. So previously-invisible wall Empties from [9]
+        # and [10] now count.
+        # Pre-v0.6.1 / v0.5.1 baseline: 32 lumber pieces (1 stud +
+        #   4 OC dupes + 1 sheet + 1 panel + 3 fill dupes + 6 from
+        #   [9] frame_wall + 16 from [10] frame_wall-with-door).
+        # +2 for the [9] and [10] Wall Empties = 34.
+        # [11] add_building: +1 Building +1 default Level = 36.
+        # [12] add_level: +1 Level = 37.
+        # [13] frame_wall: +1 Wall + 4 studs + 3 plates = +8 -> 45.
+        # [14] rebuild [13] from 48"->72": Empty preserved, 4 studs
+        #   + 3 plates removed, 6 studs + 3 plates added: net +2 ->
+        #   47. (The cycle brief's arithmetic landed on 47 too with
+        #   different per-step numbers because [13]+[14] net out to
+        #   +10 either way.)
+        assert r["count"] == 47, (
+            f"expected 47 praxova objects after v0.6.1 steps, "
+            f"got {r['count']}"
+        )
+
+        print("\n[16] generate_cutlist")
         r = cli.call("generate_cutlist")
         print("  -> cutlist body:")
         for line in r["text"].splitlines():
@@ -366,13 +492,13 @@ def run(host: str, port: int) -> int:
             f"expected 4 panels in cut list, got line: {panel_line!r}"
         )
 
-        print("\n[13] error path: unknown lumber")
+        print("\n[17] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[14] error path: duplicate_e2e on lumber (should refuse)")
+        print("\n[18] error path: duplicate_e2e on lumber (should refuse)")
         # The LUMBER refusal is enforced in the bridge handler so the
         # error carries a clean INVALID_PARAMS code instead of the
         # operator's APP_OPERATOR_FAILED.
@@ -391,7 +517,7 @@ def run(host: str, port: int) -> int:
                 f"expected error to mention lumber, got: {err_text!r}"
             )
 
-        print("\n[15] error path: bad method")
+        print("\n[19] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:
