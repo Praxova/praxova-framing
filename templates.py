@@ -666,6 +666,238 @@ def redistribute_openings_evenly(openings, wall_length_in: float) -> None:
         opening.x_offset_in = max(0.0, center_x - opening.ro_width_in / 2.0)
 
 
+# ===========================================================================
+# Joint helpers (v0.6)
+# ===========================================================================
+
+# Pure functions consumed by the v0.6 joint-aware frame_wall and the
+# frame_building orchestrator. No bpy.ops, no scene mutation — just
+# attribute access on the duck-typed Joint / Wall PropertyGroups (the
+# same "pure" sense as the v0.5 opening helpers). reframe_wall_in_place
+# lives in ops_frame.py since it does scene mutation.
+#
+# Terminology (per design doc):
+#   MAIN wall (wall_a)     keeps plate continuity at the joint end
+#   ABUTTING wall (wall_b) has its plates shortened by MAIN's stud
+#                          thickness at the joint end
+#   "extending wall"       the one whose cap plate runs full length and
+#                          overlaps the other's lower top plate at the
+#                          corner (IRC R602.3.2 calls for lapping)
+
+
+def resolve_extending_wall(joint, wall_a_length: float, wall_b_length: float) -> str:
+    """Pick which wall's cap plate extends across the corner.
+
+    Returns 'A' or 'B'. For AUTO, the shorter wall extends — longer walls
+    are harder to splice so we protect their continuity. Ties go to A
+    (the main wall) on the principle that the user has already declared
+    which is which.
+    """
+    explicit = joint.extending_wall
+    if explicit == 'A':
+        return 'A'
+    if explicit == 'B':
+        return 'B'
+    # AUTO: shorter wall extends.
+    if wall_a_length < wall_b_length:
+        return 'A'
+    if wall_a_length > wall_b_length:
+        return 'B'
+    return 'A'  # tie-break to main
+
+
+def resolve_corner_style(joint, building_default: str) -> str:
+    """Resolve a joint's corner_style, substituting the Building's default
+    when the joint says AUTO. For v0.6 this always returns 'THREE_STUD'
+    (only style available), but the indirection through Building default
+    is what v0.7 will hang California / ladder-blocking styles on.
+    """
+    if joint.corner_style == 'AUTO':
+        return building_default
+    return joint.corner_style
+
+
+def compute_wall_joint_context(
+    wall_obj,
+    joints,
+    building_default_corner_style: str,
+) -> dict:
+    """For each end of `wall_obj`, find the joint touching it (if any).
+
+    Returns a dict with 'START' and 'END' keys. Each value is either None
+    (no joint at that end) or a dict with:
+
+        joint_type:        'L_CORNER' (only v0.6 type)
+        role:              'MAIN' | 'ABUTTING'
+        paired_wall:       Object (the other wall in the joint)
+        paired_wall_end:   'START' | 'END' (which end of the paired wall)
+        corner_style:      resolved style (no more AUTO)
+        is_extending:      bool — True if THIS wall's cap plate extends
+                           across the corner at THIS end
+
+    Caller is expected to have validated `joints` via validate_joints
+    first; this function silently skips joints with unset wall_a / wall_b
+    so it doesn't blow up on partial state during interactive editing.
+    A wall with two joints at the same end (which validate_joints
+    catches) would overwrite — but should be a validation failure
+    long before this function is called from frame_wall.
+    """
+    context = {'START': None, 'END': None}
+    for joint in joints:
+        if joint.wall_a is None or joint.wall_b is None:
+            continue
+        if wall_obj == joint.wall_a:
+            role = 'MAIN'
+            this_end = joint.wall_a_end
+            paired_wall = joint.wall_b
+            paired_wall_end = joint.wall_b_end
+        elif wall_obj == joint.wall_b:
+            role = 'ABUTTING'
+            this_end = joint.wall_b_end
+            paired_wall = joint.wall_a
+            paired_wall_end = joint.wall_a_end
+        else:
+            continue
+
+        wall_a_length = joint.wall_a.praxova_wall.wall_length_in
+        wall_b_length = joint.wall_b.praxova_wall.wall_length_in
+        extending = resolve_extending_wall(
+            joint, wall_a_length, wall_b_length,
+        )
+        is_extending = (
+            (role == 'MAIN' and extending == 'A')
+            or (role == 'ABUTTING' and extending == 'B')
+        )
+
+        context[this_end] = {
+            'joint_type': joint.joint_type,
+            'role': role,
+            'paired_wall': paired_wall,
+            'paired_wall_end': paired_wall_end,
+            'corner_style': resolve_corner_style(
+                joint, building_default_corner_style,
+            ),
+            'is_extending': is_extending,
+        }
+    return context
+
+
+def l_corner_geometry(
+    t_self: float,
+    t_other: float,
+    role: str,
+    end: str,
+    is_extending: bool,
+    wall_length_in: float,
+) -> dict:
+    """Per-piece offsets for ONE wall at ONE end of an L joint.
+
+    Two calls cover a wall with joints at both ends; the operator
+    combines the START and END offsets when laying out plates and
+    studs. For a wall with no joint at a given end, the caller skips
+    this function and uses v0.5 defaults.
+
+    Args:
+        t_self: this wall's stud thickness (LUMBER_TYPES[nominal][0]).
+        t_other: the paired wall's stud thickness.
+        role: 'MAIN' or 'ABUTTING'.
+        end: 'START' (joint at x=0) or 'END' (joint at x=wall_length_in).
+        is_extending: True if this wall's cap plate runs full-length
+            across the corner; False if the cap plate is shortened by
+            t_other at this end.
+        wall_length_in: this wall's length in inches.
+
+    Returns:
+        bottom_plate_offset (in): cut off this much from the joint
+            end of the bottom plate. 0 for MAIN, t_other for ABUTTING.
+        lower_top_plate_offset (in): same shape as bottom plate.
+        cap_plate_offset (in): 0 if this wall extends, else t_other.
+        end_stud_x_override (float | None): left-edge x-coord to use for
+            this wall's end stud at the joint end. None means use v0.5
+            default (flush with the wall end). ABUTTING walls move
+            their end stud inward by t_other; MAIN walls don't change.
+        filler_stud_x (float | None): left-edge x-coord of the interior
+            corner filler stud. Only MAIN walls produce one (per design
+            doc — abutting walls don't). For 'END' the filler sits at
+            (length - t_self - t_other); for 'START' at t_other.
+    """
+    out = {
+        'bottom_plate_offset': 0.0,
+        'lower_top_plate_offset': 0.0,
+        'cap_plate_offset': 0.0,
+        'end_stud_x_override': None,
+        'filler_stud_x': None,
+    }
+
+    cap_offset = 0.0 if is_extending else t_other
+
+    if role == 'MAIN':
+        # Plates run full length at the joint end (bottom + lower top).
+        # Cap plate shortened only if MAIN does NOT extend.
+        out['cap_plate_offset'] = cap_offset
+        # Filler stud one t_other inboard from the end stud (interior
+        # face aligned with where the abutting wall's interior face
+        # will land in world space).
+        if end == 'END':
+            out['filler_stud_x'] = wall_length_in - t_self - t_other
+        else:  # 'START'
+            out['filler_stud_x'] = t_other
+    else:  # 'ABUTTING'
+        # Plates shortened by t_other at the joint end (bottom + lower
+        # top). Cap follows is_extending.
+        out['bottom_plate_offset'] = t_other
+        out['lower_top_plate_offset'] = t_other
+        out['cap_plate_offset'] = cap_offset
+        # End stud repositioned to land flush with the shortened plates.
+        if end == 'END':
+            out['end_stud_x_override'] = wall_length_in - t_other - t_self
+        else:  # 'START'
+            out['end_stud_x_override'] = t_other
+
+    return out
+
+
+def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
+    """Cross-check the joints list against the Level's walls.
+
+    Returns (True, "") on success or (False, "Joint N: ...") on the
+    first failure. Checks in order:
+
+      1. Each joint has wall_a AND wall_b set (no None pointers).
+      2. Both walls are members of walls_in_level (i.e. children of
+         the Level being framed).
+      3. wall_a != wall_b (no self-joint).
+      4. No two joints reference the same (wall, end) — a wall can have
+         at most one joint per end.
+    """
+    wall_set = set(walls_in_level)
+
+    for i, joint in enumerate(joints, start=1):
+        if joint.wall_a is None or joint.wall_b is None:
+            return (False, f"Joint {i}: wall_a and wall_b must both be set")
+        if joint.wall_a not in wall_set or joint.wall_b not in wall_set:
+            return (False, f"Joint {i}: both walls must be in this Level")
+        if joint.wall_a == joint.wall_b:
+            return (False, f"Joint {i}: wall_a and wall_b must be different walls")
+
+    used: dict[tuple[str, str], int] = {}
+    for i, joint in enumerate(joints, start=1):
+        for wall, end in (
+            (joint.wall_a, joint.wall_a_end),
+            (joint.wall_b, joint.wall_b_end),
+        ):
+            key = (wall.name, end)
+            if key in used:
+                return (
+                    False,
+                    f"Joint {i}: {wall.name}'s {end} end is already "
+                    f"used by Joint {used[key]}",
+                )
+            used[key] = i
+
+    return (True, "")
+
+
 # Backward-compatibility aliases for v0.1 callers.
 make_lumber_mesh = make_box_mesh
 cutlist_label = lumber_cutlist_label
