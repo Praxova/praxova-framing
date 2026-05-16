@@ -238,13 +238,129 @@ def _parse_openings(raw, wall_nominal: str) -> list[dict]:
 # Object serialization
 # ---------------------------------------------------------------------------
 
-def _serialize_object(obj: bpy.types.Object) -> dict:
-    """Render a Praxova-tagged object as a JSON-friendly dict.
+def _is_praxova_managed(obj: bpy.types.Object) -> bool:
+    """True if obj carries any v0.4 / v0.6 Praxova role discriminator.
 
-    Branches on tag.category. Until v0.3.2 the LUMBER branch was followed
-    by a bare else that hard-coded sheet fields - so PANEL objects (added
-    in v0.3.1) were silently serializing with empty sheet_* fields. Now
-    each category gets its own branch.
+    v0.4 walls had only praxova_lumber.is_lumber to check. v0.6 added
+    Building / Level / Wall Empties, each with its own PropertyGroup
+    + is_* flag, so the bridge's praxova_only filter has to look at
+    all four to enumerate the full hierarchy.
+    """
+    lumber_tag = getattr(obj, 'praxova_lumber', None)
+    if lumber_tag is not None and lumber_tag.is_lumber:
+        return True
+    wall_tag = getattr(obj, 'praxova_wall', None)
+    if wall_tag is not None and wall_tag.is_wall:
+        return True
+    level_tag = getattr(obj, 'praxova_level', None)
+    if level_tag is not None and level_tag.is_level:
+        return True
+    building_tag = getattr(obj, 'praxova_building', None)
+    if building_tag is not None and building_tag.is_building:
+        return True
+    return False
+
+
+def _serialize_opening(op) -> dict:
+    """Render one PraxovaWallOpening as a v0.5.1 wire-format dict.
+
+    Inverse of the bridge's _parse_openings — so a wall returned by
+    list_objects can be round-tripped back into frame_wall(
+    wall_target=..., openings=...) without translation.
+    """
+    return {
+        "type": op.opening_type.lower(),
+        "x_offset_in": float(op.x_offset_in),
+        "ro_width_in": float(op.ro_width_in),
+        "ro_height_in": float(op.ro_height_in),
+        "sill_height_in": float(op.sill_height_in),
+        "header_nominal": op.header_nominal,
+        "jack_count": int(op.jack_count),
+    }
+
+
+def _serialize_building(obj: bpy.types.Object) -> dict:
+    """Building Empty -> dict with contained Level names + count."""
+    bp = obj.praxova_building
+    levels = [
+        c for c in obj.children
+        if getattr(c, 'praxova_level', None) is not None
+        and c.praxova_level.is_level
+    ]
+    levels.sort(key=lambda lv: lv.praxova_level.level_index)
+    return {
+        "name": obj.name,
+        "category": "BUILDING",
+        "location_m": list(obj.location),
+        "default_corner_style": bp.default_corner_style,
+        "contained_level_names": [lv.name for lv in levels],
+        "level_count": len(levels),
+    }
+
+
+def _serialize_level(obj: bpy.types.Object) -> dict:
+    """Level Empty -> dict with parent Building + contained walls + joint count."""
+    lp = obj.praxova_level
+    parent = obj.parent
+    parent_building = (
+        parent.name
+        if (parent is not None
+            and getattr(parent, 'praxova_building', None) is not None
+            and parent.praxova_building.is_building)
+        else None
+    )
+    walls = [
+        c for c in obj.children
+        if getattr(c, 'praxova_wall', None) is not None
+        and c.praxova_wall.is_wall
+    ]
+    walls.sort(key=lambda w: w.name)
+    return {
+        "name": obj.name,
+        "category": "LEVEL",
+        "level_index": int(lp.level_index),
+        "level_height_in": float(lp.level_height_in),
+        "parent_building": parent_building,
+        "contained_wall_names": [w.name for w in walls],
+        "wall_count": len(walls),
+        "joints_count": len(lp.joints),
+    }
+
+
+def _serialize_wall(obj: bpy.types.Object) -> dict:
+    """Wall Empty -> dict with PraxovaWallProps fields + openings."""
+    wp = obj.praxova_wall
+    parent = obj.parent
+    parent_level = (
+        parent.name
+        if (parent is not None
+            and getattr(parent, 'praxova_level', None) is not None
+            and parent.praxova_level.is_level)
+        else None
+    )
+    return {
+        "name": obj.name,
+        "category": "WALL",
+        "location_m": list(obj.location),
+        "rotation_deg_z": math.degrees(obj.rotation_euler[2]),
+        "parent_level": parent_level,
+        "length_in": float(wp.wall_length_in),
+        "height_in": float(wp.wall_height_in),
+        "nominal": wp.wall_nominal,
+        "spacing_oc_in": float(wp.wall_spacing_oc_in),
+        "top_plate_count": int(wp.wall_top_plate_count),
+        "bottom_plate_count": int(wp.wall_bottom_plate_count),
+        "openings": [_serialize_opening(op) for op in wp.wall_openings],
+    }
+
+
+def _serialize_material(obj: bpy.types.Object) -> dict:
+    """v0.4 lumber/sheet/panel serialization. Branches on tag.category.
+
+    Until v0.3.2 the LUMBER branch was followed by a bare else that
+    hard-coded sheet fields — so PANEL objects (added in v0.3.1) were
+    silently serializing with empty sheet_* fields. Now each category
+    gets its own branch.
     """
     tag = obj.praxova_lumber
     out: dict = {
@@ -266,6 +382,28 @@ def _serialize_object(obj: bpy.types.Object) -> dict:
         out["panel_material"] = tag.panel_material
         out["panel_size_key"] = tag.panel_size_key
     return out
+
+
+def _serialize_object(obj: bpy.types.Object) -> dict:
+    """Render a Praxova-managed object as a JSON-friendly dict.
+
+    Dispatches on role discriminators in priority order: wall, level,
+    building, then v0.4 material (LUMBER/SHEET/PANEL via tag.category).
+    Callers should have checked _is_praxova_managed first — this
+    function assumes the object is Praxova-managed in some way and
+    falls through to the material branch if no v0.6 discriminator
+    matches.
+    """
+    wall_tag = getattr(obj, 'praxova_wall', None)
+    if wall_tag is not None and wall_tag.is_wall:
+        return _serialize_wall(obj)
+    level_tag = getattr(obj, 'praxova_level', None)
+    if level_tag is not None and level_tag.is_level:
+        return _serialize_level(obj)
+    building_tag = getattr(obj, 'praxova_building', None)
+    if building_tag is not None and building_tag.is_building:
+        return _serialize_building(obj)
+    return _serialize_material(obj)
 
 
 def _check_op_result(result: set, op_name: str) -> None:
@@ -328,12 +466,17 @@ def list_materials(params: dict) -> dict:
 
 
 def list_objects(params: dict) -> dict:
-    """List scene objects. Defaults to Praxova-tagged only."""
+    """List scene objects. Defaults to Praxova-managed only.
+
+    v0.6.1: "Praxova-managed" includes the v0.4 lumber/sheet/panel
+    pieces AND the v0.6 hierarchy Empties (Building, Level, Wall).
+    Each is reported via its own category — see _serialize_object.
+    Pass praxova_only=False to include every scene Object.
+    """
     praxova_only = _optional(params, "praxova_only", bool, default=True)
     objs: list[dict] = []
     for obj in bpy.context.scene.objects:
-        tag = getattr(obj, "praxova_lumber", None)
-        is_praxova = tag is not None and tag.is_lumber
+        is_praxova = _is_praxova_managed(obj)
         if praxova_only and not is_praxova:
             continue
         if is_praxova:

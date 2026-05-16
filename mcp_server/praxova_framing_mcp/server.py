@@ -105,15 +105,32 @@ def list_materials() -> dict:
 def list_objects(praxova_only: bool = True) -> dict:
     """List objects in the current Blender scene.
 
-    Defaults to only Praxova-tagged pieces (lumber, sheets, and panels);
-    pass praxova_only=False to include everything in the scene.
+    Defaults to Praxova-managed pieces (v0.4 lumber/sheets/panels plus
+    v0.6 Building/Level/Wall hierarchy Empties). Pass
+    praxova_only=False to include every Object in the scene.
 
-    Each Praxova object includes 'name' (use as target_name for
-    duplicate_oc or duplicate_e2e), 'category' ('LUMBER', 'SHEET', or
-    'PANEL'), 'label', 'orientation', 'location_m', 'dimensions_m', and
-    category-specific fields: nominal_size and length_in for lumber,
-    sheet_material and sheet_thickness_callout and sheet_size_key for
-    sheets, panel_material and panel_size_key for panels.
+    Each entry's shape depends on its `category`:
+
+      LUMBER, SHEET, PANEL (v0.4): name, category, label, orientation,
+        location_m, dimensions_m, plus category-specific fields —
+        nominal_size + length_in for LUMBER; sheet_material +
+        sheet_thickness_callout + sheet_size_key for SHEET;
+        panel_material + panel_size_key for PANEL.
+
+      BUILDING (v0.6.1): name, category, location_m,
+        default_corner_style, contained_level_names (sorted by
+        level_index), level_count.
+
+      LEVEL (v0.6.1): name, category, level_index, level_height_in,
+        parent_building (name or None), contained_wall_names (sorted),
+        wall_count, joints_count (full joint serialization is v0.6.2).
+
+      WALL (v0.6.1): name, category, location_m, rotation_deg_z,
+        parent_level (name or None), length_in, height_in, nominal,
+        spacing_oc_in, top_plate_count, bottom_plate_count, openings
+        (list of opening dicts in v0.5.1 wire format — so a wall
+        returned here can be round-tripped back into frame_wall via
+        wall_target= + openings=).
 
     Returns:
         count: number of objects in the result
