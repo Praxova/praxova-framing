@@ -3,7 +3,9 @@
 Exposes the in-Blender bridge as a set of MCP tools so an LLM client (Claude
 Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
 on-center, fill edge-to-edge, frame a wall with optional door and window
-openings (v0.5.1), and generate cut lists in a live Blender session.
+openings (v0.5.1), organize walls into Buildings and Levels with multi-wall
+re-framing in place (v0.6.1 — joints + frame_building land in v0.6.2), and
+generate cut lists in a live Blender session.
 
 Configuration (env vars, read at startup):
     PRAXOVA_BRIDGE_HOST     default: 127.0.0.1
@@ -351,6 +353,106 @@ def duplicate_e2e(
     if target_name is not None:
         params["target_name"] = target_name
     return _call("duplicate_e2e", params)
+
+
+# ===========================================================================
+# Building / Level containers (v0.6.1)
+# ===========================================================================
+
+@mcp.tool()
+def add_building(
+    name: str | None = None,
+    location_m: list[float] | None = None,
+    default_corner_style: Literal["THREE_STUD"] = "THREE_STUD",
+) -> dict:
+    """Create a Building Empty with a default Level child under it.
+
+    The Building Empty is a grouping container with no geometry of its
+    own. Walls land under a Level Empty (one is auto-created on the
+    first add_building call; add more with add_level), so the typical
+    flow is:
+
+        add_building() -> {"building_name": "Building_01",
+                           "level_name": "Level_01", ...}
+        frame_wall(level="Level_01", length_in=120, height_in=96, ...)
+
+    Args:
+        name: Override the auto-generated Building_NN name. Must not
+            collide with any existing scene object. Defaults to
+            auto-numbered (Building_01, Building_02, ...).
+        location_m: Optional [x, y, z] world-space meters for the
+            Building Empty. The default Level + future child walls
+            inherit this transform.
+        default_corner_style: Default corner style used at L joints in
+            this Building when the joint's own corner_style is AUTO.
+            Only "THREE_STUD" is valid in v0.6.1 — v0.7 will add
+            CALIFORNIA and LADDER_BLOCKING. The param is exposed now
+            for forward-compat; passing "THREE_STUD" (or omitting it)
+            gets you the v0.6 behavior.
+
+    Returns:
+        building_name: name of the new Building Empty
+        level_name: name of the auto-created default Level child
+        level_index: always 0 for the default Level
+        location_m: echo of the Building's world location
+        default_corner_style: echo of the resolved style
+    """
+    params: dict = {
+        "default_corner_style": default_corner_style,
+    }
+    if name is not None:
+        params["name"] = name
+    if location_m is not None:
+        params["location_m"] = location_m
+    return _call("add_building", params)
+
+
+@mcp.tool()
+def add_level(
+    building: str,
+    name: str | None = None,
+    level_height_in: float | None = None,
+) -> dict:
+    """Add a new Level under an existing Building.
+
+    Levels are children of a Building; walls created via
+    frame_wall(level=<this Level's name>, ...) land as children of the
+    Level so they share the Building's transform and can be joined at
+    corners. v0.6 only frames one Level at a time; multi-story support
+    (multiple Levels actively framed in one orchestrator call) is
+    v0.8+.
+
+    Args:
+        building: Name of the Building Empty to add the Level under.
+            Must already exist and be a Praxova-managed Building
+            (is_building=True). Create one via add_building first.
+        name: Override the auto-generated Level_NN name. Must not
+            collide with any existing scene object. Defaults to
+            auto-numbered within this Building's children.
+        level_height_in: Floor-to-floor reference height in inches.
+            Defaults to the standard residential 8' (96"). Affects no
+            geometry directly in v0.6 — it's metadata the framing
+            heuristics in later cycles will use.
+
+    Returns:
+        level_name: name of the new Level Empty
+        level_index: auto-assigned (one higher than the highest
+            existing Level under this Building, starting at 0)
+        building: echo of the input
+        level_height_in: echo of the resolved value (defaults from
+            the PraxovaLevelProps default when omitted)
+
+    Raises APP_OBJECT_NOT_FOUND (-32004) when `building` doesn't
+    resolve to a Praxova Building Empty in the scene. Raises
+    INVALID_PARAMS (-32602) when `name` collides with an existing
+    object or when `level_height_in` is non-positive.
+    """
+    params: dict = {"building": building}
+    if name is not None:
+        params["name"] = name
+    if level_height_in is not None:
+        params["level_height_in"] = level_height_in
+    return _call("add_level", params)
 
 
 # ===========================================================================

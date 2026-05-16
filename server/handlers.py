@@ -656,6 +656,164 @@ def duplicate_e2e(params: dict) -> dict:
 
 
 # ===========================================================================
+# Building / Level containers (v0.6.1 bridge parity for v0.6 hierarchy)
+# ===========================================================================
+
+def add_building(params: dict) -> dict:
+    """Create a Building Empty with a default Level child under it.
+
+    The Building Empty is a grouping container; the default Level is
+    where walls land when frame_wall is called with level=<this Level's
+    name>. Both new Empties are set as the scene's active Building /
+    active Level, matching the UI operator's behavior.
+
+    Optional:
+        name (str): override the auto-generated Building_NN name. Must
+            not collide with any existing scene object.
+        location_m ([x, y, z] meters): position the Building Empty in
+            world space. Children (the default Level + future walls)
+            follow via parent-child transform inheritance.
+        default_corner_style (str): only "THREE_STUD" valid in v0.6;
+            v0.7 will add "CALIFORNIA" and "LADDER_BLOCKING". The
+            param is exposed now for forward-compat — passing
+            "THREE_STUD" (or omitting it) gets you the v0.6 behavior.
+
+    Returns:
+        building_name: name of the new Building Empty
+        level_name: name of the auto-created default Level child
+        level_index: always 0 for the default Level
+        location_m: echo of the Building's world location
+        default_corner_style: echo of the resolved style
+    """
+    requested_name = _optional(params, "name", str, default=None)
+    if (requested_name is not None
+            and requested_name in bpy.data.objects):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"name {requested_name!r} already exists in the scene",
+        )
+    location = _location_param(params)
+    default_corner_style = _optional(
+        params, "default_corner_style", str, default="THREE_STUD",
+        choices=("THREE_STUD",),
+    )
+
+    scene = bpy.context.scene
+    sp = scene.praxova_framing
+
+    result = bpy.ops.praxova.add_building('EXEC_DEFAULT')
+    _check_op_result(result, "praxova.add_building")
+
+    building = sp.active_building
+    level = sp.active_level
+    if building is None or level is None:
+        raise bridge.RPCError(
+            bridge.INTERNAL_ERROR,
+            "add_building finished but produced no active Building/Level",
+        )
+
+    if requested_name is not None:
+        building.name = requested_name
+    if location is not None:
+        building.location = location
+    building.praxova_building.default_corner_style = default_corner_style
+
+    return {
+        "building_name": building.name,
+        "level_name": level.name,
+        "level_index": level.praxova_level.level_index,
+        "location_m": list(building.location),
+        "default_corner_style": (
+            building.praxova_building.default_corner_style
+        ),
+    }
+
+
+def add_level(params: dict) -> dict:
+    """Add a new Level under an existing Building.
+
+    Required:
+        building (str): name of the Building Empty to add the Level
+            under. Must be a Praxova-managed Building (is_building=True
+            on its praxova_building PropertyGroup).
+
+    Optional:
+        name (str): override the auto-generated Level_NN name. Must
+            not collide with any existing scene object.
+        level_height_in (number): floor-to-floor reference height for
+            this Level. Defaults to the value on PraxovaLevelProps,
+            which the UI uses as the standard residential 8' (96").
+
+    Returns:
+        level_name: name of the new Level Empty
+        level_index: auto-assigned (one higher than the highest
+            existing Level under this Building, starting at 0)
+        building: echo of the input
+        level_height_in: echo of the resolved value
+    """
+    building_name = _require(params, "building", str)
+    requested_name = _optional(params, "name", str, default=None)
+    if (requested_name is not None
+            and requested_name in bpy.data.objects):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"name {requested_name!r} already exists in the scene",
+        )
+
+    building = bpy.data.objects.get(building_name)
+    if (building is None
+            or getattr(building, 'praxova_building', None) is None
+            or not building.praxova_building.is_building):
+        raise bridge.RPCError(
+            APP_OBJECT_NOT_FOUND,
+            f"No Praxova Building named {building_name!r} in scene",
+        )
+
+    level_height_in = _optional(
+        params, "level_height_in", (int, float), default=None,
+    )
+    if level_height_in is not None:
+        if isinstance(level_height_in, bool) or level_height_in <= 0:
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                "level_height_in must be > 0",
+            )
+        level_height_in = float(level_height_in)
+
+    scene = bpy.context.scene
+    sp = scene.praxova_framing
+
+    # The UI op reads sp.active_building. Briefly point it at the
+    # requested Building so the op parents the new Level there; v0.6
+    # already updates sp.active_level after creation so we don't need
+    # to track that ourselves.
+    sp.active_building = building
+
+    result = bpy.ops.praxova.add_level('EXEC_DEFAULT')
+    _check_op_result(result, "praxova.add_level")
+
+    level = sp.active_level
+    if level is None or level.parent is not building:
+        raise bridge.RPCError(
+            bridge.INTERNAL_ERROR,
+            "add_level finished but no new Level was attached to "
+            f"{building_name!r}",
+        )
+
+    if requested_name is not None:
+        level.name = requested_name
+    if level_height_in is not None:
+        level.praxova_level.level_height_in = level_height_in
+
+    return {
+        "level_name": level.name,
+        "level_index": level.praxova_level.level_index,
+        "building": building.name,
+        "level_height_in": level.praxova_level.level_height_in,
+    }
+
+
+# ===========================================================================
 # Composite framing (v0.4.1 bridge parity for v0.4 frame_wall operator)
 # ===========================================================================
 
@@ -1022,6 +1180,10 @@ METHODS = {
     "add_panel": add_panel,
     "duplicate_oc": duplicate_oc,
     "duplicate_e2e": duplicate_e2e,
+    # v0.6.1: containers for the multi-wall hierarchy. Joint methods
+    # and frame_building land in v0.6.2.
+    "add_building": add_building,
+    "add_level": add_level,
     "frame_wall": frame_wall,
     "generate_cutlist": generate_cutlist,
     "set_imperial_units": set_imperial_units,
