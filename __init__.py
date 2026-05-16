@@ -79,7 +79,7 @@ def register():
         _server.PRAXOVA_OT_stop_bridge,
         # v0.5: Wall opening operators + UIList. The four add/remove/
         # distribute operators and the UIList class must be registered
-        # before PRAXOVA_PT_main_panel because the panel's draw()
+        # before the Wall Framing panel because the panel's draw()
         # references them by bl_idname (Blender resolves at draw time,
         # but registering ahead of the panel keeps the listing tidy).
         ui.PRAXOVA_OT_add_door,
@@ -87,11 +87,19 @@ def register():
         ui.PRAXOVA_OT_remove_opening,
         ui.PRAXOVA_OT_distribute_openings,
         ui.PRAXOVA_UL_openings,
-        # UI - parent submenu, sheets submenu, panels submenu, main panel.
+        # v0.6: Joints UIList, registered before the Building panel for
+        # the same reason.
+        ui.PRAXOVA_UL_joints,
+        # UI - parent submenu, sheets submenu, panels submenu, then the
+        # two N-panel panels: Wall Framing (v0.5 single-wall, renamed
+        # in v0.6 — class is PRAXOVA_PT_wall_framing, bl_idname stays
+        # "PRAXOVA_PT_main_panel" so existing .blends keep panel state)
+        # and Building (v0.6 multi-wall coordination).
         ui.PRAXOVA_MT_add_lumber_submenu,
         ui.PRAXOVA_MT_sheets_submenu,
         ui.PRAXOVA_MT_panels_submenu,
-        ui.PRAXOVA_PT_main_panel,
+        ui.PRAXOVA_PT_wall_framing,
+        ui.PRAXOVA_PT_building,
     ]
 
     # Per-size submenus generated from the lumber type table so adding a new

@@ -377,11 +377,18 @@ _FILL_PRESETS_FEET: tuple[tuple[str, float], ...] = (
 )
 
 
-class PRAXOVA_PT_main_panel(bpy.types.Panel):
-    """Main Praxova Framing panel in the 3D View N-panel ('Praxova' tab)."""
+class PRAXOVA_PT_wall_framing(bpy.types.Panel):
+    """Wall Framing panel — original v0.5 single-wall tab, made context-
+    sensitive in v0.6.
+
+    Class renamed from PRAXOVA_PT_main_panel for clarity once the
+    Building tab arrives alongside it; bl_idname is deliberately kept
+    at the v0.5 string so Blender's per-panel UI state (collapse,
+    pinning) carries over from existing .blends.
+    """
 
     bl_idname = "PRAXOVA_PT_main_panel"
-    bl_label = "Praxova Framing"
+    bl_label = "Wall Framing"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Praxova"
@@ -699,3 +706,178 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
 
             col.label(text=f"Orientation: {tag.orientation.title()}")
             col.label(text=f"Label:       {tag.cutlist_label}")
+
+
+# ===========================================================================
+# Building tab (v0.6)
+# ===========================================================================
+
+class PRAXOVA_UL_joints(bpy.types.UIList):
+    """UIList row renderer for PraxovaLevelProps.joints.
+
+    Each row shows the joint endpoints (wall_a -> wall_b), the joint
+    type, and the resolved corner style at a glance. Unset wall_a /
+    wall_b show as "?" so the user notices incomplete joints in the
+    list view (validate_joints catches them properly at frame time).
+    """
+
+    def draw_item(self, context, layout, data, item, icon,
+                  active_data, active_propname, index):
+        if self.layout_type in {'DEFAULT', 'COMPACT'}:
+            wall_a_name = item.wall_a.name if item.wall_a else "?"
+            wall_b_name = item.wall_b.name if item.wall_b else "?"
+            type_label = {
+                'L_CORNER': "L corner",
+            }.get(item.joint_type, item.joint_type)
+            corner_label = (
+                item.corner_style if item.corner_style != 'AUTO'
+                else "(default)"
+            )
+            layout.label(
+                text=(
+                    f"{wall_a_name} -> {wall_b_name}   "
+                    f"{type_label}   {corner_label}"
+                ),
+                icon='MOD_MIRROR',
+            )
+        elif self.layout_type == 'GRID':
+            layout.alignment = 'CENTER'
+            layout.label(text="L")
+
+
+def _walls_in_level(level):
+    """Return the list of wall Empties parented under `level`.
+
+    Matches what frame_building uses — Empties with is_wall == True.
+    Shared between the Building tab's read-only walls list and the
+    joint validation preview below the UIList.
+    """
+    return [
+        child for child in level.children
+        if getattr(child, 'praxova_wall', None) is not None
+        and child.praxova_wall.is_wall
+    ]
+
+
+class PRAXOVA_PT_building(bpy.types.Panel):
+    """Building panel — v0.6 multi-wall coordination.
+
+    Three sections, each visible only after the prior is satisfied:
+      Building  active Building dropdown + default corner style
+      Level     active Level dropdown + walls list + Frame Building
+      Joints    UIList of joints + add/remove + active joint detail
+
+    PointerProperty(Object) fields on PraxovaSceneProps drive the
+    Building / Level dropdowns. They accept any Object — the user is
+    expected to pick a real Building / Level Empty, and the operators'
+    poll() guards prevent acting on the wrong thing if they don't.
+    """
+
+    bl_idname = "PRAXOVA_PT_building"
+    bl_label = "Building"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Praxova"
+
+    def draw(self, context):
+        layout = self.layout
+        sp = context.scene.praxova_framing
+
+        # --- Building section ---
+        box = layout.box()
+        box.label(text="Building", icon='HOME')
+
+        row = box.row(align=True)
+        row.prop(sp, "active_building", text="")
+        row.operator("praxova.add_building", text="", icon='ADD')
+
+        building = sp.active_building
+        is_building_valid = (
+            building is not None
+            and getattr(building, 'praxova_building', None) is not None
+            and building.praxova_building.is_building
+        )
+        if not is_building_valid:
+            box.label(
+                text="No Building selected. Click + to create one.",
+                icon='INFO',
+            )
+            return
+
+        box.prop(building.praxova_building, "default_corner_style")
+
+        # --- Level section ---
+        box = layout.box()
+        box.label(text="Level", icon='SEQ_STRIP_META')
+
+        row = box.row(align=True)
+        row.prop(sp, "active_level", text="")
+        row.operator("praxova.add_level", text="", icon='ADD')
+
+        level = sp.active_level
+        is_level_valid = (
+            level is not None
+            and getattr(level, 'praxova_level', None) is not None
+            and level.praxova_level.is_level
+        )
+        if not is_level_valid:
+            box.label(
+                text="No Level selected. Click + to add one.",
+                icon='INFO',
+            )
+            return
+
+        row = box.row(align=True)
+        row.prop(level.praxova_level, "level_index")
+        row.prop(level.praxova_level, "level_height_in")
+
+        # Read-only walls list. Frame_building iterates exactly these.
+        walls = _walls_in_level(level)
+        box.label(text=f"Walls in this Level ({len(walls)}):")
+        col = box.column(align=True)
+        col.scale_y = 0.8
+        if walls:
+            for w in walls:
+                col.label(text=f"  - {w.name}", icon='OBJECT_DATA')
+        else:
+            col.label(text="  (none yet)", icon='INFO')
+            col.label(
+                text="  Select this Level + click Frame Wall to add one",
+                icon='BLANK1',
+            )
+
+        box.operator("praxova.frame_building", icon='MOD_BUILD')
+
+        # --- Joints section ---
+        box = layout.box()
+        box.label(text="Joints", icon='MOD_MIRROR')
+
+        row = box.row()
+        row.template_list(
+            "PRAXOVA_UL_joints", "",
+            level.praxova_level, "joints",
+            level.praxova_level, "joints_active",
+            rows=3,
+        )
+        col = row.column(align=True)
+        col.operator("praxova.add_joint", text="", icon='ADD')
+        col.operator("praxova.remove_joint", text="", icon='REMOVE')
+
+        joints = level.praxova_level.joints
+        if len(joints) > 0:
+            j = joints[level.praxova_level.joints_active]
+            detail = box.column(align=True)
+            detail.prop(j, "joint_type")
+            detail.prop(j, "wall_a")
+            detail.prop(j, "wall_a_end")
+            detail.prop(j, "wall_b")
+            detail.prop(j, "wall_b_end")
+            detail.prop(j, "corner_style")
+            detail.prop(j, "extending_wall")
+
+            # Live validation indicator — same validator the operator
+            # uses, so the user sees the same first-failure message
+            # they would get on clicking Frame Building.
+            ok, msg = templates.validate_joints(joints, walls)
+            if not ok:
+                box.label(text=msg, icon='ERROR')
