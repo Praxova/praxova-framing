@@ -783,8 +783,8 @@ def compute_wall_joint_context(
 
 
 def l_corner_geometry(
-    t_self: float,
-    t_other: float,
+    st_self: float,
+    wt_other: float,
     role: str,
     end: str,
     is_extending: bool,
@@ -797,29 +797,49 @@ def l_corner_geometry(
     studs. For a wall with no joint at a given end, the caller skips
     this function and uses v0.5 defaults.
 
+    LUMBER_TYPES indices in v0.6.0 mixed stud thickness ([0]) with
+    wall thickness ([1]) at joints — produced 1.5" lap on 2x4 corners
+    when residential framing wants 3.5". This signature is explicit:
+    st_self = this wall's stud thickness (the x-extent of an OC stud
+    along the wall's length axis); wt_other = the paired wall's WALL
+    thickness (the depth from interior to exterior face). For 2x4
+    stock those are 1.5 and 3.5 respectively.
+
     Args:
-        t_self: this wall's stud thickness (LUMBER_TYPES[nominal][0]).
-        t_other: the paired wall's stud thickness.
+        st_self: this wall's stud thickness (LUMBER_TYPES[nominal][0],
+            1.5" for 2x4). Used only where the value represents the
+            stud's OWN x-extent — currently just the end stud x
+            override on the END side and the filler stud x on the END
+            side, where the stud's left edge is offset by its own
+            width from the right edge that lands at the corner.
+        wt_other: the paired wall's wall thickness
+            (LUMBER_TYPES[paired_nominal][1], 3.5" for 2x4). Used for
+            "how much the other wall takes up at the corner" —
+            abutting plate shortening, cap plate shortening, end stud
+            reposition base, and filler stud position.
         role: 'MAIN' or 'ABUTTING'.
         end: 'START' (joint at x=0) or 'END' (joint at x=wall_length_in).
         is_extending: True if this wall's cap plate runs full-length
             across the corner; False if the cap plate is shortened by
-            t_other at this end.
+            wt_other at this end.
         wall_length_in: this wall's length in inches.
 
     Returns:
         bottom_plate_offset (in): cut off this much from the joint
-            end of the bottom plate. 0 for MAIN, t_other for ABUTTING.
+            end of the bottom plate. 0 for MAIN, wt_other for ABUTTING.
         lower_top_plate_offset (in): same shape as bottom plate.
-        cap_plate_offset (in): 0 if this wall extends, else t_other.
+        cap_plate_offset (in): 0 if this wall extends, else wt_other.
         end_stud_x_override (float | None): left-edge x-coord to use for
             this wall's end stud at the joint end. None means use v0.5
             default (flush with the wall end). ABUTTING walls move
-            their end stud inward by t_other; MAIN walls don't change.
+            their end stud inward by wt_other; MAIN walls don't change.
         filler_stud_x (float | None): left-edge x-coord of the interior
             corner filler stud. Only MAIN walls produce one (per design
             doc — abutting walls don't). For 'END' the filler sits at
-            (length - t_self - t_other); for 'START' at t_other.
+            (length - wt_other - st_self), so its right edge aligns
+            with the paired wall's interior face. For 'START' at
+            wt_other (mirror), so its left edge aligns with the paired
+            wall's interior face on the START side.
     """
     out = {
         'bottom_plate_offset': 0.0,
@@ -829,30 +849,33 @@ def l_corner_geometry(
         'filler_stud_x': None,
     }
 
-    cap_offset = 0.0 if is_extending else t_other
+    cap_offset = 0.0 if is_extending else wt_other
 
     if role == 'MAIN':
         # Plates run full length at the joint end (bottom + lower top).
         # Cap plate shortened only if MAIN does NOT extend.
         out['cap_plate_offset'] = cap_offset
-        # Filler stud one t_other inboard from the end stud (interior
-        # face aligned with where the abutting wall's interior face
-        # will land in world space).
+        # Filler stud one wt_other inboard from the wall end (interior
+        # face aligned with the paired wall's interior face in world
+        # space). The stud has its OWN width (st_self) on the inboard
+        # side, hence the additional -st_self on the END side.
         if end == 'END':
-            out['filler_stud_x'] = wall_length_in - t_self - t_other
+            out['filler_stud_x'] = wall_length_in - wt_other - st_self
         else:  # 'START'
-            out['filler_stud_x'] = t_other
+            out['filler_stud_x'] = wt_other
     else:  # 'ABUTTING'
-        # Plates shortened by t_other at the joint end (bottom + lower
+        # Plates shortened by wt_other at the joint end (bottom + lower
         # top). Cap follows is_extending.
-        out['bottom_plate_offset'] = t_other
-        out['lower_top_plate_offset'] = t_other
+        out['bottom_plate_offset'] = wt_other
+        out['lower_top_plate_offset'] = wt_other
         out['cap_plate_offset'] = cap_offset
         # End stud repositioned to land flush with the shortened plates.
+        # On END side the stud's own width (st_self) shifts the LEFT
+        # edge inboard from the right edge that aligns with plate end.
         if end == 'END':
-            out['end_stud_x_override'] = wall_length_in - t_other - t_self
+            out['end_stud_x_override'] = wall_length_in - wt_other - st_self
         else:  # 'START'
-            out['end_stud_x_override'] = t_other
+            out['end_stud_x_override'] = wt_other
 
     return out
 
