@@ -100,6 +100,9 @@ def register():
         ui.PRAXOVA_MT_panels_submenu,
         ui.PRAXOVA_PT_wall_framing,
         ui.PRAXOVA_PT_building,
+        # v0.6: MCP Bridge moved to its own panel — global add-on
+        # capability, always visible regardless of Building/Level state.
+        ui.PRAXOVA_PT_mcp_bridge,
     ]
 
     # Per-size submenus generated from the lumber type table so adding a new

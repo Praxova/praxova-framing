@@ -644,28 +644,8 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
         col.label(text="\"Praxova Cut List\" + .txt", icon='BLANK1')
         col.label(text="next to .blend (if saved)", icon='BLANK1')
 
-        # --- v0.3: MCP Bridge ---
-        # Lets an external MCP server (mcp_server/) connect and drive the
-        # operators above from an LLM agent. Localhost-only.
-        box = layout.box()
-        box.label(text="MCP Bridge", icon='URL')
-        running = _server.bridge.is_running()
-
-        # Port input - greyed out while running so the user sees that
-        # changing it won't take effect until restart.
-        row = box.row(align=True)
-        row.enabled = not running
-        row.prop(scn, "bridge_port", text="Port")
-
-        if running:
-            box.label(
-                text=f"Listening on 127.0.0.1:{_server.bridge.get_port()}",
-                icon='RADIOBUT_ON',
-            )
-            box.operator("praxova.stop_bridge", icon='PAUSE', text="Stop Bridge")
-        else:
-            box.label(text="Stopped", icon='RADIOBUT_OFF')
-            box.operator("praxova.start_bridge", icon='PLAY', text="Start Bridge")
+        # MCP Bridge lives in its own panel (PRAXOVA_PT_mcp_bridge) as of
+        # v0.6 — it's a global add-on capability, not Wall Framing-specific.
 
         # --- Active object info ---
         obj = context.active_object
@@ -881,3 +861,49 @@ class PRAXOVA_PT_building(bpy.types.Panel):
             ok, msg = templates.validate_joints(joints, walls)
             if not ok:
                 box.label(text=msg, icon='ERROR')
+
+
+# ===========================================================================
+# MCP Bridge tab (extracted from Wall Framing in v0.6)
+# ===========================================================================
+
+class PRAXOVA_PT_mcp_bridge(bpy.types.Panel):
+    """MCP Bridge panel — standalone N-panel tab for the v0.3 bridge.
+
+    The bridge is a global add-on capability (it lets an external MCP
+    server connect and drive any operator), not specific to wall
+    framing. v0.6 moves the UI out of the Wall Framing tab into its
+    own panel so it stays visible regardless of selection context.
+
+    Port input + Start/Stop button + status indicator. Port is greyed
+    out while the bridge is running so the user sees that changing
+    it won't take effect until restart.
+    """
+
+    bl_idname = "PRAXOVA_PT_mcp_bridge"
+    bl_label = "MCP Bridge"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Praxova"
+
+    def draw(self, context):
+        layout = self.layout
+        scn = context.scene.praxova_framing
+        box = layout.box()
+        box.label(text="MCP Bridge", icon='URL')
+
+        running = _server.bridge.is_running()
+
+        row = box.row(align=True)
+        row.enabled = not running
+        row.prop(scn, "bridge_port", text="Port")
+
+        if running:
+            box.label(
+                text=f"Listening on 127.0.0.1:{_server.bridge.get_port()}",
+                icon='RADIOBUT_ON',
+            )
+            box.operator("praxova.stop_bridge", icon='PAUSE', text="Stop Bridge")
+        else:
+            box.label(text="Stopped", icon='RADIOBUT_OFF')
+            box.operator("praxova.start_bridge", icon='PLAY', text="Start Bridge")
