@@ -191,6 +191,31 @@ def add_to_add_menu(self, context):
 
 
 # ===========================================================================
+# Wall framing source resolution (v0.6)
+# ===========================================================================
+
+def _get_wall_source(context):
+    """Return the PropertyGroup the Wall Framing tab should edit right now.
+
+    v0.6 introduced per-wall PraxovaWallProps storage. When the active
+    object is a Praxova-managed wall Empty (praxova_wall.is_wall == True),
+    the tab edits that wall's own props — changes take effect on the
+    next Frame Wall (which re-frames in place). Otherwise the tab edits
+    the scene-level scratch on PraxovaSceneProps, and the next Frame
+    Wall creates a new wall Empty from those values.
+
+    Both PropertyGroups carry the same wall_*  and wall_openings field
+    shape, so callers can read uniformly off the returned `source`.
+    """
+    active = context.active_object
+    if (active is not None
+            and getattr(active, 'praxova_wall', None) is not None
+            and active.praxova_wall.is_wall):
+        return active.praxova_wall
+    return context.scene.praxova_framing
+
+
+# ===========================================================================
 # Openings UIList + operators (v0.5)
 # ===========================================================================
 
@@ -232,18 +257,21 @@ class PRAXOVA_OT_add_door(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        sp = context.scene.praxova_framing
-        new = sp.wall_openings.add()
+        # v0.6: target the active wall's openings if a wall is active,
+        # else scratch on the scene. Both PropertyGroups expose the same
+        # wall_openings / wall_openings_active fields.
+        target = _get_wall_source(context)
+        new = target.wall_openings.add()
         new.opening_type = 'DOOR'
         new.ro_width_in = 38.0
         new.ro_height_in = 82.0
         new.sill_height_in = 0.0
-        new.header_nominal = sp.wall_nominal
+        new.header_nominal = target.wall_nominal
         new.jack_count = templates.recommend_jack_count(38.0)
         templates.redistribute_openings_evenly(
-            sp.wall_openings, sp.wall_length_in,
+            target.wall_openings, target.wall_length_in,
         )
-        sp.wall_openings_active = len(sp.wall_openings) - 1
+        target.wall_openings_active = len(target.wall_openings) - 1
         return {'FINISHED'}
 
 
@@ -258,18 +286,20 @@ class PRAXOVA_OT_add_window(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        sp = context.scene.praxova_framing
-        new = sp.wall_openings.add()
+        # v0.6: target the active wall's openings if a wall is active,
+        # else scratch on the scene.
+        target = _get_wall_source(context)
+        new = target.wall_openings.add()
         new.opening_type = 'WINDOW'
         new.ro_width_in = 36.0
         new.ro_height_in = 48.0
         new.sill_height_in = 36.0
-        new.header_nominal = sp.wall_nominal
+        new.header_nominal = target.wall_nominal
         new.jack_count = templates.recommend_jack_count(36.0)
         templates.redistribute_openings_evenly(
-            sp.wall_openings, sp.wall_length_in,
+            target.wall_openings, target.wall_length_in,
         )
-        sp.wall_openings_active = len(sp.wall_openings) - 1
+        target.wall_openings_active = len(target.wall_openings) - 1
         return {'FINISHED'}
 
 
@@ -283,14 +313,15 @@ class PRAXOVA_OT_remove_opening(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return len(context.scene.praxova_framing.wall_openings) > 0
+        # v0.6: poll based on the current edit target (active wall or scratch).
+        return len(_get_wall_source(context).wall_openings) > 0
 
     def execute(self, context):
-        sp = context.scene.praxova_framing
-        idx = sp.wall_openings_active
-        sp.wall_openings.remove(idx)
-        sp.wall_openings_active = max(
-            0, min(idx, len(sp.wall_openings) - 1),
+        target = _get_wall_source(context)
+        idx = target.wall_openings_active
+        target.wall_openings.remove(idx)
+        target.wall_openings_active = max(
+            0, min(idx, len(target.wall_openings) - 1),
         )
         return {'FINISHED'}
 
@@ -305,12 +336,12 @@ class PRAXOVA_OT_distribute_openings(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return len(context.scene.praxova_framing.wall_openings) > 0
+        return len(_get_wall_source(context).wall_openings) > 0
 
     def execute(self, context):
-        sp = context.scene.praxova_framing
+        target = _get_wall_source(context)
         templates.redistribute_openings_evenly(
-            sp.wall_openings, sp.wall_length_in,
+            target.wall_openings, target.wall_length_in,
         )
         return {'FINISHED'}
 
@@ -439,38 +470,56 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
         # since both are array-style operations.
         box.operator("praxova.duplicate_e2e", icon='MOD_ARRAY', text="Fill")
 
-        # --- Wall framing (v0.4) ---
-        # Composite operator: places plates and studs at world origin,
-        # parented to a new Empty. Single isolated wall in v0.4; corner
-        # treatments and door/window openings come in later cycles.
-        # The preview line below the inputs computes the same validation
-        # the operator does (without actually building anything) so the
-        # user sees "height too short for plate stack" before clicking.
+        # --- Wall framing (v0.4 / v0.5 / v0.6) ---
+        # Composite operator: places plates and studs (and v0.5 opening
+        # pieces) parented to an Empty. v0.6 makes the tab context-
+        # sensitive — when a Praxova wall Empty is active, the tab edits
+        # that wall's own PraxovaWallProps (so its values persist across
+        # Blender sessions and Frame Wall re-frames it in place); when
+        # nothing relevant is active, the tab edits the scene-level
+        # scratch on PraxovaSceneProps (Frame Wall then creates a new
+        # wall from those values). The `source` resolver returns whichever
+        # is correct for the current selection.
         box = layout.box()
         box.label(text="Wall Framing", icon='MOD_BUILD')
 
-        box.prop(scn, "wall_length_in")
-        box.prop(scn, "wall_height_in")
-        box.prop(scn, "wall_nominal")
-        box.prop(scn, "wall_spacing_oc_in")
-        box.prop(scn, "wall_top_plate_count")
-        box.prop(scn, "wall_bottom_plate_count")
+        source = _get_wall_source(context)
+        active_obj = context.active_object
+        is_active_wall = source is not scn
+        if is_active_wall:
+            box.label(
+                text=f"Editing wall: {active_obj.name}",
+                icon='OBJECT_DATA',
+            )
+        else:
+            box.label(
+                text="Editing scratch (creates new wall on Frame Wall)",
+                icon='OBJECT_DATAMODE',
+            )
 
-        # --- Openings sub-section (v0.5) ---
+        box.prop(source, "wall_length_in")
+        box.prop(source, "wall_height_in")
+        box.prop(source, "wall_nominal")
+        box.prop(source, "wall_spacing_oc_in")
+        box.prop(source, "wall_top_plate_count")
+        box.prop(source, "wall_bottom_plate_count")
+
+        # --- Openings sub-section (v0.5; v0.6 source-aware) ---
         # Sub-box inside the Wall Framing box: UIList of openings on the
         # left, per-row Add Door / Add Window / Remove / Distribute
         # column on the right, and a detail panel below for the active
-        # opening's fields. When empty, the UIList renders a placeholder
-        # row and only the add buttons are clickable (remove + distribute
-        # are gated by their poll() methods).
+        # opening's fields. The collection bound to template_list and
+        # the active-opening readout both follow `source`, so editing an
+        # active wall's openings doesn't mutate scene scratch (and
+        # vice-versa).
         openings_box = box.box()
         openings_box.label(text="Openings:", icon='MOD_BOOLEAN')
 
         row = openings_box.row()
         row.template_list(
             "PRAXOVA_UL_openings", "",
-            scn, "wall_openings",
-            scn, "wall_openings_active",
+            source, "wall_openings",
+            source, "wall_openings_active",
             rows=3,
         )
         col = row.column(align=True)
@@ -480,26 +529,26 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
         col.separator()
         col.operator("praxova.distribute_openings", text="", icon='MOD_ARRAY')
 
-        if len(scn.wall_openings) > 0:
-            active = scn.wall_openings[scn.wall_openings_active]
+        if len(source.wall_openings) > 0:
+            active_op = source.wall_openings[source.wall_openings_active]
             detail = openings_box.column(align=True)
-            detail.prop(active, "opening_type")
-            detail.prop(active, "x_offset_in")
-            detail.prop(active, "ro_width_in")
-            detail.prop(active, "ro_height_in")
-            if active.opening_type == 'WINDOW':
-                detail.prop(active, "sill_height_in")
-            detail.prop(active, "header_nominal")
-            detail.prop(active, "jack_count")
+            detail.prop(active_op, "opening_type")
+            detail.prop(active_op, "x_offset_in")
+            detail.prop(active_op, "ro_width_in")
+            detail.prop(active_op, "ro_height_in")
+            if active_op.opening_type == 'WINDOW':
+                detail.prop(active_op, "sill_height_in")
+            detail.prop(active_op, "header_nominal")
+            detail.prop(active_op, "jack_count")
 
         # --- Live preview ---
-        nominal = scn.wall_nominal
+        nominal = source.wall_nominal
         if nominal in templates.LUMBER_TYPES:
             plate_thickness_in = templates.LUMBER_TYPES[nominal][0]
             plate_stack_in = (
-                scn.wall_top_plate_count + scn.wall_bottom_plate_count
+                source.wall_top_plate_count + source.wall_bottom_plate_count
             ) * plate_thickness_in
-            stud_length_in = scn.wall_height_in - plate_stack_in
+            stud_length_in = source.wall_height_in - plate_stack_in
 
             preview_col = box.column(align=True)
             preview_col.scale_y = 0.8
@@ -510,34 +559,34 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
                          f"{plate_stack_in:g}\" plate stack",
                     icon='ERROR',
                 )
-            elif scn.wall_length_in < 2 * plate_thickness_in:
+            elif source.wall_length_in < 2 * plate_thickness_in:
                 preview_col.label(
                     text=f"Length < {2 * plate_thickness_in:g}\" "
                          "needed for end studs",
                     icon='ERROR',
                 )
-            elif len(scn.wall_openings) > 0:
+            elif len(source.wall_openings) > 0:
                 # v0.5: with openings, validate first so the user sees
                 # the specific failing opening before any count summary.
-                openings = list(scn.wall_openings)
+                openings = list(source.wall_openings)
                 ok, msg = templates.validate_openings(
                     openings,
-                    scn.wall_length_in, scn.wall_height_in, nominal,
-                    scn.wall_top_plate_count, scn.wall_bottom_plate_count,
+                    source.wall_length_in, source.wall_height_in, nominal,
+                    source.wall_top_plate_count, source.wall_bottom_plate_count,
                 )
                 if not ok:
                     preview_col.label(text=msg, icon='ERROR')
                 else:
                     raw_xs = templates.stud_positions(
-                        scn.wall_length_in,
-                        scn.wall_spacing_oc_in,
+                        source.wall_length_in,
+                        source.wall_spacing_oc_in,
                         plate_thickness_in,
                     )
                     layouts = [
                         templates.opening_framing_layout(
-                            op, nominal, scn.wall_height_in,
-                            scn.wall_top_plate_count,
-                            scn.wall_bottom_plate_count,
+                            op, nominal, source.wall_height_in,
+                            source.wall_top_plate_count,
+                            source.wall_bottom_plate_count,
                         )
                         for op in openings
                     ]
@@ -545,8 +594,8 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
                         raw_xs, plate_thickness_in, openings, layouts,
                     )
                     n_plates = (
-                        scn.wall_top_plate_count
-                        + scn.wall_bottom_plate_count
+                        source.wall_top_plate_count
+                        + source.wall_bottom_plate_count
                     )
                     preview_col.label(
                         text=(
@@ -554,25 +603,25 @@ class PRAXOVA_PT_main_panel(bpy.types.Panel):
                             f"{len(openings)} opening"
                             f"{'s' if len(openings) != 1 else ''}, "
                             f"{n_plates} plates × "
-                            f"{scn.wall_length_in:g}\""
+                            f"{source.wall_length_in:g}\""
                         ),
                         icon='INFO',
                     )
             else:
                 stud_xs = templates.stud_positions(
-                    scn.wall_length_in,
-                    scn.wall_spacing_oc_in,
+                    source.wall_length_in,
+                    source.wall_spacing_oc_in,
                     plate_thickness_in,
                 )
                 n_studs = len(stud_xs)
                 n_plates = (
-                    scn.wall_top_plate_count + scn.wall_bottom_plate_count
+                    source.wall_top_plate_count + source.wall_bottom_plate_count
                 )
                 preview_col.label(
                     text=f"Preview: {n_studs} studs x "
                          f"{stud_length_in:g}\", "
                          f"{n_plates} plates x "
-                         f"{scn.wall_length_in:g}\"",
+                         f"{source.wall_length_in:g}\"",
                     icon='INFO',
                 )
 

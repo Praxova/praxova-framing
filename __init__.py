@@ -39,10 +39,14 @@ def register():
 
     static_classes = [
         # Property groups MUST register before anything that references them.
-        # PraxovaWallOpening must register before PraxovaSceneProps because
-        # PraxovaSceneProps.wall_openings is a CollectionProperty of it (v0.5).
+        # PraxovaWallOpening must register before PraxovaWallProps (v0.6) and
+        # PraxovaSceneProps (v0.5) because both reference it via CollectionProperty.
+        # PraxovaWallProps must register before PraxovaSceneProps so that the
+        # latter's existing wall_* fields and PraxovaWallProps' identical fields
+        # both end up consistent in the bpy type registry.
         properties.PraxovaLumberProps,
         properties.PraxovaWallOpening,
+        properties.PraxovaWallProps,
         properties.PraxovaSceneProps,
         # Operators.
         ops_add.PRAXOVA_OT_add_lumber,
@@ -90,6 +94,13 @@ def register():
     bpy.types.Object.praxova_lumber = bpy.props.PointerProperty(
         type=properties.PraxovaLumberProps,
     )
+    # v0.6: every Object carries a praxova_wall pointer; is_wall=True marks
+    # the Empty as a Praxova-managed wall, and the other fields store that
+    # wall's own framing params (replacing the scene-level scratch as the
+    # source of truth for any wall that's been created).
+    bpy.types.Object.praxova_wall = bpy.props.PointerProperty(
+        type=properties.PraxovaWallProps,
+    )
     bpy.types.Scene.praxova_framing = bpy.props.PointerProperty(
         type=properties.PraxovaSceneProps,
     )
@@ -107,6 +118,7 @@ def unregister():
     bpy.types.VIEW3D_MT_add.remove(ui.add_to_add_menu)
 
     del bpy.types.Object.praxova_lumber
+    del bpy.types.Object.praxova_wall
     del bpy.types.Scene.praxova_framing
 
     for cls in reversed(_registered_classes):

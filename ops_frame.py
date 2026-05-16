@@ -112,15 +112,23 @@ def _get_or_make_mesh(name: str, dims_inches: tuple[float, float, float]):
 
 
 class PRAXOVA_OT_frame_wall(bpy.types.Operator):
-    """Frame a single wall - plates and studs parented to a new Empty.
+    """Frame a single wall - plates and studs parented to an Empty.
 
-    Reads wall_* fields from scene.praxova_framing, creates a new Empty
-    named via templates.next_wall_name() at world origin, and places
-    bottom plates, studs, and top plates as children of the Empty. The
-    Empty becomes the active object so the user can immediately
-    transform the wall as a unit.
+    Two modes, picked from the active object (v0.6):
 
-    Validates cross-field constraints that the PropertyGroup bounds can't
+    1. Active object is a Praxova-managed wall Empty (its
+       praxova_wall.is_wall == True): regenerate in place. The Empty's
+       existing children are deleted; new children are built from the
+       wall's own PraxovaWallProps. The Empty itself is preserved, so
+       PointerProperty references to it (e.g. from joints in a Level)
+       survive the re-framing.
+
+    2. Active object is anything else (or nothing): create a new wall
+       Empty at world origin, copy the scene-level scratch params
+       (PraxovaSceneProps.wall_*) and openings onto the new wall's
+       PraxovaWallProps, then build children.
+
+    Validates cross-field constraints that PropertyGroup bounds can't
     enforce:
         - Wall height must leave room for at least some stud after the
           plate stack: height_in > (top_plates + bottom_plates) * thickness.
@@ -128,29 +136,45 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
           don't overlap).
         - Stock length must exist for both wall length (plates) and stud
           length (studs) within the nominal's available stock list.
-    Each validation failure reports a specific error and CANCELLED.
+    v0.5 openings get the same cross-field validation via
+    templates.validate_openings. Each failure reports a specific error
+    and CANCELLED.
     """
 
     bl_idname = "praxova.frame_wall"
     bl_label = "Frame Wall"
     bl_description = (
-        "Frame a single wall (plates + studs) at world origin, parented "
-        "to a new Empty for one-handle transform. Reads parameters from "
-        "the Wall Framing section of the N-panel."
+        "Frame a wall. If a Praxova wall Empty is active, re-frame it "
+        "in place (children deleted, Empty preserved). Otherwise create "
+        "a new wall Empty at world origin from the scene scratch params."
     )
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         sp = context.scene.praxova_framing
-        length_in: float = float(sp.wall_length_in)
-        height_in: float = float(sp.wall_height_in)
-        nominal: str = sp.wall_nominal
-        spacing_oc_in: float = float(sp.wall_spacing_oc_in)
-        top_plate_count: int = sp.wall_top_plate_count
-        bottom_plate_count: int = sp.wall_bottom_plate_count
+
+        # v0.6: source for wall params is either the active wall's own
+        # PraxovaWallProps (in-place re-frame mode) or the scene scratch
+        # (new wall mode). Both have the same wall_* / wall_openings
+        # shape — the rest of execute() reads from `source` and stays
+        # mode-agnostic.
+        active = context.active_object
+        is_existing_wall = (
+            active is not None
+            and getattr(active, 'praxova_wall', None) is not None
+            and active.praxova_wall.is_wall
+        )
+        source = active.praxova_wall if is_existing_wall else sp
+
+        length_in: float = float(source.wall_length_in)
+        height_in: float = float(source.wall_height_in)
+        nominal: str = source.wall_nominal
+        spacing_oc_in: float = float(source.wall_spacing_oc_in)
+        top_plate_count: int = source.wall_top_plate_count
+        bottom_plate_count: int = source.wall_bottom_plate_count
         # v0.5: snapshot the openings collection. Each entry is a
         # PraxovaWallOpening with the seven fields the helpers expect.
-        openings = list(sp.wall_openings)
+        openings = list(source.wall_openings)
 
         # ------------------------------------------------------------------
         # Validation
@@ -227,9 +251,16 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         stud_xs_in = templates.filter_studs_around_openings(
             raw_stud_xs_in, thickness_in, openings, opening_layouts,
         )
-        wall_name = templates.next_wall_name(
-            {obj.name for obj in context.scene.objects},
-        )
+        # v0.6: wall_name comes from the existing Empty (in-place mode) or
+        # the next-unused Wall_NN slot (new mode). Child names are derived
+        # via f"{wall_name}_BottomPlate_NN" etc., so picking the right name
+        # here keeps child naming stable across the two modes.
+        if is_existing_wall:
+            wall_name = active.name
+        else:
+            wall_name = templates.next_wall_name(
+                {obj.name for obj in context.scene.objects},
+            )
 
         plate_stock_ft = int(round(plate_stock_in / 12))
         stud_stock_ft = int(round(stud_stock_in / 12))
@@ -265,13 +296,45 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             stud_mesh = templates.make_box_mesh(stud_mesh_name, stud_dims_in)
 
         # ------------------------------------------------------------------
-        # Empty parent
+        # Empty parent (v0.6: existing wall or new)
         # ------------------------------------------------------------------
-        empty = bpy.data.objects.new(wall_name, None)
-        empty.empty_display_type = 'PLAIN_AXES'
-        empty.empty_display_size = 0.5  # 0.5m - visible but not overwhelming
-        empty.location = (0.0, 0.0, 0.0)
-        context.collection.objects.link(empty)
+        # In-place mode: re-use the active wall Empty. Delete its existing
+        # children so the new build starts clean. The Empty itself is
+        # preserved — its name, transform, parent, and any PointerProperty
+        # references to it (e.g. from v0.6 joints) all stay valid.
+        #
+        # New mode: create a fresh Empty at world origin and copy the
+        # scene scratch params (length / height / nominal / openings) onto
+        # its PraxovaWallProps, then mark it with is_wall=True so future
+        # invocations recognize it as a Praxova-managed wall.
+        if is_existing_wall:
+            empty = active
+            for child in list(empty.children):
+                bpy.data.objects.remove(child, do_unlink=True)
+        else:
+            empty = bpy.data.objects.new(wall_name, None)
+            empty.empty_display_type = 'PLAIN_AXES'
+            empty.empty_display_size = 0.5  # 0.5m - visible but not overwhelming
+            empty.location = (0.0, 0.0, 0.0)
+            context.collection.objects.link(empty)
+            wp = empty.praxova_wall
+            wp.is_wall = True
+            wp.wall_length_in = sp.wall_length_in
+            wp.wall_height_in = sp.wall_height_in
+            wp.wall_nominal = sp.wall_nominal
+            wp.wall_spacing_oc_in = sp.wall_spacing_oc_in
+            wp.wall_top_plate_count = sp.wall_top_plate_count
+            wp.wall_bottom_plate_count = sp.wall_bottom_plate_count
+            for src in sp.wall_openings:
+                dst = wp.wall_openings.add()
+                dst.opening_type = src.opening_type
+                dst.x_offset_in = src.x_offset_in
+                dst.ro_width_in = src.ro_width_in
+                dst.ro_height_in = src.ro_height_in
+                dst.sill_height_in = src.sill_height_in
+                dst.header_nominal = src.header_nominal
+                dst.jack_count = src.jack_count
+            wp.wall_openings_active = sp.wall_openings_active
 
         # ------------------------------------------------------------------
         # Children: bottom plates, studs, top plates

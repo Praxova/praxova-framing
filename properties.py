@@ -257,11 +257,101 @@ class PraxovaWallOpening(bpy.types.PropertyGroup):
 
 
 # ---------------------------------------------------------------------------
+# Per-wall props (v0.6)
+# ---------------------------------------------------------------------------
+
+class PraxovaWallProps(bpy.types.PropertyGroup):
+    """Per-wall framing parameters, attached to every Object as PointerProperty.
+
+    `is_wall == True` identifies a wall Empty (created by frame_wall). The
+    remaining fields mirror the wall_* fields on PraxovaSceneProps exactly
+    in shape and defaults — PraxovaSceneProps' versions live on as the
+    "scratch / defaults" the Wall Framing tab edits when no wall Empty is
+    active, and that frame_wall copies onto a new wall's props at create
+    time. The CollectionProperty(type=PraxovaWallOpening) holds the
+    wall's openings; v0.5's scene-level wall_openings collection serves
+    the same scratch-defaults role.
+
+    Per-wall storage is what enables v0.6's multi-wall workflow: each wall
+    Empty remembers its own dimensions, openings, and OC spacing, so
+    re-framing one wall in place doesn't disturb the others.
+    """
+
+    is_wall: BoolProperty(  # noqa: F821
+        name="Is Praxova Wall",
+        description="Marks this Object as a Praxova-managed wall Empty",
+        default=False,
+    )
+
+    # --- Migrated from PraxovaSceneProps wall_* fields ---
+    wall_length_in: FloatProperty(  # noqa: F821
+        name="Wall Length (in)",
+        description="Wall length along +X in inches",
+        default=96.0,
+        min=12.0,
+        soft_max=1200.0,
+        precision=2,
+    )
+    wall_height_in: FloatProperty(  # noqa: F821
+        name="Wall Height (in)",
+        description="Wall height (floor to top of top plate) in inches",
+        default=96.0,
+        min=12.0,
+        soft_max=240.0,
+        precision=2,
+    )
+    wall_nominal: EnumProperty(  # noqa: F821
+        name="Stud Size",
+        description="Dimensional lumber size used for studs and plates",
+        items=_LUMBER_TYPE_ITEMS,
+        default='2x4',
+    )
+    wall_spacing_oc_in: FloatProperty(  # noqa: F821
+        name="Stud Spacing OC (in)",
+        description="On-center stud spacing in inches (typically 16 or 24)",
+        default=16.0,
+        min=0.001,
+        soft_max=48.0,
+        precision=2,
+    )
+    wall_top_plate_count: IntProperty(  # noqa: F821
+        name="Top Plate Count",
+        description="Number of top plates (2 for load-bearing, 1 for partition)",
+        default=2,
+        min=1,
+        max=4,
+    )
+    wall_bottom_plate_count: IntProperty(  # noqa: F821
+        name="Bottom Plate Count",
+        description="Number of bottom plates (typically 1)",
+        default=1,
+        min=1,
+        max=4,
+    )
+    wall_openings: CollectionProperty(  # noqa: F821
+        type=PraxovaWallOpening,
+        name="Wall Openings",
+    )
+    wall_openings_active: IntProperty(  # noqa: F821
+        name="Active Opening",
+        default=0,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scene state
 # ---------------------------------------------------------------------------
 
 class PraxovaSceneProps(bpy.types.PropertyGroup):
-    """Scene-level UI state for the N-panel."""
+    """Scene-level UI state for the N-panel.
+
+    Holds OC duplicator state, fill state, MCP bridge port, and v0.6
+    Building/Level active-selection pointers. Also holds the wall_*
+    fields which, since v0.6, serve as SCRATCH / DEFAULTS for newly-
+    created walls — the active wall's own PraxovaWallProps is the
+    authoritative storage. The Wall Framing tab edits whichever is
+    appropriate per context (active wall vs scratch).
+    """
 
     # --- OC duplicator (existing) ---
     spacing_in: FloatProperty(  # noqa: F821
