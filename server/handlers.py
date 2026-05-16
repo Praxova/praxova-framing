@@ -13,6 +13,7 @@ The METHODS dict at the bottom of this module is the canonical RPC surface.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import bpy
@@ -818,136 +819,201 @@ def add_level(params: dict) -> dict:
 # ===========================================================================
 
 def frame_wall(params: dict) -> dict:
-    """Frame a single wall - plates + studs + optional openings + Empty parent.
+    """Frame a wall — CREATE a new one or REBUILD an existing one in place.
 
-    Required:
+    Two modes, picked by whether `wall_target` is set:
+
+    CREATE (wall_target is None, default):
+        Build a new wall Empty + children at world origin (or under a
+        Level Empty via `level`). `length_in` and `height_in` are
+        REQUIRED. Other scalars take their v0.4.1 defaults
+        ("2x4"/16/2/1). The Empty is named by the v0.4 next_wall_name
+        helper (Wall_NN).
+
+    REBUILD (wall_target set):
+        Re-frame an existing wall in place. The wall Empty itself is
+        preserved (name, transform, joint references all survive);
+        only its children get deleted and rebuilt. Each scalar param
+        you provide is WRITTEN THROUGH to the wall's PraxovaWallProps;
+        each one you omit preserves the existing value. So you can
+        change just the length without re-passing height, nominal,
+        etc. `openings` follows the same rule — provide a list and the
+        wall's openings are fully replaced, omit it and they're
+        preserved verbatim.
+
+    Required when wall_target is None:
         length_in (number > 0): wall length along +X in inches.
-        height_in (number > 0): wall height (floor to top of top plate)
-            in inches.
-    Optional:
-        nominal (str, default "2x4"): stud size from LUMBER_TYPES.
-        spacing_oc_in (number > 0, default 16.0): on-center stud spacing
-            in inches (typically 16 for residential, 24 for some commercial).
-        top_plate_count (int 1-4, default 2): 2 for load-bearing (US
-            residential standard), 1 for non-load-bearing partition.
-        bottom_plate_count (int 1-4, default 1): typically 1.
-        location_m (3-element [x,y,z] list, default [0, 0, 0]): world
-            location for the new wall Empty parent. Children's local
-            positions stay wall-relative.
-        openings (list of opening dicts, default []): door and window
-            openings on the wall. v0.5.1 bridge parity for the v0.5 UI
-            feature. Each dict:
+        height_in (number > 0): wall height in inches.
 
-                type (str, REQUIRED): "door" or "window" (lowercase).
-                x_offset_in (number >= 0, REQUIRED): distance from wall
-                    left edge to left edge of the rough opening.
-                ro_width_in (number > 0, REQUIRED): rough opening width.
-                ro_height_in (number > 0, REQUIRED): rough opening height
-                    (clear from rough sill top / bottom plate top to
-                    header bottom).
-                sill_height_in (number >= 0, REQUIRED for type="window",
-                    optional for type="door" — defaults to 0.0 for doors
-                    since doors sit on the bottom plate): z-coord of the
-                    rough sill top measured from bottom of bottom plate.
-                header_nominal (str, OPTIONAL, defaults to `nominal`):
-                    header lumber size from LUMBER_TYPES. The default is
-                    GEOMETRIC, not structural — for real load spans see
-                    README "Header sizing" and IRC R602.7.
-                jack_count (int in {1, 2, 3}, OPTIONAL, defaults via
-                    recommend_jack_count: 2 for openings >= 72", else 1):
-                    jacks per side.
+    Optional in both modes:
+        nominal (str): stud size from LUMBER_TYPES. CREATE default
+            "2x4"; REBUILD default = the wall's current value.
+        spacing_oc_in (number > 0): on-center stud spacing. CREATE
+            default 16.0; REBUILD default = current.
+        top_plate_count (int 1-4): CREATE default 2; REBUILD default
+            = current.
+        bottom_plate_count (int 1-4): CREATE default 1; REBUILD
+            default = current.
+        location_m ([x, y, z] meters): set the Empty's world location.
+            In REBUILD mode, omitted means preserve current location.
+        openings (list of opening dicts): see v0.5.1 docstring for the
+            full opening dict shape. REBUILD with omitted = preserve;
+            REBUILD with [] = clear; CREATE with omitted = no openings.
 
-    Validation order: scalar params first (same v0.4.1 checks for nominal,
-    length/thickness, stud length, stock fit), then each opening dict
-    (required fields, types, choice membership) with 1-based opening
-    indices, then cross-field opening checks via templates.validate_openings
-    — the same validator the v0.5 N-panel preview uses, so an LLM agent and
-    a human in Blender see identical failure modes for the same inputs.
+    v0.6.1 additions:
+        level (str): name of a Praxova Level Empty (is_level=True). In
+            CREATE mode, the new wall is parented under this Level. In
+            REBUILD mode, if it differs from the wall's current parent
+            the wall is re-parented (joints in the OLD Level still
+            reference the wall — clean them up via the Joints UIList).
+        wall_target (str): name of a Praxova wall Empty (is_wall=True)
+            to re-frame in place. Mutually picks REBUILD over CREATE.
+        rotation_deg_z (number): Z-axis rotation in degrees applied to
+            the wall Empty. CREATE: 0 if omitted. REBUILD: preserves
+            current rotation if omitted. **JOINTS LOCK ROTATION**: in
+            REBUILD mode, if `rotation_deg_z` differs from the wall's
+            current rotation AND the wall's parent Level has any joint
+            referencing this wall, the call is refused with
+            INVALID_PARAMS. Remove the joint via the Joints UIList in
+            Blender before rotating, then re-add it after re-framing.
 
-    Returns:
-        wall_name (the new Empty), echoes of all input params, n_studs
-        (computed from length / spacing / thickness — REGULAR OC STUDS
-        AFTER FILTERING around king brackets; kings/jacks/cripples
-        counted separately via openings_summary), n_plates
-        (top + bottom), stud_length_in (cut length after the plate stack),
-        stud_stock_in (smallest stock the studs are cut from),
-        plate_stock_in (same for plates), n_openings (always present, 0
-        when openings omitted), openings_summary (always present, [] when
-        none; one dict per opening with type, jack_count, header_nominal,
-        jack_length_in, header_length_in, n_header_cripples,
-        n_sill_cripples — actual values used after default-fill),
-        new_objects (sorted Empty + all child names, including kings,
-        jacks, headers, the untagged 1/2" plywood spacer block, optional
-        rough sills, and cripples).
+    Validation order: argument resolution (level / wall_target /
+    rotation), then mode-specific scalar reads with their respective
+    defaults, then the shared cross-field validation (length/thickness,
+    stud length > 0, stock fits, openings within wall, etc.).
+
+    Returns (in addition to the v0.5.1 fields wall_name, n_studs,
+    n_plates, stud_length_in, stud_stock_in, plate_stock_in,
+    n_openings, openings_summary, new_objects, plus the input echoes):
+        wall_target_used (bool): True for REBUILD, False for CREATE.
+        level_name (str | None): the wall's parent Level Empty name,
+            None for top-level walls.
+        rotation_deg_z (float): the wall Empty's Z rotation in degrees
+            after the call.
     """
-    # --- Required ---
-    length_in = _require(params, "length_in", (int, float))
+    # ------------------------------------------------------------------
+    # Phase 1: meta-args resolution (level / wall_target / rotation)
+    # ------------------------------------------------------------------
+    scene = bpy.context.scene
+    sp = scene.praxova_framing
+
+    level_name = _optional(params, "level", str, default=None)
+    level_obj = None
+    if level_name is not None:
+        level_obj = bpy.data.objects.get(level_name)
+        if (level_obj is None
+                or getattr(level_obj, 'praxova_level', None) is None
+                or not level_obj.praxova_level.is_level):
+            raise bridge.RPCError(
+                APP_OBJECT_NOT_FOUND,
+                f"No Praxova Level named {level_name!r} in scene",
+            )
+
+    wall_target_name = _optional(params, "wall_target", str, default=None)
+    wall_target_obj = None
+    if wall_target_name is not None:
+        wall_target_obj = bpy.data.objects.get(wall_target_name)
+        if (wall_target_obj is None
+                or getattr(wall_target_obj, 'praxova_wall', None) is None
+                or not wall_target_obj.praxova_wall.is_wall):
+            raise bridge.RPCError(
+                APP_OBJECT_NOT_FOUND,
+                f"No Praxova wall named {wall_target_name!r} in scene",
+            )
+
+    rotation_deg_z_param = _optional(
+        params, "rotation_deg_z", (int, float), default=None,
+    )
+    if rotation_deg_z_param is not None:
+        if isinstance(rotation_deg_z_param, bool):
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                'Parameter "rotation_deg_z" must be a number, got bool',
+            )
+        rotation_deg_z_param = float(rotation_deg_z_param)
+
+    location = _location_param(params)
+    is_rebuild = wall_target_obj is not None
+
+    # ------------------------------------------------------------------
+    # Phase 2: scalar param resolution (mode-specific defaults)
+    # ------------------------------------------------------------------
+    if is_rebuild:
+        wp = wall_target_obj.praxova_wall
+        length_in = _optional(
+            params, "length_in", (int, float),
+            default=float(wp.wall_length_in),
+        )
+        height_in = _optional(
+            params, "height_in", (int, float),
+            default=float(wp.wall_height_in),
+        )
+        nominal = _optional(
+            params, "nominal", str, default=wp.wall_nominal,
+            choices=tuple(templates.LUMBER_TYPES),
+        )
+        spacing_oc_in = _optional(
+            params, "spacing_oc_in", (int, float),
+            default=float(wp.wall_spacing_oc_in),
+        )
+        top_plate_count = _optional(
+            params, "top_plate_count", int,
+            default=int(wp.wall_top_plate_count),
+        )
+        bottom_plate_count = _optional(
+            params, "bottom_plate_count", int,
+            default=int(wp.wall_bottom_plate_count),
+        )
+    else:
+        # CREATE: length_in and height_in are required.
+        length_in = _require(params, "length_in", (int, float))
+        height_in = _require(params, "height_in", (int, float))
+        nominal = _optional(
+            params, "nominal", str, default="2x4",
+            choices=tuple(templates.LUMBER_TYPES),
+        )
+        spacing_oc_in = _optional(
+            params, "spacing_oc_in", (int, float), default=16.0,
+        )
+        top_plate_count = _optional(
+            params, "top_plate_count", int, default=2,
+        )
+        bottom_plate_count = _optional(
+            params, "bottom_plate_count", int, default=1,
+        )
+
     if isinstance(length_in, bool) or length_in <= 0:
         raise bridge.RPCError(
             bridge.INVALID_PARAMS, "length_in must be > 0",
         )
     length_in = float(length_in)
 
-    height_in = _require(params, "height_in", (int, float))
     if isinstance(height_in, bool) or height_in <= 0:
         raise bridge.RPCError(
             bridge.INVALID_PARAMS, "height_in must be > 0",
         )
     height_in = float(height_in)
 
-    # --- Optional ---
-    nominal = _optional(
-        params, "nominal", str, default="2x4",
-        choices=tuple(templates.LUMBER_TYPES),
-    )
-
-    spacing_oc_in = _optional(
-        params, "spacing_oc_in", (int, float), default=16.0,
-    )
     if isinstance(spacing_oc_in, bool) or spacing_oc_in <= 0:
         raise bridge.RPCError(
             bridge.INVALID_PARAMS, "spacing_oc_in must be > 0",
         )
     spacing_oc_in = float(spacing_oc_in)
 
-    top_plate_count = _optional(
-        params, "top_plate_count", int, default=2,
-    )
     if top_plate_count < 1 or top_plate_count > 4:
         raise bridge.RPCError(
             bridge.INVALID_PARAMS,
             "top_plate_count must be between 1 and 4",
         )
-
-    bottom_plate_count = _optional(
-        params, "bottom_plate_count", int, default=1,
-    )
     if bottom_plate_count < 1 or bottom_plate_count > 4:
         raise bridge.RPCError(
             bridge.INVALID_PARAMS,
             "bottom_plate_count must be between 1 and 4",
         )
 
-    location = _location_param(params)
-
-    # --- v0.5.1: per-opening dict validation ---
-    # Type checks, choice membership, and default-fill (header_nominal,
-    # jack_count, doors' sill_height_in). Cross-field rules (within
-    # wall, overlap, header height) happen after the CollectionProperty
-    # is populated, via templates.validate_openings — same validator
-    # the UI uses, so identical error messages for the LLM and a human.
-    raw_openings = _optional(params, "openings", list, default=None)
-    parsed_openings: list[dict] = (
-        _parse_openings(raw_openings, nominal)
-        if raw_openings is not None
-        else []
-    )
-
-    # --- Cross-field validation (mirrors ops_frame.py) ---
-    # Pre-validating here means INVALID_PARAMS instead of
-    # APP_OPERATOR_FAILED when the wall is geometrically impossible -
-    # cleaner error codes for the LLM. Operator still validates as
-    # defense in depth.
+    # ------------------------------------------------------------------
+    # Phase 3: shared scalar cross-field validation
+    # ------------------------------------------------------------------
     thickness_in, _width_in = templates.LUMBER_TYPES[nominal]
 
     if length_in < 2 * thickness_in:
@@ -975,81 +1041,185 @@ def frame_wall(params: dict) -> dict:
     except ValueError as e:
         raise bridge.RPCError(bridge.INVALID_PARAMS, str(e))
 
-    # --- Configure scene PropertyGroup and call the operator ---
-    scene = bpy.context.scene
-    sp = scene.praxova_framing
-    sp.wall_length_in = length_in
-    sp.wall_height_in = height_in
-    sp.wall_nominal = nominal
-    sp.wall_spacing_oc_in = spacing_oc_in
-    sp.wall_top_plate_count = top_plate_count
-    sp.wall_bottom_plate_count = bottom_plate_count
+    # ------------------------------------------------------------------
+    # Phase 4: openings parse (per-dict validation, default-fill)
+    # ------------------------------------------------------------------
+    # CREATE mode: missing/None => empty list (no openings on the new wall).
+    # REBUILD mode: missing/None => sentinel "preserve existing" (no
+    # touch of wp.wall_openings); a provided list (including []) is a
+    # full replacement.
+    raw_openings = _optional(params, "openings", list, default=None)
+    if raw_openings is not None:
+        parsed_openings = _parse_openings(raw_openings, nominal)
+        openings_provided = True
+    elif is_rebuild:
+        parsed_openings = []  # placeholder; we'll read from wp below
+        openings_provided = False
+    else:
+        parsed_openings = []
+        openings_provided = True  # CREATE always writes (empty list)
 
-    # v0.5.1: clear any prior openings state (a previous frame_wall call
-    # in the same session would have left entries) and repopulate from
-    # the validated parsed list. Empty list when openings was omitted
-    # exits the v0.4.1 no-openings flow on the operator side.
-    sp.wall_openings.clear()
-    for parsed in parsed_openings:
-        item = sp.wall_openings.add()
-        item.opening_type = parsed["opening_type"]
-        item.x_offset_in = parsed["x_offset_in"]
-        item.ro_width_in = parsed["ro_width_in"]
-        item.ro_height_in = parsed["ro_height_in"]
-        item.sill_height_in = parsed["sill_height_in"]
-        item.header_nominal = parsed["header_nominal"]
-        item.jack_count = parsed["jack_count"]
+    # ------------------------------------------------------------------
+    # Phase 5 (REBUILD only): joint check for rotation
+    # ------------------------------------------------------------------
+    # Refuse rotation if joints reference this wall in its current
+    # parent Level. Done BEFORE write-through so a refusal leaves the
+    # wall untouched. Level change is a separate concern — joints in
+    # the OLD Level become orphaned references but that's a v0.6 data
+    # invariant the user manages, not something v0.6.1 prevents.
+    rotation_changed_in_rebuild = False
+    if is_rebuild and rotation_deg_z_param is not None:
+        new_rot_rad = math.radians(rotation_deg_z_param)
+        current_rot_rad = wall_target_obj.rotation_euler[2]
+        rotation_changed_in_rebuild = not math.isclose(
+            new_rot_rad, current_rot_rad,
+            rel_tol=1e-6, abs_tol=1e-9,
+        )
+        if rotation_changed_in_rebuild:
+            current_parent = wall_target_obj.parent
+            if (current_parent is not None
+                    and getattr(current_parent, 'praxova_level', None) is not None
+                    and current_parent.praxova_level.is_level):
+                for joint in current_parent.praxova_level.joints:
+                    if (joint.wall_a == wall_target_obj
+                            or joint.wall_b == wall_target_obj):
+                        raise bridge.RPCError(
+                            bridge.INVALID_PARAMS,
+                            f"Cannot rotate {wall_target_obj.name}: "
+                            "joint(s) reference this wall. Remove the "
+                            "joint via the Joints UIList in Blender "
+                            "before rotating, then re-add after "
+                            "re-framing.",
+                        )
 
-    # Cross-field opening validation — same source of truth the UI's
-    # live preview uses (templates.validate_openings already emits the
-    # 1-based "Opening N ..." prefix).
-    if parsed_openings:
+    # ------------------------------------------------------------------
+    # Phase 6: write-through to the chosen target's props
+    # ------------------------------------------------------------------
+    if is_rebuild:
+        wp.wall_length_in = length_in
+        wp.wall_height_in = height_in
+        wp.wall_nominal = nominal
+        wp.wall_spacing_oc_in = spacing_oc_in
+        wp.wall_top_plate_count = top_plate_count
+        wp.wall_bottom_plate_count = bottom_plate_count
+        if openings_provided:
+            wp.wall_openings.clear()
+            for parsed in parsed_openings:
+                item = wp.wall_openings.add()
+                item.opening_type = parsed["opening_type"]
+                item.x_offset_in = parsed["x_offset_in"]
+                item.ro_width_in = parsed["ro_width_in"]
+                item.ro_height_in = parsed["ro_height_in"]
+                item.sill_height_in = parsed["sill_height_in"]
+                item.header_nominal = parsed["header_nominal"]
+                item.jack_count = parsed["jack_count"]
+        target_openings = list(wp.wall_openings)
+    else:
+        sp.wall_length_in = length_in
+        sp.wall_height_in = height_in
+        sp.wall_nominal = nominal
+        sp.wall_spacing_oc_in = spacing_oc_in
+        sp.wall_top_plate_count = top_plate_count
+        sp.wall_bottom_plate_count = bottom_plate_count
+        sp.wall_openings.clear()
+        for parsed in parsed_openings:
+            item = sp.wall_openings.add()
+            item.opening_type = parsed["opening_type"]
+            item.x_offset_in = parsed["x_offset_in"]
+            item.ro_width_in = parsed["ro_width_in"]
+            item.ro_height_in = parsed["ro_height_in"]
+            item.sill_height_in = parsed["sill_height_in"]
+            item.header_nominal = parsed["header_nominal"]
+            item.jack_count = parsed["jack_count"]
+        target_openings = list(sp.wall_openings)
+
+    # Cross-field opening validation — same source of truth the UI
+    # uses. Runs against whatever's now on the target (post-writethrough
+    # for both modes), so REBUILD with omitted openings validates the
+    # preserved set against the (possibly new) scalars.
+    if target_openings:
         ok, msg = templates.validate_openings(
-            list(sp.wall_openings),
+            target_openings,
             length_in, height_in, nominal,
             top_plate_count, bottom_plate_count,
         )
         if not ok:
             raise bridge.RPCError(bridge.INVALID_PARAMS, msg)
 
+    # ------------------------------------------------------------------
+    # Phase 7 (REBUILD only): re-parent if level differs
+    # ------------------------------------------------------------------
+    if is_rebuild and level_obj is not None and wall_target_obj.parent is not level_obj:
+        wall_target_obj.parent = level_obj
+
+    # ------------------------------------------------------------------
+    # Phase 8: set active object for the op's mode detection
+    # ------------------------------------------------------------------
+    # The op picks its mode from context.view_layer.objects.active:
+    #   wall Empty (is_wall=True)  -> REBUILD in place
+    #   Level Empty (is_level=True) -> CREATE under the Level
+    #   anything else / None       -> CREATE at top level
+    # Be explicit to override whatever the user had selected before.
+    for o in bpy.context.selected_objects:
+        o.select_set(False)
+    if is_rebuild:
+        wall_target_obj.select_set(True)
+        bpy.context.view_layer.objects.active = wall_target_obj
+    elif level_obj is not None:
+        level_obj.select_set(True)
+        bpy.context.view_layer.objects.active = level_obj
+        sp.active_level = level_obj
+    else:
+        bpy.context.view_layer.objects.active = None
+
+    # ------------------------------------------------------------------
+    # Phase 9: run the op
+    # ------------------------------------------------------------------
     before = {o.name for o in scene.objects}
     result = bpy.ops.praxova.frame_wall('EXEC_DEFAULT')
     _check_op_result(result, "praxova.frame_wall")
     after = {o.name for o in scene.objects}
     new_names = sorted(after - before)
 
-    # The operator sets the new Empty as the active object. Reposition
-    # it if location_m was passed; children stay parented so they follow
-    # the Empty without needing per-child updates.
-    empty = bpy.context.view_layer.objects.active
-    if empty is None:
-        raise bridge.RPCError(
-            bridge.INTERNAL_ERROR,
-            "frame_wall finished but produced no active object",
-        )
+    # ------------------------------------------------------------------
+    # Phase 10: locate the wall Empty (preserved for REBUILD, just
+    # created for CREATE) and apply rotation / location overrides
+    # ------------------------------------------------------------------
+    if is_rebuild:
+        empty = wall_target_obj
+    else:
+        empty = bpy.context.view_layer.objects.active
+        if empty is None or getattr(empty, 'praxova_wall', None) is None:
+            raise bridge.RPCError(
+                bridge.INTERNAL_ERROR,
+                "frame_wall finished but produced no active wall Empty",
+            )
+
+    if rotation_deg_z_param is not None:
+        empty.rotation_euler[2] = math.radians(rotation_deg_z_param)
+    elif not is_rebuild:
+        # CREATE with no explicit rotation = 0 (matches the v0.5.1
+        # behavior — newly-created wall Empties are unrotated).
+        empty.rotation_euler[2] = 0.0
     if location is not None:
         empty.location = location
 
-    # Stud count is deterministic from inputs - compute via
-    # stud_positions rather than filtering child names by substring,
-    # which would be fragile if the naming convention changes.
-    # v0.5.1: with openings, n_studs is REGULAR studs only (after
-    # filtering around king brackets). Kings, jacks, and cripples are
-    # counted separately via openings_summary below.
+    # ------------------------------------------------------------------
+    # Phase 11: compute return values from the wall's final state
+    # ------------------------------------------------------------------
     raw_stud_xs = templates.stud_positions(
         length_in, spacing_oc_in, thickness_in,
     )
-    if parsed_openings:
+    if target_openings:
         opening_layouts = [
             templates.opening_framing_layout(
                 item, nominal, height_in,
                 top_plate_count, bottom_plate_count,
             )
-            for item in sp.wall_openings
+            for item in target_openings
         ]
         filtered_stud_xs = templates.filter_studs_around_openings(
-            raw_stud_xs, thickness_in, list(sp.wall_openings),
-            opening_layouts,
+            raw_stud_xs, thickness_in, target_openings, opening_layouts,
         )
         n_studs = len(filtered_stud_xs)
     else:
@@ -1057,11 +1227,8 @@ def frame_wall(params: dict) -> dict:
         n_studs = len(raw_stud_xs)
     n_plates = top_plate_count + bottom_plate_count
 
-    # v0.5.1: per-opening summary. Cripple counts mirror the operator's
-    # placement logic: OC stud positions whose full thickness fits inside
-    # the king-bracket inner range (between the two king inner edges).
     openings_summary: list[dict] = []
-    for parsed, layout in zip(parsed_openings, opening_layouts):
+    for item, layout in zip(target_openings, opening_layouts):
         k_left_in = layout["king_left_x"] + thickness_in
         k_right_in = layout["king_right_x"] - thickness_in
         cripples_at_oc = sum(
@@ -1070,20 +1237,32 @@ def frame_wall(params: dict) -> dict:
         )
         top_zone = layout["cripple_top_zone"]
         n_header_cripples = cripples_at_oc if top_zone[0] is not None else 0
-        if parsed["opening_type"] == "WINDOW":
+        if item.opening_type == "WINDOW":
             bot_zone = layout["cripple_bottom_zone"]
-            n_sill_cripples = cripples_at_oc if bot_zone[0] is not None else 0
+            n_sill_cripples = (
+                cripples_at_oc if bot_zone[0] is not None else 0
+            )
         else:
             n_sill_cripples = 0
         openings_summary.append({
-            "type": parsed["type_lower"],
-            "jack_count": parsed["jack_count"],
-            "header_nominal": parsed["header_nominal"],
+            "type": item.opening_type.lower(),
+            "jack_count": int(item.jack_count),
+            "header_nominal": item.header_nominal,
             "jack_length_in": layout["jack_length_in"],
             "header_length_in": layout["header_member_length_in"],
             "n_header_cripples": n_header_cripples,
             "n_sill_cripples": n_sill_cripples,
         })
+
+    # Level / rotation report fields — derived from the wall Empty's
+    # actual final state so REBUILD with preserve also reports correctly.
+    parent_now = empty.parent
+    level_name_out: str | None = None
+    if (parent_now is not None
+            and getattr(parent_now, 'praxova_level', None) is not None
+            and parent_now.praxova_level.is_level):
+        level_name_out = parent_now.name
+    rotation_deg_z_out = math.degrees(empty.rotation_euler[2])
 
     return {
         "wall_name": empty.name,
@@ -1098,9 +1277,13 @@ def frame_wall(params: dict) -> dict:
         "stud_length_in": stud_length_in,
         "stud_stock_in": stud_stock_in,
         "plate_stock_in": plate_stock_in,
-        "n_openings": len(parsed_openings),
+        "n_openings": len(target_openings),
         "openings_summary": openings_summary,
         "new_objects": new_names,
+        # v0.6.1 additions:
+        "wall_target_used": is_rebuild,
+        "level_name": level_name_out,
+        "rotation_deg_z": rotation_deg_z_out,
     }
 
 

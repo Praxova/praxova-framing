@@ -461,8 +461,8 @@ def add_level(
 
 @mcp.tool()
 def frame_wall(
-    length_in: float,
-    height_in: float,
+    length_in: float | None = None,
+    height_in: float | None = None,
     nominal: Literal[
         "1x2", "2x3", "2x4", "2x6", "2x8", "2x10", "2x12",
         "4x4", "4x6", "6x6",
@@ -472,8 +472,11 @@ def frame_wall(
     bottom_plate_count: int = 1,
     location_m: list[float] | None = None,
     openings: list[dict] | None = None,
+    level: str | None = None,
+    wall_target: str | None = None,
+    rotation_deg_z: float | None = None,
 ) -> dict:
-    """Frame a single wall - plates + studs + optional openings + Empty parent.
+    """Frame a wall — CREATE a new one or REBUILD an existing one in place.
 
     Builds top plates, bottom plates, and studs for a single isolated
     wall, parented to a new Empty for one-handle transform. Sheathing-
@@ -625,19 +628,76 @@ def frame_wall(
     nominal, per-opening dict shape errors (with 1-based index), or
     cross-field opening errors (overlap, off-wall, header too tall,
     sill in plate).
+
+    Building hierarchy and re-framing (v0.6.1):
+
+      level: Name of a Praxova Level Empty (created via add_level
+        and/or add_building). In CREATE mode the new wall is parented
+        under this Level so it can later be joined with sibling walls
+        in the same Level. In REBUILD mode, if `level` differs from
+        the wall's current parent the wall is re-parented; joints in
+        the OLD Level still reference the wall, so clean them up in
+        Blender before re-parenting if that matters.
+
+      wall_target: Name of a Praxova wall Empty (is_wall=True). When
+        set, switches the tool to REBUILD mode: the wall's children
+        are deleted and rebuilt, but the Empty itself (and its name,
+        joint references, transform unless overridden) is preserved.
+        Each scalar param you provide WRITES THROUGH to the wall's
+        stored props; each one you omit preserves the existing value.
+        length_in and height_in become OPTIONAL in this mode — omit
+        them to keep the wall's current dimensions, supply them to
+        change. Same for openings (omit = preserve, [] = clear,
+        provided list = replace).
+
+      rotation_deg_z: Z-axis rotation in degrees applied to the wall
+        Empty. CREATE: 0 if omitted. REBUILD: preserves the wall's
+        current rotation if omitted. **JOINTS LOCK ROTATION**: in
+        REBUILD mode, if rotation_deg_z differs from the wall's
+        current rotation AND the wall's parent Level has any joint
+        referencing this wall, the call is REFUSED with
+        INVALID_PARAMS. Remove the joint via the Joints UIList in
+        Blender first, rotate, then re-add the joint and run
+        frame_building (v0.6.2).
+
+    The return shape gains three v0.6.1 fields alongside the existing
+    ones: wall_target_used (bool — True if REBUILD), level_name (str
+    or None — the wall's parent Level name), and rotation_deg_z (the
+    wall Empty's final Z rotation in degrees).
+
+    Worked example — build a wall under a Level, then edit it in place:
+
+      add_building(name="HouseA")
+      # -> {"building_name": "HouseA", "level_name": "Level_01", ...}
+      frame_wall(level="Level_01", length_in=120, height_in=96,
+                 nominal="2x4")
+      # -> {"wall_name": "Wall_01", "level_name": "Level_01", ...,
+      #     "wall_target_used": false}
+      frame_wall(wall_target="Wall_01", length_in=144)
+      # -> rebuilds Wall_01 in place at 144" length; height/nominal/
+      #    openings preserved. {"wall_target_used": true,
+      #    "wall_name": "Wall_01", "length_in": 144.0, ...}
     """
     params: dict = {
-        "length_in": length_in,
-        "height_in": height_in,
         "nominal": nominal,
         "spacing_oc_in": spacing_oc_in,
         "top_plate_count": top_plate_count,
         "bottom_plate_count": bottom_plate_count,
     }
+    if length_in is not None:
+        params["length_in"] = length_in
+    if height_in is not None:
+        params["height_in"] = height_in
     if location_m is not None:
         params["location_m"] = location_m
     if openings is not None:
         params["openings"] = openings
+    if level is not None:
+        params["level"] = level
+    if wall_target is not None:
+        params["wall_target"] = wall_target
+    if rotation_deg_z is not None:
+        params["rotation_deg_z"] = rotation_deg_z
     return _call("frame_wall", params)
 
 
