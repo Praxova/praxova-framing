@@ -112,6 +112,105 @@ def _get_or_make_mesh(name: str, dims_inches: tuple[float, float, float]):
     return mesh
 
 
+# ---------------------------------------------------------------------------
+# v0.6 joint resolution
+# ---------------------------------------------------------------------------
+
+_EMPTY_END_MODS = {
+    'bottom_off': 0.0,
+    'lower_top_off': 0.0,
+    'cap_off': 0.0,
+    'end_stud_override': None,
+    'filler_x': None,
+    'joint_index': 0,
+}
+
+
+def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
+    """Read joints on the active wall's parent Level (if any) and turn
+    them into per-end modifications the operator can apply.
+
+    Only existing walls under a Level can have joints touching them.
+    New walls (top-level or just-parented to a Level by frame_wall)
+    aren't referenced by any Joint yet, so this returns empty context +
+    zero-offset mods for them — and the rest of execute() stays on the
+    v0.5 path.
+
+    Returns:
+        joint_context: dict per templates.compute_wall_joint_context
+        level_joints: list of joints from the parent Level (or empty)
+        mods: dict with 'START' and 'END' entries, each carrying
+            bottom_off / lower_top_off / cap_off / end_stud_override /
+            filler_x / joint_index for that end. joint_index is the
+            1-based index in the Level's joints collection (0 if no
+            joint touches that end).
+    """
+    empty_ctx = {'START': None, 'END': None}
+    mods = {
+        'START': dict(_EMPTY_END_MODS),
+        'END':   dict(_EMPTY_END_MODS),
+    }
+
+    if not is_existing_wall:
+        return empty_ctx, [], mods
+
+    parent = active.parent
+    if (parent is None
+            or getattr(parent, 'praxova_level', None) is None
+            or not parent.praxova_level.is_level):
+        return empty_ctx, [], mods
+
+    level = parent
+    level_joints = list(level.praxova_level.joints)
+
+    building_default = 'THREE_STUD'
+    grand = level.parent
+    if (grand is not None
+            and getattr(grand, 'praxova_building', None) is not None
+            and grand.praxova_building.is_building):
+        building_default = grand.praxova_building.default_corner_style
+
+    joint_context = templates.compute_wall_joint_context(
+        active, level_joints, building_default,
+    )
+
+    # Map joint -> 1-based index within the Level for naming filler studs
+    # per the design's CornerFiller_Joint<NN> convention.
+    joint_index_by_end = {'START': 0, 'END': 0}
+    for j_idx, j in enumerate(level_joints, start=1):
+        if j.wall_a is None or j.wall_b is None:
+            continue
+        if j.wall_a == active:
+            joint_index_by_end[j.wall_a_end] = j_idx
+        elif j.wall_b == active:
+            joint_index_by_end[j.wall_b_end] = j_idx
+
+    for end in ('START', 'END'):
+        ctx = joint_context[end]
+        if ctx is None:
+            continue
+        paired = ctx['paired_wall']
+        t_other = templates.LUMBER_TYPES[paired.praxova_wall.wall_nominal][0]
+        geom = templates.l_corner_geometry(
+            t_self=thickness_in,
+            t_other=t_other,
+            role=ctx['role'],
+            end=end,
+            is_extending=ctx['is_extending'],
+            wall_length_in=length_in,
+        )
+        mods[end] = {
+            'bottom_off': geom['bottom_plate_offset'],
+            'lower_top_off': geom['lower_top_plate_offset'],
+            'cap_off': geom['cap_plate_offset'],
+            'end_stud_override': geom['end_stud_x_override'],
+            'filler_x': geom['filler_stud_x'],
+            'joint_index': joint_index_by_end[end],
+        }
+
+    return joint_context, level_joints, mods
+
+
 class PRAXOVA_OT_frame_wall(bpy.types.Operator):
     """Frame a single wall - plates and studs parented to an Empty.
 
@@ -164,6 +263,16 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             active is not None
             and getattr(active, 'praxova_wall', None) is not None
             and active.praxova_wall.is_wall
+        )
+        # v0.6: a Level Empty as active means "create a new wall as a
+        # child of this Level". Walls created this way inherit the
+        # Level's transform and become eligible for joints with their
+        # siblings via the Level's joints collection.
+        is_level_active = (
+            not is_existing_wall
+            and active is not None
+            and getattr(active, 'praxova_level', None) is not None
+            and active.praxova_level.is_level
         )
         source = active.praxova_wall if is_existing_wall else sp
 
@@ -234,6 +343,18 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
                 return {'CANCELLED'}
 
         # ------------------------------------------------------------------
+        # v0.6: joint context + per-end wall modifications
+        # ------------------------------------------------------------------
+        # Only existing walls under a Level can have joints touching them
+        # (a brand-new wall, even one parented to the Level by frame_wall
+        # below, isn't referenced by any Joint yet). For everyone else
+        # the context is empty and mods carry all zeros — the rest of
+        # execute() behaves identically to v0.5.
+        joint_context, level_joints, mods = _resolve_joint_context(
+            active, is_existing_wall, length_in, thickness_in,
+        )
+
+        # ------------------------------------------------------------------
         # Derived values
         # ------------------------------------------------------------------
         # Raw OC layout, then v0.5 filtered layout after per-opening
@@ -243,6 +364,15 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         raw_stud_xs_in = templates.stud_positions(
             length_in, spacing_oc_in, thickness_in,
         )
+        # v0.6: apply ABUTTING-wall end-stud overrides before the opening
+        # filter. The override moves the end stud inboard by the paired
+        # wall's stud thickness so it lands flush with the shortened
+        # plates. MAIN walls don't override (their end stud is unchanged
+        # from v0.5).
+        if mods['START']['end_stud_override'] is not None:
+            raw_stud_xs_in[0] = mods['START']['end_stud_override']
+        if mods['END']['end_stud_override'] is not None:
+            raw_stud_xs_in[-1] = mods['END']['end_stud_override']
         opening_layouts = [
             templates.opening_framing_layout(
                 op, nominal, height_in, top_plate_count, bottom_plate_count,
@@ -280,18 +410,18 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         # 'praxova_mesh_<label>'). Two walls with identical dimensions
         # share meshes naturally; same goes for plates and studs across
         # walls of the same configuration.
-        plate_dims_in = (length_in, width_in, thickness_in)  # HORIZONTAL
+        #
+        # v0.6: plate mesh is no longer created up-front — plates at a
+        # joint end can be shorter than wall length, so meshes are
+        # looked-up-or-created per plate inside the placement loop below
+        # (each unique length gets its own mesh, all keyed by
+        # praxova_mesh_wall_plate_<nominal>_<length>). Studs are still
+        # uniform length within a wall, so the stud mesh stays shared;
+        # filler studs use the same mesh.
         stud_dims_in = (thickness_in, width_in, stud_length_in)  # VERTICAL
-        plate_mesh_name = (
-            f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(length_in)}"
-        )
         stud_mesh_name = (
             f"praxova_mesh_wall_stud_{nominal}_{_fmt_inches(stud_length_in)}"
         )
-
-        plate_mesh = bpy.data.meshes.get(plate_mesh_name)
-        if plate_mesh is None:
-            plate_mesh = templates.make_box_mesh(plate_mesh_name, plate_dims_in)
         stud_mesh = bpy.data.meshes.get(stud_mesh_name)
         if stud_mesh is None:
             stud_mesh = templates.make_box_mesh(stud_mesh_name, stud_dims_in)
@@ -318,6 +448,12 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             empty.empty_display_size = 0.5  # 0.5m - visible but not overwhelming
             empty.location = (0.0, 0.0, 0.0)
             context.collection.objects.link(empty)
+            # v0.6: if a Level was the active object, parent the new wall
+            # to it so joints in that Level can reference the wall via
+            # PointerProperty pickers in commit 6's UI. Otherwise the
+            # wall stays at top level (v0.5 single-wall workflow).
+            if is_level_active:
+                empty.parent = active
             wp = empty.praxova_wall
             wp.is_wall = True
             wp.wall_length_in = sp.wall_length_in
@@ -344,14 +480,24 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         INCH = templates.INCH
 
         # Bottom plates stacked from z=0 upward.
+        # v0.6: a joint at either end can shorten the bottom plate by
+        # the paired wall's stud thickness (ABUTTING walls only — MAIN
+        # walls keep bottom + lower top plates at full length).
+        bot_x_start_in = mods['START']['bottom_off']
+        bot_length_in = length_in - bot_x_start_in - mods['END']['bottom_off']
+        bot_plate_dims = (bot_length_in, width_in, thickness_in)
+        bot_plate_mesh_name = (
+            f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(bot_length_in)}"
+        )
+        bot_plate_mesh = _get_or_make_mesh(bot_plate_mesh_name, bot_plate_dims)
         for i in range(bottom_plate_count):
             z_m = i * thickness_in * INCH
             obj = _make_framing_object(
-                context, plate_mesh,
+                context, bot_plate_mesh,
                 f"{wall_name}_BottomPlate_{i + 1:02d}",
-                (0.0, 0.0, z_m),
+                (bot_x_start_in * INCH, 0.0, z_m),
                 nominal=nominal,
-                length_in=length_in,
+                length_in=bot_length_in,
                 stock_in=plate_stock_in,
                 orientation='HORIZONTAL',
                 label=plate_label,
@@ -638,16 +784,62 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             )
             children.append(obj)
 
-        # Top plates stacked from (height - top_count * thickness) up.
-        z_top_base_m = (height_in - top_plate_count * thickness_in) * INCH
-        for i in range(top_plate_count):
-            z_m = z_top_base_m + i * thickness_in * INCH
+        # v0.6: corner filler studs for MAIN-role joints. One per
+        # joint, parented under this (the main) wall's Empty. Same mesh
+        # as the regular studs (identical cross-section + length, just a
+        # different role at the corner). ABUTTING walls don't produce a
+        # filler — only MAIN does, per the design's THREE_STUD spec.
+        for end in ('START', 'END'):
+            filler_x_in = mods[end]['filler_x']
+            if filler_x_in is None:
+                continue
+            joint_idx = mods[end]['joint_index']
             obj = _make_framing_object(
-                context, plate_mesh,
-                f"{wall_name}_TopPlate_{i + 1:02d}",
-                (0.0, 0.0, z_m),
+                context, stud_mesh,
+                f"CornerFiller_Joint{joint_idx:02d}",
+                (filler_x_in * INCH, 0.0, z_stud_base_m),
                 nominal=nominal,
-                length_in=length_in,
+                length_in=stud_length_in,
+                stock_in=stud_stock_in,
+                orientation='VERTICAL',
+                label=stud_label,
+            )
+            children.append(obj)
+
+        # Top plates stacked from (height - top_count * thickness) up.
+        # v0.6: each top plate's effective length depends on whether it's
+        # the cap (topmost — uses cap_off offsets, which differ based on
+        # whether this wall extends across the corner) or a lower top
+        # plate (uses lower_top_off, identical to bottom_off in the L
+        # corner case). For top_plate_count == 1 the single plate IS the
+        # cap. For higher counts, all but the topmost are treated as
+        # "lower top plates."
+        z_top_base_m = (height_in - top_plate_count * thickness_in) * INCH
+        # Pre-compute per-plate (x_start, length) and cache the meshes.
+        lower_x_start = mods['START']['lower_top_off']
+        lower_length = length_in - lower_x_start - mods['END']['lower_top_off']
+        cap_x_start = mods['START']['cap_off']
+        cap_length = length_in - cap_x_start - mods['END']['cap_off']
+        lower_mesh = _get_or_make_mesh(
+            f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(lower_length)}",
+            (lower_length, width_in, thickness_in),
+        )
+        cap_mesh = _get_or_make_mesh(
+            f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(cap_length)}",
+            (cap_length, width_in, thickness_in),
+        )
+        for i in range(top_plate_count):
+            is_cap = (i == top_plate_count - 1)
+            z_m = z_top_base_m + i * thickness_in * INCH
+            mesh = cap_mesh if is_cap else lower_mesh
+            x_start_in = cap_x_start if is_cap else lower_x_start
+            plate_length_in = cap_length if is_cap else lower_length
+            obj = _make_framing_object(
+                context, mesh,
+                f"{wall_name}_TopPlate_{i + 1:02d}",
+                (x_start_in * INCH, 0.0, z_m),
+                nominal=nominal,
+                length_in=plate_length_in,
                 stock_in=plate_stock_in,
                 orientation='HORIZONTAL',
                 label=plate_label,
