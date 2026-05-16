@@ -339,6 +339,129 @@ class PraxovaWallProps(bpy.types.PropertyGroup):
 
 
 # ---------------------------------------------------------------------------
+# Joint + Level + Building (v0.6)
+# ---------------------------------------------------------------------------
+
+class PraxovaJoint(bpy.types.PropertyGroup):
+    """One joint between two walls within a Level.
+
+    v0.6 ships L corners only; T joints and in-line splice arrive in v0.7.
+    Wall A is the MAIN wall (its plates / corner-side studs are mostly
+    preserved); Wall B is the ABUTTING wall (its plates are shortened by
+    A's stud thickness at the joint end). Top plate continuity is
+    controlled by `extending_wall`: AUTO picks the shorter wall (tie to A)
+    per the convention that longer walls are harder to splice.
+    """
+
+    joint_type: EnumProperty(  # noqa: F821
+        name="Joint Type",
+        items=[
+            ('L_CORNER', "L Corner", "Two walls meet at 90 degrees"),
+            # v0.7: ('T_JOINT', ...), ('IN_LINE_SPLICE', ...)
+        ],
+        default='L_CORNER',
+    )
+    wall_a: bpy.props.PointerProperty(  # noqa: F821
+        name="Wall A (main)",
+        type=bpy.types.Object,
+        description="Main wall — keeps plate continuity at this end",
+    )
+    wall_b: bpy.props.PointerProperty(  # noqa: F821
+        name="Wall B (abutting)",
+        type=bpy.types.Object,
+        description="Abutting wall — plates shortened by A's stud thickness",
+    )
+    wall_a_end: EnumProperty(  # noqa: F821
+        name="Wall A end",
+        items=[
+            ('START', "Start", "End at local x=0"),
+            ('END',   "End",   "End at local x=wall_length_in"),
+        ],
+        default='END',
+    )
+    wall_b_end: EnumProperty(  # noqa: F821
+        name="Wall B end",
+        items=[
+            ('START', "Start", "End at local x=0"),
+            ('END',   "End",   "End at local x=wall_length_in"),
+        ],
+        default='START',
+    )
+    corner_style: EnumProperty(  # noqa: F821
+        name="Corner style",
+        items=[
+            ('AUTO',       "Auto (use Building default)", ""),
+            ('THREE_STUD', "Three-stud", "Three vertical studs forming a corner-post bundle"),
+            # v0.7: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
+        ],
+        default='AUTO',
+    )
+    extending_wall: EnumProperty(  # noqa: F821
+        name="Extending wall",
+        items=[
+            ('AUTO', "Auto (shorter wall)", "Shorter wall's cap plate extends across the corner"),
+            ('A',    "Wall A (main)",       "Wall A's cap plate extends"),
+            ('B',    "Wall B (abutting)",   "Wall B's cap plate extends"),
+        ],
+        default='AUTO',
+    )
+
+
+class PraxovaLevelProps(bpy.types.PropertyGroup):
+    """Per-Level container props attached to every Object.
+
+    A Level is a single story of a Building — walls in the same Level
+    share a top-plate elevation and may be joined. `joints` lives here
+    (rather than on individual walls) because joints relate two walls
+    and naturally belong to their containing structure.
+    """
+
+    is_level: BoolProperty(  # noqa: F821
+        name="Is Praxova Level",
+        default=False,
+    )
+    level_index: IntProperty(  # noqa: F821
+        name="Level Index",
+        description="0 = ground, 1 = second, etc. v0.6 only frames one Level at a time",
+        default=0,
+        min=0,
+    )
+    level_height_in: FloatProperty(  # noqa: F821
+        name="Level Height (in)",
+        description="Floor-to-floor reference dimension for this Level",
+        default=96.0,
+        min=12.0,
+        soft_max=240.0,
+        precision=2,
+    )
+    joints: CollectionProperty(  # noqa: F821
+        type=PraxovaJoint,
+        name="Joints",
+    )
+    joints_active: IntProperty(  # noqa: F821
+        name="Active Joint",
+        default=0,
+    )
+
+
+class PraxovaBuildingProps(bpy.types.PropertyGroup):
+    """Per-Building container props attached to every Object."""
+
+    is_building: BoolProperty(  # noqa: F821
+        name="Is Praxova Building",
+        default=False,
+    )
+    default_corner_style: EnumProperty(  # noqa: F821
+        name="Default corner style",
+        items=[
+            ('THREE_STUD', "Three-stud", "Three vertical studs forming a corner-post bundle"),
+            # v0.7: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
+        ],
+        default='THREE_STUD',
+    )
+
+
+# ---------------------------------------------------------------------------
 # Scene state
 # ---------------------------------------------------------------------------
 
@@ -485,6 +608,24 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
     wall_openings_active: IntProperty(  # noqa: F821
         name="Active Opening",
         default=0,
+    )
+
+    # --- v0.6: active Building / Level selection ---
+    # User's current selection in the Building tab. Set by add_building /
+    # add_level operators on creation, by UI dropdowns afterward, and by
+    # the Building tab's "select in viewport" affordances. frame_building
+    # reads active_level to know which Level's walls to orchestrate.
+    # PointerProperty(type=Object) is the cleanest fit — rename-safe via
+    # datablock pointers, survives object deletion as None.
+    active_building: bpy.props.PointerProperty(  # noqa: F821
+        name="Active Building",
+        type=bpy.types.Object,
+        description="The Building Empty currently selected for editing",
+    )
+    active_level: bpy.props.PointerProperty(  # noqa: F821
+        name="Active Level",
+        type=bpy.types.Object,
+        description="The Level Empty currently selected for framing",
     )
 
     # --- v0.3: MCP bridge ---

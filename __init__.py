@@ -41,12 +41,18 @@ def register():
         # Property groups MUST register before anything that references them.
         # PraxovaWallOpening must register before PraxovaWallProps (v0.6) and
         # PraxovaSceneProps (v0.5) because both reference it via CollectionProperty.
-        # PraxovaWallProps must register before PraxovaSceneProps so that the
-        # latter's existing wall_* fields and PraxovaWallProps' identical fields
-        # both end up consistent in the bpy type registry.
+        # PraxovaJoint registers before PraxovaLevelProps because Level holds
+        # a CollectionProperty(type=PraxovaJoint). Both Building and Level
+        # register before PraxovaSceneProps because the scene PointerProperty
+        # fields (active_building, active_level) reference Object — those
+        # accept any Object, but registering the concrete groups first keeps
+        # the type registry consistent.
         properties.PraxovaLumberProps,
         properties.PraxovaWallOpening,
         properties.PraxovaWallProps,
+        properties.PraxovaJoint,
+        properties.PraxovaLevelProps,
+        properties.PraxovaBuildingProps,
         properties.PraxovaSceneProps,
         # Operators.
         ops_add.PRAXOVA_OT_add_lumber,
@@ -59,6 +65,9 @@ def register():
         ops_fill.PRAXOVA_OT_duplicate_e2e,
         # v0.4: Composite framing operators.
         ops_frame.PRAXOVA_OT_frame_wall,
+        # v0.6: Building / Level container operators.
+        ops_frame.PRAXOVA_OT_add_building,
+        ops_frame.PRAXOVA_OT_add_level,
         ops_cutlist.PRAXOVA_OT_generate_cutlist,
         ops_units.PRAXOVA_OT_set_imperial_units,
         # v0.3: MCP bridge operators.
@@ -94,12 +103,20 @@ def register():
     bpy.types.Object.praxova_lumber = bpy.props.PointerProperty(
         type=properties.PraxovaLumberProps,
     )
-    # v0.6: every Object carries a praxova_wall pointer; is_wall=True marks
-    # the Empty as a Praxova-managed wall, and the other fields store that
-    # wall's own framing params (replacing the scene-level scratch as the
-    # source of truth for any wall that's been created).
+    # v0.6: every Object carries praxova_wall, praxova_level, and
+    # praxova_building pointers. The respective is_* discriminator on each
+    # group distinguishes Praxova-managed containers from arbitrary
+    # Objects (an Object with all three is_* flags False is just a normal
+    # scene Object that happens to carry the unused pointers, the
+    # standard Blender pattern for PointerProperty attached to ID types).
     bpy.types.Object.praxova_wall = bpy.props.PointerProperty(
         type=properties.PraxovaWallProps,
+    )
+    bpy.types.Object.praxova_level = bpy.props.PointerProperty(
+        type=properties.PraxovaLevelProps,
+    )
+    bpy.types.Object.praxova_building = bpy.props.PointerProperty(
+        type=properties.PraxovaBuildingProps,
     )
     bpy.types.Scene.praxova_framing = bpy.props.PointerProperty(
         type=properties.PraxovaSceneProps,
@@ -119,6 +136,8 @@ def unregister():
 
     del bpy.types.Object.praxova_lumber
     del bpy.types.Object.praxova_wall
+    del bpy.types.Object.praxova_level
+    del bpy.types.Object.praxova_building
     del bpy.types.Scene.praxova_framing
 
     for cls in reversed(_registered_classes):

@@ -1,18 +1,18 @@
-"""Operator: frame a single wall - plates + studs + openings (v0.4 / v0.5).
+"""Composite framing operators: frame_wall + v0.6 Building / Level containers.
 
-The first composite operator in the add-on. Reads parameters from the
-scene-level PropertyGroup (driven by both the N-panel UI and, in v0.4.1,
-the MCP bridge) and builds plates + studs at world origin, parented to
-a new Empty.
+PRAXOVA_OT_frame_wall (v0.4, extended v0.5 + v0.6) is the original
+composite operator — it places plates, OC studs, and v0.5 opening pieces
+(king studs, jacks, header build-up, rough sills, cripples) parented to
+a wall Empty. v0.6 made it context-sensitive: when the active object is
+a Praxova wall Empty, the operator re-frames it in place using the
+wall's own PraxovaWallProps; otherwise it creates a new wall from scene
+scratch.
 
-v0.5 extends the operator to honor a list of door and window openings
-on the wall (PraxovaSceneProps.wall_openings). When present, the
-operator validates them, computes per-opening framing geometry via
-templates.opening_framing_layout, places king studs, jack studs, a (2)
-2x + 1/2" plywood spacer header build-up, optional rough sill (windows),
-and optional cripples above the header / below the rough sill. Regular
-OC studs that would collide with any king bracket are filtered out via
-templates.filter_studs_around_openings.
+v0.6 adds two container-creation operators in this module:
+    PRAXOVA_OT_add_building — create a Building Empty plus a default Level
+    PRAXOVA_OT_add_level    — add another Level under the active Building
+Joint management (add_joint, remove_joint) and the frame_building
+orchestrator land in commit 5.
 
 Geometry conventions (single isolated wall, v0.4):
     +X: wall length
@@ -25,11 +25,12 @@ studs flush with the wall ends, intermediate studs at on-center spacing
 measured from x=0, the final bay tight when wall length isn't a multiple
 of on-center spacing. This preserves 4'/8' sheathing seam alignment.
 
-Not in v0.5 (deferred):
-    - Corner stud treatments (three-stud, California corner, etc.)
+Not in v0.6 (deferred):
+    - T joints, in-line splice (v0.7)
+    - California corner, ladder blocking corner styles (v0.7)
+    - Multi-Level framing in one pass (v0.8+)
     - Direction/rotation parameter (user transforms the Empty afterward)
     - Headers other than (2) 2x + 1/2" plywood spacer
-    - "Trimmer at door swing" or double-bottom-plate-at-door cut
 """
 
 import bpy
@@ -686,5 +687,182 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             f"({nominal} x {_fmt_inches(stud_length_in)}\") + "
             f"{n_plates} plates ({nominal} x {_fmt_inches(length_in)}\")"
             f"{opening_suffix}.",
+        )
+        return {'FINISHED'}
+
+
+# ===========================================================================
+# Building / Level container operators (v0.6)
+# ===========================================================================
+
+import re  # noqa: E402  (local to v0.6 helpers; module already imports bpy)
+
+
+_BUILDING_NAME_PATTERN = re.compile(r'^Building_(\d+)$')
+_LEVEL_NAME_PATTERN = re.compile(r'^Level_(\d+)$')
+
+
+def _next_indexed_name(existing_names, pattern: re.Pattern, prefix: str) -> str:
+    """Pick the lowest unused N for f"{prefix}_NN" given existing names.
+
+    Gap-filling: if Building_01 and Building_03 exist, returns
+    Building_02. Mirrors templates.next_wall_name's behavior so all
+    auto-numbered Praxova Empties share the same naming UX.
+    """
+    used: set[int] = set()
+    for name in existing_names:
+        m = pattern.match(name)
+        if m:
+            used.add(int(m.group(1)))
+    n = 1
+    while n in used:
+        n += 1
+    return f"{prefix}_{n:02d}"
+
+
+def _next_building_name(context) -> str:
+    return _next_indexed_name(
+        {o.name for o in context.scene.objects},
+        _BUILDING_NAME_PATTERN,
+        "Building",
+    )
+
+
+def _next_level_name(building) -> str:
+    """Next Level_NN within a Building's children only.
+
+    Levels are scoped to their Building so two Buildings can each have
+    their own Level_01, Level_02, ... rather than sharing a global pool.
+    """
+    return _next_indexed_name(
+        {child.name for child in building.children},
+        _LEVEL_NAME_PATTERN,
+        "Level",
+    )
+
+
+def _set_active_only(context, obj):
+    """Deselect everything, then select + activate `obj`. Mirrors the
+    selection pattern used at the end of frame_wall."""
+    for o in context.selected_objects:
+        o.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+
+
+class PRAXOVA_OT_add_building(bpy.types.Operator):
+    """Create a new Building Empty with a default Level under it.
+
+    The Building Empty hosts no geometry of its own — it's a grouping
+    container. Walls created via Frame Wall while a Level is active
+    are parented to that Level (so they inherit the Building's
+    transform), and joints between those walls live on the Level's
+    PraxovaLevelProps.joints CollectionProperty.
+
+    Visual distinction: Building uses CUBE display, Level uses
+    SINGLE_ARROW (up), wall Empties keep their v0.5 PLAIN_AXES — three
+    different glyphs in the viewport for the three roles in the
+    hierarchy.
+
+    After creation, the scene's active_building and active_level both
+    point at the new objects, and the Building Empty becomes the active
+    object. The next Frame Wall click (with the user having selected
+    the Level afterward) creates the first wall.
+    """
+
+    bl_idname = "praxova.add_building"
+    bl_label = "Add Building"
+    bl_description = (
+        "Create a new Building Empty with a default Level under it. "
+        "Sets the scene's active Building and active Level pointers."
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+
+        building_name = _next_building_name(context)
+        building = bpy.data.objects.new(building_name, None)
+        building.empty_display_type = 'CUBE'
+        building.empty_display_size = 1.0
+        building.location = (0.0, 0.0, 0.0)
+        context.collection.objects.link(building)
+        building.praxova_building.is_building = True
+        # default_corner_style stays at 'THREE_STUD' (only v0.6 option).
+
+        level_name = _next_level_name(building)
+        level = bpy.data.objects.new(level_name, None)
+        level.empty_display_type = 'SINGLE_ARROW'
+        level.empty_display_size = 0.75
+        level.location = (0.0, 0.0, 0.0)
+        context.collection.objects.link(level)
+        level.parent = building
+        level.praxova_level.is_level = True
+        level.praxova_level.level_index = 0
+        # level_height_in stays at 96.0 default.
+
+        sp.active_building = building
+        sp.active_level = level
+
+        _set_active_only(context, building)
+
+        self.report(
+            {'INFO'},
+            f"Created {building_name} + {level_name} (active)",
+        )
+        return {'FINISHED'}
+
+
+class PRAXOVA_OT_add_level(bpy.types.Operator):
+    """Add a new Level under the scene's active Building.
+
+    level_index is auto-assigned to one higher than the highest existing
+    level_index in this Building's children — so the new Level slots in
+    above the previous top. v0.6 only frames one Level at a time, but
+    the data structure supports multi-story for v0.8+.
+    """
+
+    bl_idname = "praxova.add_level"
+    bl_label = "Add Level"
+    bl_description = "Add a new Level under the active Building"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sp = context.scene.praxova_framing
+        return (
+            sp.active_building is not None
+            and getattr(sp.active_building, 'praxova_building', None) is not None
+            and sp.active_building.praxova_building.is_building
+        )
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        building = sp.active_building
+
+        existing_indices = [
+            child.praxova_level.level_index
+            for child in building.children
+            if (getattr(child, 'praxova_level', None) is not None
+                and child.praxova_level.is_level)
+        ]
+        next_index = (max(existing_indices) + 1) if existing_indices else 0
+
+        level_name = _next_level_name(building)
+        level = bpy.data.objects.new(level_name, None)
+        level.empty_display_type = 'SINGLE_ARROW'
+        level.empty_display_size = 0.75
+        level.location = (0.0, 0.0, float(next_index) * 0.1)
+        context.collection.objects.link(level)
+        level.parent = building
+        level.praxova_level.is_level = True
+        level.praxova_level.level_index = next_index
+
+        sp.active_level = level
+        _set_active_only(context, level)
+
+        self.report(
+            {'INFO'},
+            f"Created {level_name} (index {next_index}) under {building.name}",
         )
         return {'FINISHED'}
