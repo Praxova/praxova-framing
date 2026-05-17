@@ -406,15 +406,28 @@ class PraxovaJoint(bpy.types.PropertyGroup):
         ],
         default='L_CORNER',
     )
+    # v0.6.25: labels softened from "Wall A (main)" / "Wall B
+    # (abutting)" — the main/abutting role is no longer derived from
+    # wall_a/wall_b slot. It now follows resolve_extending_wall (see
+    # templates.py). The Building tab's joint detail panel shows the
+    # resolved MAIN as a live readout below the extending_wall
+    # dropdown so users see which wall is currently MAIN.
     wall_a: bpy.props.PointerProperty(  # noqa: F821
-        name="Wall A (main)",
+        name="Wall A",
         type=bpy.types.Object,
-        description="Main wall — keeps plate continuity at this end",
+        description=(
+            "First wall in the joint. Whether wall_a is MAIN at frame "
+            "time depends on extending_wall resolution (see Resolved "
+            "MAIN below the extending_wall dropdown)."
+        ),
     )
     wall_b: bpy.props.PointerProperty(  # noqa: F821
-        name="Wall B (abutting)",
+        name="Wall B",
         type=bpy.types.Object,
-        description="Abutting wall — plates shortened by A's stud thickness",
+        description=(
+            "Second wall in the joint. Whether wall_b is MAIN at "
+            "frame time depends on extending_wall resolution."
+        ),
     )
     wall_a_end: EnumProperty(  # noqa: F821
         name="Wall A end",

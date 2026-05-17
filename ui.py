@@ -914,6 +914,26 @@ class PRAXOVA_PT_building(bpy.types.Panel):
             detail.prop(j, "corner_style")
             detail.prop(j, "extending_wall")
 
+            # v0.6.25: live resolved-MAIN readout. Skip gracefully
+            # when wall_a / wall_b haven't been picked yet — a
+            # half-filled joint is fine in the UI, validate_joints
+            # surfaces it at frame time. resolve_extending_wall
+            # accepts Object refs and reads .praxova_wall.wall_length_in
+            # itself, so callers just need to pass the two walls.
+            if j.wall_a and j.wall_b:
+                resolved = templates.resolve_extending_wall(
+                    j, j.wall_a, j.wall_b,
+                )
+                resolved_name = (
+                    j.wall_a.name if resolved == 'A' else j.wall_b.name
+                )
+                sub = box.column(align=True)
+                sub.scale_y = 0.7
+                sub.label(
+                    text=f"  → Resolved MAIN: {resolved_name}",
+                    icon='INFO',
+                )
+
             # Live validation indicator — same validator the operator
             # uses, so the user sees the same first-failure message
             # they would get on clicking Frame Building.
