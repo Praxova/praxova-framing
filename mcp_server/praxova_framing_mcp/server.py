@@ -160,6 +160,55 @@ def get_scene_info() -> dict:
     return _call("get_scene_info")
 
 
+@mcp.tool()
+def list_joints_in_level(level_name: str) -> dict:
+    """Enumerate the joints in a Praxova Level with full per-joint detail.
+
+    Fills the gap v0.6.1's list_objects extension deliberately left —
+    the LEVEL category there reported only a joint count. Now that
+    v0.6.2 standardized the joint wire format (add_joint /
+    remove_joint), this method returns full per-joint detail in the
+    same shape, so a list -> mutate -> add_joint round-trip works
+    without translation.
+
+    Args:
+        level_name: Name of the Praxova Level Empty (created via
+            add_building or add_level). Same resolution rules as
+            add_joint / remove_joint / frame_building:
+            APP_OBJECT_NOT_FOUND (-32004) if missing,
+            INVALID_PARAMS (-32602) if the named object isn't a
+            Praxova Level.
+
+    Returns:
+        level_name: echo
+        n_joints: number of joints in the Level (matches the
+            joints_count field of list_objects' LEVEL entries).
+        joints: list of per-joint dicts, one per joint (sorted by
+            joint_index, which matches insertion order). Each entry
+            shares its shape with add_joint's returned `joint`:
+
+              {
+                "joint_index":     int,        # 0-based
+                "joint_type":      str,        # "L_CORNER" for v0.6
+                "wall_a_name":     str | None, # None when a UI-
+                                               #   added joint hasn't
+                                               #   had walls picked
+                                               #   yet
+                "wall_b_name":     str | None, # same
+                "wall_a_end":      "START" | "END",
+                "wall_b_end":      "START" | "END",
+                "corner_style":    "AUTO" | "THREE_STUD",
+                "extending_wall":  "AUTO" | "A" | "B",
+              }
+
+    Scope is per-Level — v0.6 joints live on the Level (they
+    coordinate two walls in the same Level). A multi-Level
+    aggregator (list_joints_in_building) would just be sugar over
+    N calls to this one and is deferred to v0.7+.
+    """
+    return _call("list_joints_in_level", {"level_name": level_name})
+
+
 # ===========================================================================
 # Material placement
 # ===========================================================================

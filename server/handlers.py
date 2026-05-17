@@ -679,6 +679,62 @@ def get_scene_info(params: dict) -> dict:
     }
 
 
+def list_joints_in_level(params: dict) -> dict:
+    """Enumerate the joints in a Praxova Level with full per-joint detail.
+
+    Fills the gap v0.6.1's list_objects extension deliberately left —
+    the LEVEL category there reported `joints_count` only because
+    full joint serialization needed the joint wire format that
+    v0.6.2's add_joint / remove_joint just standardized. Now that
+    the wire format is fixed, this method returns the same per-joint
+    dict shape add_joint produces, so a list -> mutate -> add_joint
+    round-trip works without translation.
+
+    Required:
+        level_name (str): name of the Praxova Level Empty.
+
+    Returns:
+        level_name: echo
+        n_joints: len(joints) — same as the joints_count field on
+            the LEVEL entry of list_objects.
+        joints: list of per-joint wire-format dicts (same shape as
+            add_joint's returned `joint` field and remove_joint's
+            `removed` field):
+
+              {
+                "joint_index":     int,        # 0-based
+                "joint_type":      str,
+                "wall_a_name":     str | None, # None when a UI-
+                                               #   added joint hasn't
+                                               #   picked walls yet
+                "wall_b_name":     str | None, # same
+                "wall_a_end":      "START" | "END",
+                "wall_b_end":      "START" | "END",
+                "corner_style":    str,
+                "extending_wall":  str,
+              }
+
+    Per-Level scope (not per-Building): v0.6.x joints live on the
+    Level, not the Building, since they coordinate two walls in the
+    same Level. A multi-Level discovery method (list_joints_in_
+    building) would just be sugar over N calls to this one and is
+    deferred to v0.7+ (along with list_buildings,
+    list_levels_in_building, list_walls_in_level — v0.6.1's
+    list_objects with category filtering already covers structural
+    discovery without those convenience surfaces).
+    """
+    level_name = _require(params, "level_name", str)
+    level = _resolve_level(level_name)
+    joints = level.praxova_level.joints
+    return {
+        "level_name": level.name,
+        "n_joints": len(joints),
+        "joints": [
+            _joint_to_wire(j, i) for i, j in enumerate(joints)
+        ],
+    }
+
+
 # ===========================================================================
 # Material placement
 # ===========================================================================
@@ -1976,6 +2032,9 @@ METHODS = {
     "list_materials": list_materials,
     "list_objects": list_objects,
     "get_scene_info": get_scene_info,
+    # v0.6.2: per-Level joint discovery — fills the joint detail gap
+    # v0.6.1's list_objects deliberately left.
+    "list_joints_in_level": list_joints_in_level,
     "add_lumber": add_lumber,
     "add_sheet": add_sheet,
     "add_panel": add_panel,
