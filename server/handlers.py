@@ -1748,6 +1748,164 @@ def frame_wall(params: dict) -> dict:
 
 
 # ===========================================================================
+# Multi-wall orchestration (v0.6.2 bridge parity for v0.6 frame_building)
+# ===========================================================================
+
+def frame_building(params: dict) -> dict:
+    """Re-frame every wall in a Level, applying joint context to each.
+
+    Bridge parity for v0.6's `praxova.frame_building` orchestrator.
+    Pre-flight runs the same templates.validate_joints check the
+    Building tab's live indicator runs — same single-source-of-truth
+    pattern as v0.5.1's validate_openings integration — so a bad
+    joint surfaces as one clean INVALID_PARAMS error before any wall
+    is touched, with the verbatim "Joint N: ..." message the UI
+    shows. Pre-flight order:
+
+      1. Resolve level via _resolve_level (APP_OBJECT_NOT_FOUND for
+         missing name, INVALID_PARAMS for not-a-Level).
+      2. Gather walls parented under the Level (the v0.6 _walls_in_
+         level convention). Empty list -> INVALID_PARAMS naming the
+         Level so the LLM can correct.
+      3. templates.validate_joints(joints, walls) — first failure
+         surfaces with its "Joint N: ..." message verbatim.
+
+    Then sets scene.praxova_framing.active_level so the UI op's
+    invariants hold, and invokes bpy.ops.praxova.frame_building.
+
+    Required:
+        level_name (str): name of the Praxova Level Empty.
+
+    Returns:
+        level_name: echo
+        n_walls_framed: number of walls iterated (same as
+            len(walls_framed))
+        n_joints_resolved: number of joints in the Level. Every joint
+            was resolved by the orchestrator (validate_joints passed
+            in pre-flight, so there are no orphaned references).
+        walls_framed: list of per-wall dicts, one per wall in the
+            Level after framing. Each entry:
+
+              wall_name: Object name (preserved across in-place re-
+                frame).
+              n_studs: regular OC studs after opening filtering
+                (kings, jacks, and cripples counted separately —
+                same semantics frame_wall's n_studs uses).
+              n_corner_fillers: interior corner-filler studs the
+                joint resolution placed under THIS wall (per v0.6's
+                CornerFiller_Joint<NN> object-name convention; only
+                MAIN walls of a THREE_STUD joint produce one).
+              joint_indices_touching: 0-based indices into the
+                Level's joints collection for every joint
+                referencing this wall (in either wall_a or wall_b
+                slot). Always non-empty for walls that got corner
+                fillers; can be empty for walls that have no joints
+                touching them at all.
+    """
+    level_name = _require(params, "level_name", str)
+    level = _resolve_level(level_name)
+
+    # Same _walls_in_level convention ui.py uses (children that are
+    # Praxova-managed wall Empties). Inlined rather than imported from
+    # ui.py to keep server/ free of UI-layer dependencies.
+    walls = [
+        c for c in level.children
+        if getattr(c, 'praxova_wall', None) is not None
+        and c.praxova_wall.is_wall
+    ]
+    if not walls:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"Level {level_name!r} has no walls to frame",
+        )
+
+    # Same validator the Building tab's live indicator uses. Surfaces
+    # "Joint N: ..." verbatim so an LLM and a human in Blender see
+    # identical failure modes for the same input.
+    ok, msg = templates.validate_joints(
+        list(level.praxova_level.joints), walls,
+    )
+    if not ok:
+        raise bridge.RPCError(bridge.INVALID_PARAMS, msg)
+
+    scene = bpy.context.scene
+    sp = scene.praxova_framing
+    sp.active_level = level
+
+    result = bpy.ops.praxova.frame_building('EXEC_DEFAULT')
+    _check_op_result(result, "praxova.frame_building")
+
+    # Re-fetch walls post-op. v0.6 in-place re-frame preserves the
+    # wall Empties themselves (children deleted + rebuilt), so this
+    # list should match the pre-op walls — but re-fetching keeps the
+    # summary honest if something changes the topology in the future.
+    walls = [
+        c for c in level.children
+        if getattr(c, 'praxova_wall', None) is not None
+        and c.praxova_wall.is_wall
+    ]
+
+    joints_list = list(level.praxova_level.joints)
+    walls_framed: list[dict] = []
+    for wall in walls:
+        wp = wall.praxova_wall
+        thickness_in = templates.LUMBER_TYPES[wp.wall_nominal][0]
+        raw_stud_xs = templates.stud_positions(
+            float(wp.wall_length_in),
+            float(wp.wall_spacing_oc_in),
+            thickness_in,
+        )
+        openings = list(wp.wall_openings)
+        if openings:
+            opening_layouts = [
+                templates.opening_framing_layout(
+                    item, wp.wall_nominal,
+                    float(wp.wall_height_in),
+                    int(wp.wall_top_plate_count),
+                    int(wp.wall_bottom_plate_count),
+                )
+                for item in openings
+            ]
+            filtered = templates.filter_studs_around_openings(
+                raw_stud_xs, thickness_in, openings, opening_layouts,
+            )
+            n_studs = len(filtered)
+        else:
+            n_studs = len(raw_stud_xs)
+
+        # Object-name-based count per v0.6.0's "Three-stud corner
+        # naming and ownership" architecture note. Blender may suffix
+        # .001 on collision but the prefix stays — startswith handles
+        # both clean and suffixed names.
+        n_corner_fillers = sum(
+            1 for child in wall.children
+            if child.name.startswith("CornerFiller_Joint")
+        )
+
+        # PointerProperty identity comparison, not name comparison —
+        # survives a wall rename that happened between joint creation
+        # and frame_building.
+        joint_indices_touching = [
+            i for i, j in enumerate(joints_list)
+            if j.wall_a == wall or j.wall_b == wall
+        ]
+
+        walls_framed.append({
+            "wall_name": wall.name,
+            "n_studs": n_studs,
+            "n_corner_fillers": n_corner_fillers,
+            "joint_indices_touching": joint_indices_touching,
+        })
+
+    return {
+        "level_name": level.name,
+        "n_walls_framed": len(walls),
+        "n_joints_resolved": len(joints_list),
+        "walls_framed": walls_framed,
+    }
+
+
+# ===========================================================================
 # Cut list
 # ===========================================================================
 
@@ -1826,11 +1984,12 @@ METHODS = {
     # v0.6.1: containers for the multi-wall hierarchy.
     "add_building": add_building,
     "add_level": add_level,
-    # v0.6.2: joint lifecycle. frame_building + list_joints_in_level
-    # land in the same cycle alongside these two.
+    # v0.6.2: joint lifecycle + multi-wall orchestrator.
+    # list_joints_in_level lands in this same cycle.
     "add_joint": add_joint,
     "remove_joint": remove_joint,
     "frame_wall": frame_wall,
+    "frame_building": frame_building,
     "generate_cutlist": generate_cutlist,
     "set_imperial_units": set_imperial_units,
 }

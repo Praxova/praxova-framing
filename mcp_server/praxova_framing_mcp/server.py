@@ -840,6 +840,84 @@ def frame_wall(
 
 
 # ===========================================================================
+# Multi-wall orchestration (v0.6.2)
+# ===========================================================================
+
+@mcp.tool()
+def frame_building(level_name: str) -> dict:
+    """Re-frame every wall in a Praxova Level, applying joint context.
+
+    The orchestrator wraps N individual frame_wall calls — one per
+    wall under the Level — with the v0.6 joint geometry resolved in
+    one pass. Cap-plate laps land correctly across corners, abutting-
+    wall plates shorten by the main wall's wall thickness, and three-
+    stud corners get their interior filler stud automatically.
+
+    Pre-flight runs the same joint validator the Building tab's live
+    indicator runs — same single source of truth — so a bad joint
+    surfaces as one clean INVALID_PARAMS error with the verbatim
+    "Joint N: ..." message before any wall is touched. Pre-flight
+    order: resolve `level_name`, gather walls under the Level (empty
+    list -> INVALID_PARAMS naming the Level), validate the joints
+    list (first failure surfaces verbatim). Then the underlying
+    praxova.frame_building op runs and walls get re-framed in place.
+
+    Args:
+        level_name: Name of the Praxova Level Empty (created via
+            add_building or add_level). Same resolution rules as
+            add_joint / remove_joint: APP_OBJECT_NOT_FOUND (-32004)
+            if missing, INVALID_PARAMS (-32602) if the named object
+            isn't a Praxova Level.
+
+    Returns:
+        level_name: echo
+        n_walls_framed: number of walls iterated (same as
+            len(walls_framed))
+        n_joints_resolved: number of joints in the Level. Every joint
+            was successfully resolved by the orchestrator
+            (validate_joints passed in pre-flight — no orphan refs).
+        walls_framed: list of per-wall dicts, one per wall in the
+            Level after framing. Each entry:
+
+              {
+                "wall_name":               str,        # preserved across
+                                                       #   in-place re-frame
+                "n_studs":                 int,        # regular OC studs
+                                                       #   after opening
+                                                       #   filtering (same
+                                                       #   semantics as
+                                                       #   frame_wall's
+                                                       #   n_studs)
+                "n_corner_fillers":        int,        # interior corner
+                                                       #   fillers placed
+                                                       #   under this wall
+                                                       #   (MAIN walls of
+                                                       #   THREE_STUD joints
+                                                       #   only)
+                "joint_indices_touching":  [int, ...]  # 0-based indices
+                                                       #   into the Level's
+                                                       #   joints collection
+                                                       #   that reference
+                                                       #   this wall (in
+                                                       #   either wall_a or
+                                                       #   wall_b slot)
+              }
+
+    For per-wall opening detail (jack lengths, header lengths, cripple
+    counts), call frame_wall(wall_target=<wall_name>) afterward — the
+    per-wall summary here keeps the frame_building response focused on
+    joint coordination, which is the actual point of orchestration
+    over N separate frame_wall calls.
+
+    Raises INVALID_PARAMS (-32602) for: missing/non-Level `level_name`,
+    Level with no walls, or any joint validation failure (orphaned
+    wall_a/wall_b, walls outside the Level, self-joint, or duplicate
+    (wall, end) pair).
+    """
+    return _call("frame_building", {"level_name": level_name})
+
+
+# ===========================================================================
 # Cut list
 # ===========================================================================
 
