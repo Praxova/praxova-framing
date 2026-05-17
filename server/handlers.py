@@ -1221,10 +1221,18 @@ def add_joint(params: dict) -> dict:
                 inherits the Building's default_corner_style at
                 frame_building time; "THREE_STUD" pins this joint.
                 v0.7 adds CALIFORNIA and LADDER_BLOCKING.
-              extending_wall (str, OPTIONAL, default "AUTO"): which
-                wall's cap plate runs full length across the corner.
-                "AUTO" picks the shorter wall (ties to A);
-                "A" / "B" override.
+              extending_wall (str, OPTIONAL, default "AUTO"):
+                determines which wall is MAIN at the corner — the
+                wall whose lower plates run full length, gets the
+                interior corner-filler stud, and keeps its end stud
+                flush with the wall end. The other wall is ABUTTING
+                (lower plates shortened by MAIN's wall thickness,
+                end stud moved inboard).
+                "AUTO" picks the LONGER wall as MAIN — matches the
+                residential convention that longer walls form the
+                outside and shorter walls butt in. Equal-length
+                walls tie-break to wall_a.
+                "A" / "B" explicit override.
 
     Returns:
         level_name (echo)

@@ -676,34 +676,57 @@ def redistribute_openings_evenly(openings, wall_length_in: float) -> None:
 # same "pure" sense as the v0.5 opening helpers). reframe_wall_in_place
 # lives in ops_frame.py since it does scene mutation.
 #
-# Terminology (per design doc):
-#   MAIN wall (wall_a)     keeps plate continuity at the joint end
-#   ABUTTING wall (wall_b) has its plates shortened by MAIN's stud
-#                          thickness at the joint end
-#   "extending wall"       the one whose cap plate runs full length and
-#                          overlaps the other's lower top plate at the
-#                          corner (IRC R602.3.2 calls for lapping)
+# Terminology (v0.6.25 onward):
+#   MAIN wall      the one whose lower plates run full length through
+#                  the corner, gets the interior corner filler stud,
+#                  and keeps its end stud flush with the wall end.
+#                  Determined by resolve_extending_wall — NOT by
+#                  wall_a/wall_b assignment in the joint.
+#   ABUTTING wall  the other wall in the joint. Its lower plates are
+#                  shortened by MAIN's wall thickness at the joint end
+#                  and its end stud is moved inboard so it lands flush
+#                  with the shortened plates.
+#   "extending"    synonym for MAIN under the v0.6.25 semantics. The
+#                  is_extending flag on context entries is True iff
+#                  role == 'MAIN'.
 
 
-def resolve_extending_wall(joint, wall_a_length: float, wall_b_length: float) -> str:
-    """Pick which wall's cap plate extends across the corner.
+def resolve_extending_wall(joint, wall_a, wall_b) -> str:
+    """Pick which wall is the MAIN wall for this joint.
 
-    Returns 'A' or 'B'. For AUTO, the shorter wall extends — longer walls
-    are harder to splice so we protect their continuity. Ties go to A
-    (the main wall) on the principle that the user has already declared
-    which is which.
+    Returns 'A' (wall_a is MAIN) or 'B' (wall_b is MAIN). This is the
+    single source of truth — both compute_wall_joint_context (during
+    framing) and the Building tab's live resolved-MAIN readout call
+    in here and branch on the result.
+
+    Semantics:
+      'A' or 'B' (explicit): honored verbatim. v0.6.0 stored these
+        but ignored them at frame time — fixed here in v0.6.25.
+      'AUTO': picks the LONGER wall. Matches the residential
+        convention that longer walls form the outside and shorter
+        walls butt in. Equal-length walls tie-break to wall_a (the
+        user has already declared which is wall_a).
+
+    Args:
+        joint: the PraxovaJoint PropertyGroup item.
+        wall_a, wall_b: Object refs to the two walls in the joint
+            (joint.wall_a, joint.wall_b — passed in explicitly so the
+            caller can reuse the lookups for other purposes without
+            this function re-reading the PointerProperty).
     """
     explicit = joint.extending_wall
     if explicit == 'A':
         return 'A'
     if explicit == 'B':
         return 'B'
-    # AUTO: shorter wall extends.
-    if wall_a_length < wall_b_length:
-        return 'A'
+    # AUTO: LONGER wall is MAIN (residential convention).
+    wall_a_length = wall_a.praxova_wall.wall_length_in
+    wall_b_length = wall_b.praxova_wall.wall_length_in
     if wall_a_length > wall_b_length:
+        return 'A'
+    if wall_b_length > wall_a_length:
         return 'B'
-    return 'A'  # tie-break to main
+    return 'A'  # tie-break to wall_a
 
 
 def resolve_corner_style(joint, building_default: str) -> str:
@@ -746,28 +769,38 @@ def compute_wall_joint_context(
     for joint in joints:
         if joint.wall_a is None or joint.wall_b is None:
             continue
+
+        # Identify wall_obj's slot in the joint (a or b) and its
+        # paired wall — independent of role, which is determined
+        # below by extending_wall resolution.
         if wall_obj == joint.wall_a:
-            role = 'MAIN'
+            this_slot = 'A'
             this_end = joint.wall_a_end
             paired_wall = joint.wall_b
             paired_wall_end = joint.wall_b_end
         elif wall_obj == joint.wall_b:
-            role = 'ABUTTING'
+            this_slot = 'B'
             this_end = joint.wall_b_end
             paired_wall = joint.wall_a
             paired_wall_end = joint.wall_a_end
         else:
             continue
 
-        wall_a_length = joint.wall_a.praxova_wall.wall_length_in
-        wall_b_length = joint.wall_b.praxova_wall.wall_length_in
+        # v0.6.25: role follows resolve_extending_wall, not slot.
+        # The MAIN wall is the one whose plates run continuous through
+        # the corner (gets the filler stud); the ABUTTING wall has
+        # its plates shortened. v0.6.0 hardcoded MAIN to wall_a; that
+        # caused explicit extending_wall='A'/'B' to be ignored and
+        # AUTO never to pick by length.
         extending = resolve_extending_wall(
-            joint, wall_a_length, wall_b_length,
+            joint, joint.wall_a, joint.wall_b,
         )
-        is_extending = (
-            (role == 'MAIN' and extending == 'A')
-            or (role == 'ABUTTING' and extending == 'B')
-        )
+        role = 'MAIN' if extending == this_slot else 'ABUTTING'
+        # is_extending is redundant under v0.6.25's "MAIN == extending"
+        # model but kept for l_corner_geometry's existing
+        # cap_plate_offset branch (cap full-length on MAIN, shortened
+        # on ABUTTING).
+        is_extending = (role == 'MAIN')
 
         context[this_end] = {
             'joint_type': joint.joint_type,

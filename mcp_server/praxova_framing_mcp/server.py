@@ -563,8 +563,10 @@ def add_joint(level_name: str, joint: dict) -> dict:
               "extending_wall":  "AUTO" | "A" | "B",  # OPTIONAL,
                                                       #   default
                                                       #   "AUTO"
-                                                      #   (shorter
-                                                      #   wall extends;
+                                                      #   (LONGER wall
+                                                      #   is MAIN per
+                                                      #   residential
+                                                      #   convention;
                                                       #   ties to A)
             }
 
