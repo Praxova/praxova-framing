@@ -825,16 +825,22 @@ def run(host: str, port: int) -> int:
             f"n_corner_fillers={wall_a_entry['n_corner_fillers']}."
         )
 
-        print("\n[28] list_objects → verify cap-plate lap geometry (v0.6.30)")
-        # v0.6.30 cap-plate lap fix: cap is the INVERSE of the lower
-        # top plate at each joint end. With step [26]'s joint
-        # (extending_wall='B' → wall_b is MAIN, wall_a is ABUTTING)
-        # and 2x4 walls (paired_t = 3.5"):
+        print("\n[28] list_objects → verify cap-plate lap geometry (v0.6.31)")
+        # v0.6.30 / v0.6.31 cap-plate lap geometry: cap and lower top
+        # are mirror images across the MAIN/ABUTTING axis. Neither
+        # plate extends past the wall's nominal footprint — the lap
+        # happens INSIDE the corner cell at y in [0, paired_t] of
+        # the abutting wall's own footprint (which is exactly where
+        # the main wall's lower top plate sits in world space). With
+        # step [26]'s joint (extending_wall='B' -> wall_b MAIN,
+        # wall_a ABUTTING) and 2x4 walls (paired_t = 3.5"):
         #
         #   wall_a (ABUTTING at END, FREE at START):
         #     lower top: 92.5" (= 96 - 3.5, shortened at END), x_start=0
-        #     cap:       99.5" (= 96 + 3.5, extends past END to lap
-        #                onto wall_b's lower top), x_start=0
+        #     cap:       96.0" (full length; ABUTTING reaches wall
+        #                edge — the lap happens inside this wall's
+        #                own [0, paired_t] strip at the END corner
+        #                cell), x_start=0
         #
         #   wall_b (MAIN at START, FREE at END):
         #     lower top: 96"   (full, MAIN keeps continuity)
@@ -842,11 +848,12 @@ def run(host: str, port: int) -> int:
         #                to leave room for wall_a's cap to lap onto
         #                wall_b's lower top), x_start=3.5" (0.0889 m)
         #
-        # Before v0.6.30 the cap was identical to the lower top — both
-        # 92.5" with x_start=0 on each end. wall_a's cap at 99.5"
-        # (extending past the wall edge) is the regression sentinel:
-        # if v0.6.0's butt-joint cap geometry comes back, wall_a's
-        # cap drops to 92.5" and this step fails loudly.
+        # v0.6.30 had wall_a's cap at 99.5" (extending past the wall
+        # edge by 3.5") — geometrically wrong. v0.6.31 corrects to
+        # 96.0" at the wall edge. Two regression sentinels: 99.5
+        # indicates v0.6.30 over-extension regression; 92.5 (matching
+        # the lower top length) indicates v0.6.0's butt-joint
+        # geometry is back.
         r = cli.call("list_objects")
         by_name = {o["name"]: o for o in r["objects"]}
 
@@ -874,12 +881,12 @@ def run(host: str, port: int) -> int:
             f"wall_a lower top plate x_start should be 0.0, got "
             f"{wall_a_lower['location_m'][0]}"
         )
-        assert abs(wall_a_cap["length_in"] - 99.5) < 1e-3, (
-            f"v0.6.30 lap fix sentinel: wall_a cap should extend past "
-            f"its wall edge by 3.5\" at the ABUTTING end (= 96 + 3.5 "
-            f"= 99.5\"). Got {wall_a_cap['length_in']}. If this is "
-            f"92.5\" the lap isn't happening — v0.6.0 butt-joint "
-            f"geometry is back."
+        assert abs(wall_a_cap["length_in"] - 96.0) < 1e-3, (
+            f"v0.6.31 lap geometry: wall_a cap reaches the wall edge "
+            f"at the ABUTTING end (no extension past). Expected 96.0\" "
+            f"(full wall length), got {wall_a_cap['length_in']}. "
+            f"Sentinels: 99.5\" -> v0.6.30 over-extension regression; "
+            f"92.5\" -> v0.6.0 butt-joint geometry is back."
         )
         assert abs(wall_a_cap["location_m"][0] - 0.0) < 1e-3, (
             f"wall_a cap x_start should be 0.0 (FREE start), got "
@@ -906,10 +913,11 @@ def run(host: str, port: int) -> int:
             f"inboard (0.0889 m) at the MAIN end, got "
             f"{wall_b_cap['location_m'][0]}"
         )
-        print("  -> cap lap geometry verified: wall_a cap extends "
-              "3.5\" past its END to lap onto wall_b's lower top "
-              "plate; wall_b cap pulled 3.5\" inboard at its START "
-              "to make room for wall_a's cap")
+        print("  -> cap lap geometry verified: wall_a cap reaches its "
+              "ABUTTING wall edge (96\", no extension past — v0.6.31 "
+              "correction); wall_b cap pulled 3.5\" inboard at its "
+              "MAIN start to make room for wall_a's cap to lap into "
+              "the corner cell at y in [0, 3.5\"]")
 
         print("\n[29] error path: unknown lumber")
         try:
