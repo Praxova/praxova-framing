@@ -8,18 +8,20 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.1 RPC surface end-to-end (14 methods): ping (with
+Covers the full v0.6.2 RPC surface end-to-end (18 methods): ping (with
 addon_version and method_count assertions), scene info, material
 catalog, lumber / sheet / panel placement, on-center duplication,
 edge-to-edge fill, wall framing with optional door/window openings
 (v0.5.1 — bridge parity for the v0.5 UI), Building + Level container
 creation and wall framing under a Level with in-place re-framing
-(v0.6.1 — partial bridge parity for v0.6, completing the containers +
-frame_wall extension; joints + frame_building + list_* methods land
-in v0.6.2), cut-list generation (verifying three sections and the
-'cut to N"' annotations for frame_wall regular studs and the v0.5
-opening pieces — jacks, header members, and cripples), and three
-error paths including the LUMBER refusal for duplicate_e2e.
+(v0.6.1 — partial bridge parity for v0.6, containers + frame_wall
+extension + list_objects extension), the joint lifecycle + frame_
+building orchestrator + list_joints_in_level query (v0.6.2 —
+completes v0.6 bridge parity), cut-list generation (verifying three
+sections and the 'cut to N"' annotations for frame_wall regular
+studs and the v0.5 opening pieces — jacks, header members, and
+cripples), and three error paths including the LUMBER refusal for
+duplicate_e2e plus the v0.6.2 rotation+joints refusal.
 """
 
 from __future__ import annotations
@@ -84,15 +86,16 @@ def run(host: str, port: int) -> int:
         # addon_version 0.5.1 -> 0.6.0 for multi-wall coordination;
         # UI-only cycle so method_count stays 12. v0.6.1: method_count
         # 12 -> 14 for add_building + add_level handlers (the
-        # container half of v0.6's bridge parity — joints + the
-        # frame_building orchestrator + list_* methods land in v0.6.2,
-        # which will push method_count further); addon_version
-        # 0.6.0 -> 0.6.1.
-        assert r["addon_version"] == "0.6.1", (
-            f"expected addon_version 0.6.1, got {r['addon_version']!r}"
+        # container half of v0.6's bridge parity); addon_version
+        # 0.6.0 -> 0.6.1. v0.6.2: method_count 14 -> 18 for
+        # add_joint + remove_joint + frame_building +
+        # list_joints_in_level (the joint half — completes v0.6
+        # bridge parity); addon_version 0.6.1 -> 0.6.2.
+        assert r["addon_version"] == "0.6.2", (
+            f"expected addon_version 0.6.2, got {r['addon_version']!r}"
         )
-        assert r["method_count"] == 14, (
-            f"expected 14 methods, got {r['method_count']}"
+        assert r["method_count"] == 18, (
+            f"expected 18 methods, got {r['method_count']}"
         )
 
         print("\n[2] get_scene_info")
@@ -497,13 +500,262 @@ def run(host: str, port: int) -> int:
             f"expected 4 panels in cut list, got line: {panel_line!r}"
         )
 
-        print("\n[17] error path: unknown lumber")
+        print("\n[17] add_building (auto-named) for v0.6.2 joint flow")
+        # v0.6.2: standalone Building + Level for the joint + frame_
+        # building sequence. The v0.6.1 TestBuilding stays untouched
+        # so its walls don't interfere; this one gets a fresh Level
+        # for the two-wall L corner test.
+        r = cli.call("add_building", {})
+        print(f"  -> {r}")
+        v6_building_name = r["building_name"]
+        v6_level_name = r["level_name"]
+        assert isinstance(v6_building_name, str) and v6_building_name, (
+            f"expected non-empty building_name, got {v6_building_name!r}"
+        )
+        assert isinstance(v6_level_name, str) and v6_level_name, (
+            f"expected non-empty level_name, got {v6_level_name!r}"
+        )
+        assert r["level_index"] == 0, (
+            f"default Level should have level_index=0, got {r['level_index']}"
+        )
+
+        print(f"\n[18] frame_wall level={v6_level_name} (wall_a at origin)")
+        # 96" 2x4 wall at default 16 OC:
+        # stud_positions(96, 16, 1.5) = [0.0, 15.25, 31.25, 47.25,
+        # 63.25, 79.25, 94.5] = 7 studs. Plus 1 bottom + 2 top
+        # plates = 3 plates.
+        r = cli.call("frame_wall", {
+            "level": v6_level_name,
+            "length_in": 96.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+        })
+        print(f"  -> wall_name={r['wall_name']}, n_studs={r['n_studs']}, "
+              f"n_plates={r['n_plates']}")
+        wall_a_name = r["wall_name"]
+        assert r["n_studs"] == 7, (
+            f"96\" wall at 16 OC should produce 7 studs, got {r['n_studs']}"
+        )
+        assert r["n_plates"] == 3, (
+            f"2 top + 1 bottom = 3 plates, got {r['n_plates']}"
+        )
+        assert r["level_name"] == v6_level_name, (
+            f"wall should be under {v6_level_name!r}, "
+            f"got level_name={r['level_name']!r}"
+        )
+
+        print(f"\n[19] frame_wall level={v6_level_name} rotated 90 deg "
+              "at +96 in along X (wall_b)")
+        # 2.4384 m = 96 inches exactly (96 * 0.0254). Place wall_b's
+        # START at wall_a's END, then rotate wall_b 90 deg so it
+        # juts in +Y from there — the canonical L corner.
+        # rotation_deg_z echo uses the same 1e-3 tolerance the v0.6.1
+        # smoke test established for float32 round-trip (radians ->
+        # store -> degrees yields ~2.5e-6 error).
+        r = cli.call("frame_wall", {
+            "level": v6_level_name,
+            "length_in": 96.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+            "rotation_deg_z": 90.0,
+            "location_m": [2.4384, 0.0, 0.0],
+        })
+        print(f"  -> wall_name={r['wall_name']}, "
+              f"rotation_deg_z={r['rotation_deg_z']}")
+        wall_b_name = r["wall_name"]
+        assert wall_b_name != wall_a_name, (
+            f"second wall should have a distinct name; "
+            f"got wall_a={wall_a_name!r}, wall_b={wall_b_name!r}"
+        )
+        assert abs(r["rotation_deg_z"] - 90.0) < 1e-3, (
+            f"rotation_deg_z should be ~90.0 (1e-3 epsilon for float32 "
+            f"round-trip), got {r['rotation_deg_z']}"
+        )
+        assert r["level_name"] == v6_level_name, (
+            f"wall should be under {v6_level_name!r}, "
+            f"got level_name={r['level_name']!r}"
+        )
+
+        print(f"\n[20] add_joint {wall_a_name}.END -> {wall_b_name}.START "
+              "(default joint_type / corner_style / extending_wall)")
+        # All optional fields left as defaults — exercises the
+        # default-fill code path in _parse_joint. The corner_style
+        # AUTO + extending_wall AUTO resolution happens at
+        # frame_building time, not add_joint time, so the response
+        # echoes them literally as "AUTO".
+        r = cli.call("add_joint", {
+            "level_name": v6_level_name,
+            "joint": {
+                "wall_a_name": wall_a_name,
+                "wall_b_name": wall_b_name,
+                "wall_a_end": "END",
+                "wall_b_end": "START",
+            },
+        })
+        print(f"  -> {r}")
+        assert r["joint_index"] == 0, (
+            f"first joint should have joint_index=0, "
+            f"got {r['joint_index']}"
+        )
+        joint = r["joint"]
+        assert joint["joint_type"] == "L_CORNER", (
+            f"default joint_type should be 'L_CORNER', "
+            f"got {joint['joint_type']!r}"
+        )
+        assert joint["corner_style"] == "AUTO", (
+            f"default corner_style should be 'AUTO', "
+            f"got {joint['corner_style']!r}"
+        )
+        assert joint["extending_wall"] == "AUTO", (
+            f"default extending_wall should be 'AUTO', "
+            f"got {joint['extending_wall']!r}"
+        )
+
+        print(f"\n[21] frame_building level_name={v6_level_name}")
+        # Re-frames both walls in the Level with joint context.
+        # Expected per-wall summary: both walls touch joint 0
+        # (joint_indices_touching=[0]); exactly ONE wall has
+        # n_corner_fillers=1 (the MAIN wall — wall_a here, since it
+        # was passed as wall_a_name in [20] and MAIN/ABUTTING is set
+        # by that assignment, not by extending_wall resolution).
+        # The other has n_corner_fillers=0. Don't pin WHICH entry is
+        # which — level.children iteration order isn't guaranteed.
+        r = cli.call("frame_building", {"level_name": v6_level_name})
+        print(f"  -> n_walls_framed={r['n_walls_framed']}, "
+              f"n_joints_resolved={r['n_joints_resolved']}")
+        assert r["n_walls_framed"] == 2, (
+            f"expected n_walls_framed=2, got {r['n_walls_framed']}"
+        )
+        assert r["n_joints_resolved"] == 1, (
+            f"expected n_joints_resolved=1, got {r['n_joints_resolved']}"
+        )
+        assert len(r["walls_framed"]) == 2, (
+            f"expected 2 walls_framed entries, "
+            f"got {len(r['walls_framed'])}"
+        )
+        for entry in r["walls_framed"]:
+            assert entry["joint_indices_touching"] == [0], (
+                f"wall {entry['wall_name']!r} should touch joint 0, "
+                f"got joint_indices_touching={entry['joint_indices_touching']}"
+            )
+        filler_counts = sorted(
+            e["n_corner_fillers"] for e in r["walls_framed"]
+        )
+        assert filler_counts == [0, 1], (
+            f"expected exactly one wall with n_corner_fillers=1 and one "
+            f"with 0 (sorted [0, 1]), got {filler_counts}"
+        )
+
+        print(f"\n[22] list_joints_in_level level_name={v6_level_name}")
+        # Full joint detail — fills the gap v0.6.1's list_objects
+        # LEVEL category left (joints_count only).
+        r = cli.call("list_joints_in_level",
+                     {"level_name": v6_level_name})
+        print(f"  -> n_joints={r['n_joints']}, "
+              f"joints[0]={r['joints'][0]}")
+        assert r["n_joints"] == 1, (
+            f"expected n_joints=1, got {r['n_joints']}"
+        )
+        j0 = r["joints"][0]
+        assert j0["joint_type"] == "L_CORNER", (
+            f"joints[0].joint_type should be 'L_CORNER', "
+            f"got {j0['joint_type']!r}"
+        )
+        assert j0["wall_a_name"] == wall_a_name, (
+            f"joints[0].wall_a_name should echo {wall_a_name!r}, "
+            f"got {j0['wall_a_name']!r}"
+        )
+        assert j0["wall_b_name"] == wall_b_name, (
+            f"joints[0].wall_b_name should echo {wall_b_name!r}, "
+            f"got {j0['wall_b_name']!r}"
+        )
+        assert j0["wall_a_end"] == "END", (
+            f"joints[0].wall_a_end should be 'END', "
+            f"got {j0['wall_a_end']!r}"
+        )
+        assert j0["wall_b_end"] == "START", (
+            f"joints[0].wall_b_end should be 'START', "
+            f"got {j0['wall_b_end']!r}"
+        )
+
+        print(f"\n[23] frame_wall wall_target={wall_a_name} "
+              "rotation_deg_z=180 (should refuse — joint touches wall_a)")
+        # Exercises the v0.6.1-specced rotation+joints refusal that
+        # couldn't be tested until v0.6.2 add_joint shipped. The
+        # error message includes the substring "joint" (lowercase)
+        # per the handler's INVALID_PARAMS message.
+        try:
+            cli.call("frame_wall", {
+                "wall_target": wall_a_name,
+                "rotation_deg_z": 180.0,
+            })
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert "-32602" in err_text or "INVALID_PARAMS" in err_text, (
+                f"expected INVALID_PARAMS code, got: {err_text!r}"
+            )
+            assert "joint" in err_text.lower(), (
+                f"expected error to mention 'joint', got: {err_text!r}"
+            )
+        else:
+            raise AssertionError(
+                "frame_wall(wall_target=..., rotation_deg_z=180) on a "
+                "wall touched by a joint should have raised INVALID_PARAMS"
+            )
+
+        print(f"\n[24] remove_joint level_name={v6_level_name} joint_index=0")
+        # The "undo handle" pattern — remove_joint returns the full
+        # joint spec, which add_joint could consume verbatim to put
+        # the joint back. Verify the echo carries every wire field.
+        r = cli.call("remove_joint", {
+            "level_name": v6_level_name,
+            "joint_index": 0,
+        })
+        print(f"  -> {r}")
+        assert r["joint_index"] == 0, (
+            f"expected joint_index=0 echo, got {r['joint_index']}"
+        )
+        removed = r["removed"]
+        assert removed["joint_type"] == "L_CORNER", (
+            f"removed.joint_type should be 'L_CORNER', "
+            f"got {removed['joint_type']!r}"
+        )
+        assert removed["wall_a_name"] == wall_a_name, (
+            f"removed.wall_a_name should echo {wall_a_name!r}, "
+            f"got {removed['wall_a_name']!r}"
+        )
+        assert removed["wall_b_name"] == wall_b_name, (
+            f"removed.wall_b_name should echo {wall_b_name!r}, "
+            f"got {removed['wall_b_name']!r}"
+        )
+
+        print(f"\n[25] frame_wall wall_target={wall_a_name} "
+              "rotation_deg_z=180 (joint gone, should succeed)")
+        # Now that joint 0 is removed, the v0.6.1 rotation+joints
+        # refusal no longer fires. wall_a should rotate to 180 deg.
+        r = cli.call("frame_wall", {
+            "wall_target": wall_a_name,
+            "rotation_deg_z": 180.0,
+        })
+        print(f"  -> wall_target_used={r['wall_target_used']}, "
+              f"rotation_deg_z={r['rotation_deg_z']}")
+        assert r["wall_target_used"] is True, (
+            f"wall_target= should switch to REBUILD mode, "
+            f"got wall_target_used={r['wall_target_used']}"
+        )
+        assert abs(r["rotation_deg_z"] - 180.0) < 1e-3, (
+            f"rotation_deg_z should be ~180.0 (1e-3 epsilon for float32 "
+            f"round-trip), got {r['rotation_deg_z']}"
+        )
+
+        print("\n[26] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[18] error path: duplicate_e2e on lumber (should refuse)")
+        print("\n[27] error path: duplicate_e2e on lumber (should refuse)")
         # The LUMBER refusal is enforced in the bridge handler so the
         # error carries a clean INVALID_PARAMS code instead of the
         # operator's APP_OPERATOR_FAILED.
@@ -522,7 +774,7 @@ def run(host: str, port: int) -> int:
                 f"expected error to mention lumber, got: {err_text!r}"
             )
 
-        print("\n[19] error path: bad method")
+        print("\n[28] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:
