@@ -487,6 +487,15 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
         # v0.6.25: feet display via the derived fill_span_ft proxy.
         # Inch storage stays canonical for downstream consumers.
         box.prop(scn, "fill_span_ft")
+        # Live carpenter-format readout — recomputes every redraw so
+        # nudging the slider updates the feet+inches display in real
+        # time. scale_y < 1 keeps the readout visually subordinate to
+        # the editable field above.
+        feet_whole = int(scn.fill_span_ft)
+        inches_frac = (scn.fill_span_ft - feet_whole) * 12.0
+        sub = box.column(align=True)
+        sub.scale_y = 0.7
+        sub.label(text=f"= {feet_whole}' {inches_frac:.1f}\"", icon='INFO')
         box.prop(scn, "fill_count")
 
         row = box.row(align=True)
@@ -530,6 +539,13 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
         # (works for both scratch and per-wall source). Inch storage
         # stays canonical for ops_frame and the bridge handlers.
         box.prop(source, "wall_length_ft")
+        # Live carpenter-format readout. Same pattern as the Fill
+        # Edge-to-Edge section above.
+        feet_whole = int(source.wall_length_ft)
+        inches_frac = (source.wall_length_ft - feet_whole) * 12.0
+        sub = box.column(align=True)
+        sub.scale_y = 0.7
+        sub.label(text=f"= {feet_whole}' {inches_frac:.1f}\"", icon='INFO')
         box.prop(source, "wall_height_in")
         box.prop(source, "wall_nominal")
         box.prop(source, "wall_spacing_oc_in")
