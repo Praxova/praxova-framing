@@ -740,6 +740,70 @@ def resolve_corner_style(joint, building_default: str) -> str:
     return joint.corner_style
 
 
+# ---------------------------------------------------------------------------
+# Per-end plate offsets (v0.6.30 cap-plate lap fix)
+# ---------------------------------------------------------------------------
+#
+# Two helpers, one for the lower plate stack (bottom + lower top) and
+# one for the cap plate, with DELIBERATELY INVERSE sign conventions:
+#
+#   lower_plate_end_offset  positive = inboard (move start outward,
+#                                      move end inward — the lower
+#                                      plate gives way to the paired
+#                                      wall at this corner)
+#   cap_plate_end_offset    positive = outboard (extend past the wall
+#                                      edge — the cap LAPS into the
+#                                      paired wall's corner cell)
+#                                      negative = inboard (cap is
+#                                      shortened from the wall edge,
+#                                      yielding space for the paired
+#                                      wall's cap to lap in)
+#
+# The inversion is the whole point: at an ABUTTING end, lower plates
+# go in by paired_t while the cap goes OUT by paired_t — that's the
+# physical lap. At a MAIN end the cap is shortened in by paired_t to
+# leave space for the abutting wall's cap to land on top.
+#
+# `role` values: 'MAIN', 'ABUTTING', 'FREE'. FREE means "no joint at
+# this end" — both offsets are 0 (plate reaches the wall edge,
+# matching v0.5 behavior for joint-less walls).
+
+
+def lower_plate_end_offset(role: str, paired_t: float) -> float:
+    """Inboard offset (positive into the wall) for bottom + lower top
+    plates at one end of a wall.
+
+    Returns paired_t when role == 'ABUTTING' (the abutting wall's
+    plates get out of the way of the main wall's corner cell), else
+    0 (MAIN and FREE both reach the wall edge unchanged).
+    """
+    return paired_t if role == 'ABUTTING' else 0.0
+
+
+def cap_plate_end_offset(role: str, paired_t: float) -> float:
+    """Signed offset for the cap plate end. Sign convention is INVERSE
+    of lower_plate_end_offset — see module-level comment above for why.
+
+    Positive  = outboard (cap extends past the wall edge by this much)
+    Negative  = inboard  (cap is shortened from the wall edge by this much)
+    Zero      = no offset (cap reaches the wall edge)
+
+    Mapping by role:
+        MAIN      -> -paired_t  (cap pulled inboard to make room for
+                                  the abutting wall's lapped cap)
+        ABUTTING  -> +paired_t  (cap extends out past the wall edge,
+                                  geometrically landing on top of the
+                                  MAIN wall's lower top plate at the
+                                  corner cell — the lap)
+        FREE      ->  0         (no joint, no lap)
+    """
+    if role == 'MAIN':
+        return -paired_t
+    if role == 'ABUTTING':
+        return +paired_t
+    return 0.0
+
+
 def compute_wall_joint_context(
     wall_obj,
     joints,
