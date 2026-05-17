@@ -194,7 +194,7 @@ def add_to_add_menu(self, context):
 # Wall framing source resolution (v0.6)
 # ===========================================================================
 
-def _get_wall_source(context):
+def _get_wall_source(context, active=None):
     """Return the PropertyGroup the Wall Framing tab should edit right now.
 
     v0.6 introduced per-wall PraxovaWallProps storage. When the active
@@ -204,10 +204,18 @@ def _get_wall_source(context):
     the scene-level scratch on PraxovaSceneProps, and the next Frame
     Wall creates a new wall Empty from those values.
 
-    Both PropertyGroups carry the same wall_*  and wall_openings field
+    Both PropertyGroups carry the same wall_* and wall_openings field
     shape, so callers can read uniformly off the returned `source`.
+
+    Callers that need to gate UI on whether an active wall was resolved
+    should pass `active` explicitly (the same value they'll use for the
+    UI gate), to avoid a race where context.active_object returns
+    different values across two reads within one draw call — observed
+    in v0.6.0 when deleting the active object triggers a redraw whose
+    two reads straddle Blender's context update.
     """
-    active = context.active_object
+    if active is None:
+        active = context.active_object
     if (active is not None
             and getattr(active, 'praxova_wall', None) is not None
             and active.praxova_wall.is_wall):
@@ -396,6 +404,16 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         scn = context.scene.praxova_framing
+        # v0.6.2 NoneType fix: cache context.active_object ONCE for the
+        # duration of this draw and thread the same value through every
+        # consumer below (Fill section's source check, Wall Framing's
+        # source resolver + "Editing wall:" gate, Active Material
+        # readout). Avoids a race where two reads within the same draw
+        # call straddled Blender's mid-draw context update — deleting
+        # the active object while this panel was visible crashed at
+        # active_obj.name when the resolver saw the wall Empty but the
+        # second read returned None.
+        active_obj = context.active_object
 
         # --- Scene units check ---
         units = context.scene.unit_settings
@@ -439,16 +457,15 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
         # exact width that the spacing will use. When nothing compatible is
         # active, a hint replaces it (the operator will still error out on
         # click; this hint just front-loads the obvious case).
-        active = context.active_object
         fillable = (
-            active is not None
-            and active.praxova_lumber.is_lumber
-            and active.praxova_lumber.category in {'SHEET', 'PANEL'}
+            active_obj is not None
+            and active_obj.praxova_lumber.is_lumber
+            and active_obj.praxova_lumber.category in {'SHEET', 'PANEL'}
         )
         if fillable:
-            width_in = templates.fill_axis_width_in(active)
+            width_in = templates.fill_axis_width_in(active_obj)
             box.label(
-                text=f"Source: {active.praxova_lumber.cutlist_label}  ({width_in:g}\" wide)",
+                text=f"Source: {active_obj.praxova_lumber.cutlist_label}  ({width_in:g}\" wide)",
                 icon='OBJECT_DATA',
             )
         else:
@@ -490,8 +507,11 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
         box = layout.box()
         box.label(text="Wall Framing", icon='MOD_BUILD')
 
-        source = _get_wall_source(context)
-        active_obj = context.active_object
+        # Pass the cached active_obj into _get_wall_source so the
+        # resolver and the gate below share one consistent read of
+        # context.active_object — see the v0.6.2 NoneType fix comment
+        # at the top of draw().
+        source = _get_wall_source(context, active=active_obj)
         is_active_wall = source is not scn
         if is_active_wall:
             box.label(
@@ -648,11 +668,13 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
         # v0.6 — it's a global add-on capability, not Wall Framing-specific.
 
         # --- Active object info ---
-        obj = context.active_object
-        if obj is not None and obj.praxova_lumber.is_lumber:
+        # Re-use the cached active_obj from the top of draw() rather
+        # than re-reading context.active_object — same race-avoidance
+        # rationale as the Wall Framing source resolver above.
+        if active_obj is not None and active_obj.praxova_lumber.is_lumber:
             box = layout.box()
             box.label(text="Active Material", icon='INFO')
-            tag = obj.praxova_lumber
+            tag = active_obj.praxova_lumber
             col = box.column(align=True)
 
             if tag.category == 'LUMBER':
