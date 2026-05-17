@@ -8,20 +8,24 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.2 RPC surface end-to-end (18 methods): ping (with
-addon_version and method_count assertions), scene info, material
-catalog, lumber / sheet / panel placement, on-center duplication,
-edge-to-edge fill, wall framing with optional door/window openings
-(v0.5.1 — bridge parity for the v0.5 UI), Building + Level container
-creation and wall framing under a Level with in-place re-framing
-(v0.6.1 — partial bridge parity for v0.6, containers + frame_wall
-extension + list_objects extension), the joint lifecycle + frame_
-building orchestrator + list_joints_in_level query (v0.6.2 —
-completes v0.6 bridge parity), cut-list generation (verifying three
-sections and the 'cut to N"' annotations for frame_wall regular
-studs and the v0.5 opening pieces — jacks, header members, and
-cripples), and three error paths including the LUMBER refusal for
-duplicate_e2e plus the v0.6.2 rotation+joints refusal.
+Covers the full v0.6.25 RPC surface end-to-end (18 methods — unchanged
+from v0.6.2; v0.6.25 was a bug-fix + cosmetic cycle, no bridge schema
+changes): ping (with addon_version and method_count assertions), scene
+info, material catalog, lumber / sheet / panel placement, on-center
+duplication, edge-to-edge fill, wall framing with optional door/window
+openings (v0.5.1 — bridge parity for the v0.5 UI), Building + Level
+container creation and wall framing under a Level with in-place
+re-framing (v0.6.1 — containers + frame_wall extension + list_objects
+extension), the joint lifecycle + frame_building orchestrator +
+list_joints_in_level query (v0.6.2 — completes v0.6 bridge parity), a
+v0.6.25 regression-coverage step that adds a joint with explicit
+extending_wall="B" and asserts the corner filler lands on wall_b (the
+v0.6.0 bug fixed in v0.6.25 had this ignored — filler always on
+wall_a), cut-list generation (verifying three sections and the
+'cut to N"' annotations for frame_wall regular studs and the v0.5
+opening pieces — jacks, header members, and cripples), and three
+error paths including the LUMBER refusal for duplicate_e2e plus the
+v0.6.2 rotation+joints refusal.
 """
 
 from __future__ import annotations
@@ -90,9 +94,13 @@ def run(host: str, port: int) -> int:
         # 0.6.0 -> 0.6.1. v0.6.2: method_count 14 -> 18 for
         # add_joint + remove_joint + frame_building +
         # list_joints_in_level (the joint half — completes v0.6
-        # bridge parity); addon_version 0.6.1 -> 0.6.2.
-        assert r["addon_version"] == "0.6.2", (
-            f"expected addon_version 0.6.2, got {r['addon_version']!r}"
+        # bridge parity); addon_version 0.6.1 -> 0.6.2. v0.6.25:
+        # bug fix + cosmetic cycle (extending_wall finally honored;
+        # ft display + carpenter readout; custom imperial icon);
+        # method_count stays 18 (no bridge schema changes);
+        # addon_version 0.6.2 -> 0.6.25.
+        assert r["addon_version"] == "0.6.25", (
+            f"expected addon_version 0.6.25, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"
@@ -749,13 +757,77 @@ def run(host: str, port: int) -> int:
             f"round-trip), got {r['rotation_deg_z']}"
         )
 
-        print("\n[26] error path: unknown lumber")
+        print("\n[26] add_joint with explicit extending_wall='B' "
+              "(v0.6.25 fix regression coverage)")
+        # v0.6.25 Item 1 fix coverage: explicit extending_wall='B'
+        # should make wall_b MAIN, so the corner filler stud lands
+        # under wall_b. v0.6.0/0.6.2 had this ignored — filler
+        # always on wall_a regardless of extending_wall — because
+        # compute_wall_joint_context hardcoded role='MAIN' for
+        # the wall_a slot. The fix wires resolve_extending_wall
+        # into role assignment; this step exercises the new path
+        # end-to-end via the bridge.
+        r = cli.call("add_joint", {
+            "level_name": v6_level_name,
+            "joint": {
+                "wall_a_name": wall_a_name,
+                "wall_b_name": wall_b_name,
+                "wall_a_end": "END",
+                "wall_b_end": "START",
+                "extending_wall": "B",
+            },
+        })
+        print(f"  -> {r}")
+        assert r["joint_index"] == 0, (
+            f"first joint after removal should be index 0, got {r['joint_index']}"
+        )
+        assert r["joint"]["extending_wall"] == "B", (
+            f"explicit extending_wall='B' should echo back as 'B', "
+            f"got {r['joint']['extending_wall']!r}"
+        )
+
+        print("\n[27] frame_building → corner filler lands on wall_b "
+              "(not wall_a)")
+        r = cli.call("frame_building", {"level_name": v6_level_name})
+        print(f"  -> walls_framed={r['walls_framed']}")
+        assert r["n_walls_framed"] == 2, (
+            f"expected n_walls_framed=2, got {r['n_walls_framed']}"
+        )
+        wall_a_entry = next(
+            (e for e in r["walls_framed"] if e["wall_name"] == wall_a_name),
+            None,
+        )
+        wall_b_entry = next(
+            (e for e in r["walls_framed"] if e["wall_name"] == wall_b_name),
+            None,
+        )
+        assert wall_a_entry is not None and wall_b_entry is not None, (
+            f"expected both wall_a={wall_a_name!r} and wall_b="
+            f"{wall_b_name!r} in walls_framed, got "
+            f"{[e['wall_name'] for e in r['walls_framed']]}"
+        )
+        # The v0.6.25 fix assertion: explicit extending_wall='B' makes
+        # wall_b MAIN, so filler under wall_b not wall_a.
+        assert wall_b_entry["n_corner_fillers"] == 1, (
+            f"v0.6.25 fix coverage: explicit extending_wall='B' "
+            f"should put the corner filler on wall_b "
+            f"({wall_b_name!r}). Got "
+            f"n_corner_fillers={wall_b_entry['n_corner_fillers']} "
+            "instead — v0.6.0 bug is back."
+        )
+        assert wall_a_entry["n_corner_fillers"] == 0, (
+            f"wall_a ({wall_a_name!r}) should be ABUTTING (no filler) "
+            f"when extending_wall='B'. Got "
+            f"n_corner_fillers={wall_a_entry['n_corner_fillers']}."
+        )
+
+        print("\n[28] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[27] error path: duplicate_e2e on lumber (should refuse)")
+        print("\n[29] error path: duplicate_e2e on lumber (should refuse)")
         # The LUMBER refusal is enforced in the bridge handler so the
         # error carries a clean INVALID_PARAMS code instead of the
         # operator's APP_OPERATOR_FAILED.
@@ -774,7 +846,7 @@ def run(host: str, port: int) -> int:
                 f"expected error to mention lumber, got: {err_text!r}"
             )
 
-        print("\n[28] error path: bad method")
+        print("\n[30] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:

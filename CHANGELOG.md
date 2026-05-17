@@ -2,6 +2,29 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.6.25] — 2026-05-17
+
+### Fixed
+- **`extending_wall` now actually overrides at frame time.** Explicit `"A"` / `"B"` on a `PraxovaJoint` were stored but ignored by the framing operator — the interior corner-filler stud always landed on `wall_a` regardless of the field's value. Cause: `compute_wall_joint_context` hardcoded `role='MAIN'` for the `wall_a` slot and `role='ABUTTING'` for `wall_b`, bypassing `resolve_extending_wall`'s result entirely. Fix: `resolve_extending_wall` is now the single source of truth for role assignment. The wall whose slot matches the resolved extending letter becomes MAIN (gets full lower plates + corner filler + end stud at the corner); the other becomes ABUTTING (lower plates shortened by MAIN's wall thickness, end stud moved inboard).
+- **`AUTO` `extending_wall` semantics**: `AUTO` now picks the **longer** wall as MAIN — matches the residential convention that longer walls form the outside and shorter walls butt in. Equal-length walls tie-break to `wall_a`. Previously the v0.6.0 docstring described "AUTO picks the shorter wall" but the implementation did neither — it always picked `wall_a` because of the role-hardcoding bug above. v0.6.25 makes both the docs and the implementation match the new semantics. `resolve_extending_wall` signature changed from `(joint, wall_a_length, wall_b_length)` to `(joint, wall_a, wall_b)` — takes Object refs and reads lengths itself, matching how `compute_wall_joint_context` and the new UI live-MAIN readout in the Building tab both want to call it.
+
+### Added
+- **Wall Length and Fill Length fields display in decimal feet.** New `wall_length_ft` (on both `PraxovaSceneProps` and `PraxovaWallProps`) and `fill_span_ft` (on `PraxovaSceneProps`) FloatProperty fields, backed by getter/setter pairs that proxy through the existing `_in` storage. The N-panel Wall Framing and Fill Edge-to-Edge sections bind these `_ft` fields instead of `_in`; the operators and bridge handlers keep reading inches directly. Existing `.blend` files need no migration — inch storage is preserved verbatim.
+- **Live carpenter-format readout below each `_ft` field.** Small `= 12' 4.0"` label recomputes on every redraw so the carpenter sees exactly what their decimal-feet value translates to in feet-and-inches. `scale_y=0.7 + icon='INFO'` makes the readout visually subordinate to the editable field above. Display only this cycle — typing feet-inches strings ("12' 4\"") into the field for parsed input is out of scope.
+- **Custom imperial-unit icon on the "Set Scene to Imperial" button.** Replaces the generic `SETTINGS` gear icon with a dedicated `imperial-unit.png` graphic loaded into a `bpy.utils.previews` collection. Standard Blender custom-icon plumbing (`register_icons` / `unregister_icons` / `get_icon_id`) in `__init__.py`; UI callers use `icon_value=get_icon_id("imperial_unit")` with a `SETTINGS` fallback when the collection isn't loaded (handles the module-reload edge case during development).
+- **Live "Resolved MAIN" readout in the Building tab's joint detail panel.** Below the `extending_wall` dropdown, a `→ Resolved MAIN: <wall_name>` label calls `resolve_extending_wall` on every redraw and shows which wall is currently MAIN given the joint's current settings. Skipped gracefully when `wall_a` / `wall_b` haven't been picked yet. Critical context now that MAIN role follows `extending_wall` resolution rather than slot — without this readout the user has to mentally re-derive MAIN from a multi-field interaction.
+- **Smoke test regression coverage for the `extending_wall` fix.** New step `[26]` calls `add_joint` with explicit `extending_wall="B"`; step `[27]` calls `frame_building` and asserts the corner filler lands on `wall_b` (not `wall_a`). Renumbered the three pre-existing error-path steps to `[28]`–`[30]`. Total: 30 steps (was 28). If the v0.6.0 bug regresses, step `[27]` fails with a clear "v0.6.0 bug is back" message.
+
+### Changed
+- **Joint detail panel labels softened.** `PraxovaJoint.wall_a.name` changed from `"Wall A (main)"` to `"Wall A"`; `wall_b.name` from `"Wall B (abutting)"` to `"Wall B"`. The parentheticals were accurate when `wall_a` was always MAIN; with the fix above they're no longer fixed roles. Property descriptions rewritten to point users at the live Resolved MAIN readout below the `extending_wall` dropdown rather than baking the old role assumption into the field tooltip.
+- **`mcp_server` package version** 0.6.2 → 0.6.25. Description unchanged (joint-coordination capability already covered in v0.6.2 wording).
+- **Smoke test `addon_version` pin** "0.6.2" → "0.6.25". `method_count` stays at 18.
+- **README** Status line "Beta (v0.6.2)" → "Beta (v0.6.25)". Joint-related descriptions of `extending_wall` AUTO semantics updated to "longer wall is MAIN" wording.
+
+### Bridge
+- Method count: 18 (unchanged — no new bridge methods this cycle).
+- `add_joint` handler + FastMCP tool docstring updates reflect the new `extending_wall` semantics (AUTO = longer wall). Wire format and field set unchanged — existing clients keep working without modification.
+
 ## [0.6.2] — 2026-05-12
 
 ### Added
