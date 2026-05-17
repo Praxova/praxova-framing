@@ -821,13 +821,99 @@ def run(host: str, port: int) -> int:
             f"n_corner_fillers={wall_a_entry['n_corner_fillers']}."
         )
 
-        print("\n[28] error path: unknown lumber")
+        print("\n[28] list_objects → verify cap-plate lap geometry (v0.6.30)")
+        # v0.6.30 cap-plate lap fix: cap is the INVERSE of the lower
+        # top plate at each joint end. With step [26]'s joint
+        # (extending_wall='B' → wall_b is MAIN, wall_a is ABUTTING)
+        # and 2x4 walls (paired_t = 3.5"):
+        #
+        #   wall_a (ABUTTING at END, FREE at START):
+        #     lower top: 92.5" (= 96 - 3.5, shortened at END), x_start=0
+        #     cap:       99.5" (= 96 + 3.5, extends past END to lap
+        #                onto wall_b's lower top), x_start=0
+        #
+        #   wall_b (MAIN at START, FREE at END):
+        #     lower top: 96"   (full, MAIN keeps continuity)
+        #     cap:       92.5" (= 96 - 3.5, pulled INBOARD at START
+        #                to leave room for wall_a's cap to lap onto
+        #                wall_b's lower top), x_start=3.5" (0.0889 m)
+        #
+        # Before v0.6.30 the cap was identical to the lower top — both
+        # 92.5" with x_start=0 on each end. wall_a's cap at 99.5"
+        # (extending past the wall edge) is the regression sentinel:
+        # if v0.6.0's butt-joint cap geometry comes back, wall_a's
+        # cap drops to 92.5" and this step fails loudly.
+        r = cli.call("list_objects")
+        by_name = {o["name"]: o for o in r["objects"]}
+
+        wall_a_lower = by_name.get(f"{wall_a_name}_TopPlate_01")
+        wall_a_cap = by_name.get(f"{wall_a_name}_TopPlate_02")
+        wall_b_lower = by_name.get(f"{wall_b_name}_TopPlate_01")
+        wall_b_cap = by_name.get(f"{wall_b_name}_TopPlate_02")
+        for name, obj in [
+            (f"{wall_a_name}_TopPlate_01", wall_a_lower),
+            (f"{wall_a_name}_TopPlate_02", wall_a_cap),
+            (f"{wall_b_name}_TopPlate_01", wall_b_lower),
+            (f"{wall_b_name}_TopPlate_02", wall_b_cap),
+        ]:
+            assert obj is not None, (
+                f"expected {name!r} in scene after frame_building, "
+                f"but list_objects didn't return it"
+            )
+
+        # wall_a (ABUTTING at END, FREE at START)
+        assert abs(wall_a_lower["length_in"] - 92.5) < 1e-3, (
+            f"wall_a lower top plate: expected 92.5\" (= 96 - 3.5 "
+            f"ABUTTING at END), got {wall_a_lower['length_in']}"
+        )
+        assert abs(wall_a_lower["location_m"][0] - 0.0) < 1e-3, (
+            f"wall_a lower top plate x_start should be 0.0, got "
+            f"{wall_a_lower['location_m'][0]}"
+        )
+        assert abs(wall_a_cap["length_in"] - 99.5) < 1e-3, (
+            f"v0.6.30 lap fix sentinel: wall_a cap should extend past "
+            f"its wall edge by 3.5\" at the ABUTTING end (= 96 + 3.5 "
+            f"= 99.5\"). Got {wall_a_cap['length_in']}. If this is "
+            f"92.5\" the lap isn't happening — v0.6.0 butt-joint "
+            f"geometry is back."
+        )
+        assert abs(wall_a_cap["location_m"][0] - 0.0) < 1e-3, (
+            f"wall_a cap x_start should be 0.0 (FREE start), got "
+            f"{wall_a_cap['location_m'][0]}"
+        )
+
+        # wall_b (MAIN at START, FREE at END)
+        assert abs(wall_b_lower["length_in"] - 96.0) < 1e-3, (
+            f"wall_b lower top plate: expected 96.0\" (MAIN keeps "
+            f"full continuity), got {wall_b_lower['length_in']}"
+        )
+        assert abs(wall_b_lower["location_m"][0] - 0.0) < 1e-3, (
+            f"wall_b lower top plate x_start should be 0.0, got "
+            f"{wall_b_lower['location_m'][0]}"
+        )
+        assert abs(wall_b_cap["length_in"] - 92.5) < 1e-3, (
+            f"v0.6.30 lap fix: wall_b cap should be shortened inboard "
+            f"by 3.5\" at the MAIN end (= 96 - 3.5 = 92.5\"). Got "
+            f"{wall_b_cap['length_in']}."
+        )
+        # 3.5" = 3.5 * 0.0254 = 0.0889 m. 1e-3 m tolerance (~1mm).
+        assert abs(wall_b_cap["location_m"][0] - 0.0889) < 1e-3, (
+            f"v0.6.30 lap fix: wall_b cap x_start should be 3.5\" "
+            f"inboard (0.0889 m) at the MAIN end, got "
+            f"{wall_b_cap['location_m'][0]}"
+        )
+        print("  -> cap lap geometry verified: wall_a cap extends "
+              "3.5\" past its END to lap onto wall_b's lower top "
+              "plate; wall_b cap pulled 3.5\" inboard at its START "
+              "to make room for wall_a's cap")
+
+        print("\n[29] error path: unknown lumber")
         try:
             cli.call("add_lumber", {"nominal": "2x5", "length_ft": 8})
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
 
-        print("\n[29] error path: duplicate_e2e on lumber (should refuse)")
+        print("\n[30] error path: duplicate_e2e on lumber (should refuse)")
         # The LUMBER refusal is enforced in the bridge handler so the
         # error carries a clean INVALID_PARAMS code instead of the
         # operator's APP_OPERATOR_FAILED.
@@ -846,7 +932,7 @@ def run(host: str, port: int) -> int:
                 f"expected error to mention lumber, got: {err_text!r}"
             )
 
-        print("\n[30] error path: bad method")
+        print("\n[31] error path: bad method")
         try:
             cli.call("does_not_exist")
         except RuntimeError as e:
