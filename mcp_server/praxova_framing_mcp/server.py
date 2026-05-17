@@ -473,6 +473,127 @@ def add_level(
 
 
 # ===========================================================================
+# Joint lifecycle (v0.6.2)
+# ===========================================================================
+
+@mcp.tool()
+def add_joint(level_name: str, joint: dict) -> dict:
+    """Append a new joint to a Praxova Level's joints collection.
+
+    A joint connects two walls in the same Level at an L corner; the
+    MAIN wall keeps plate continuity through the corner while the
+    ABUTTING wall's plates are shortened by the main wall's wall
+    thickness. frame_building reads these joints and re-frames every
+    wall in the Level with the corner geometry applied.
+
+    Args:
+        level_name: Name of the Praxova Level Empty (created via
+            add_building or add_level). Resolved against
+            bpy.context.scene.objects; APP_OBJECT_NOT_FOUND (-32004)
+            if missing, INVALID_PARAMS (-32602) if the named object
+            isn't a Praxova Level.
+
+        joint: dict carrying the wire-format joint spec:
+
+            {
+              "joint_type":      "L_CORNER",          # OPTIONAL,
+                                                      #   default
+                                                      #   "L_CORNER"
+                                                      #   (only valid
+                                                      #   in v0.6.x)
+              "wall_a_name":     "Wall_01",           # REQUIRED;
+                                                      #   MAIN wall
+              "wall_b_name":     "Wall_02",           # REQUIRED;
+                                                      #   ABUTTING wall
+              "wall_a_end":      "END" | "START",     # REQUIRED
+              "wall_b_end":      "END" | "START",     # REQUIRED
+              "corner_style":    "AUTO" | "THREE_STUD",
+                                                      # OPTIONAL,
+                                                      #   default
+                                                      #   "AUTO"
+              "extending_wall":  "AUTO" | "A" | "B",  # OPTIONAL,
+                                                      #   default
+                                                      #   "AUTO"
+                                                      #   (shorter
+                                                      #   wall extends;
+                                                      #   ties to A)
+            }
+
+          wall_a_name / wall_b_name must resolve to Praxova-managed
+          wall Empties parented under `level_name` — cross-Level
+          joints are out of scope. INVALID_PARAMS otherwise, with
+          the message naming both the bad value AND the Level it
+          was checked against so the LLM knows which param to fix.
+
+    Returns:
+        level_name: echo
+        joint_index: 0-based index of the new joint in the Level's
+            joints collection. Pass to remove_joint or use as the
+            wire key for round-tripping via list_joints_in_level.
+        joint: full filled spec — all six wire fields above with
+            defaults made explicit, plus joint_index. Identical
+            shape to list_joints_in_level entries.
+
+    Known footgun — wall name brittleness:
+        wall_a_name / wall_b_name are Object name strings, not
+        stable PropertyGroup IDs. Renaming a wall in Blender
+        invalidates any joint spec the LLM previously cached (the
+        PointerProperty on the existing PraxovaJoint will follow
+        the rename, but a fresh add_joint call with the old name
+        will hit INVALID_PARAMS). Same brittleness as target_name
+        in duplicate_oc / duplicate_e2e. Workaround: call
+        list_joints_in_level to refresh the canonical names before
+        further joint mutation.
+
+    Implementation note: the bridge writes directly to
+    level.praxova_level.joints (CollectionProperty.add + field
+    assignment) rather than invoking bpy.ops.praxova.add_joint, so
+    every field is set in one step. The UI op stays unchanged for
+    human-driven "click + then fill fields" flows.
+    """
+    return _call("add_joint", {
+        "level_name": level_name,
+        "joint": joint,
+    })
+
+
+@mcp.tool()
+def remove_joint(level_name: str, joint_index: int) -> dict:
+    """Remove one joint from a Praxova Level by 0-based index.
+
+    Returns the full pre-removal joint spec as an undo handle. If a
+    caller deleted the wrong joint, calling add_joint with the
+    `removed` dict from the response immediately puts it back — no
+    scene-state caching required client-side.
+
+    Args:
+        level_name: Name of the Praxova Level Empty. Same resolution
+            rules as add_joint (APP_OBJECT_NOT_FOUND if missing,
+            INVALID_PARAMS if not a Praxova Level).
+        joint_index: 0-based index into level.praxova_level.joints.
+            Out of range -> INVALID_PARAMS with the current joint
+            count in the message.
+
+    Returns:
+        level_name: echo
+        joint_index: echo
+        removed: the joint's full wire spec captured BEFORE removal:
+            joint_index, joint_type, wall_a_name, wall_b_name,
+            wall_a_end, wall_b_end, corner_style, extending_wall.
+            Same shape add_joint accepts on the way in (minus the
+            joint_index, which is reassigned on re-add).
+
+    The Level's `joints_active` index is clamped to the new bounds
+    after removal, matching the UI op (max(0, min(joints_active,
+    len(joints) - 1))).
+    """
+    return _call("remove_joint", {
+        "level_name": level_name,
+        "joint_index": joint_index,
+    })
+
+
+# ===========================================================================
 # Composite framing
 # ===========================================================================
 

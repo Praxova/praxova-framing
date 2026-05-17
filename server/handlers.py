@@ -102,6 +102,41 @@ def _location_param(params: dict) -> Vector | None:
 
 
 # ---------------------------------------------------------------------------
+# Level resolution (v0.6.2)
+# ---------------------------------------------------------------------------
+
+def _resolve_level(level_name: str) -> bpy.types.Object:
+    """Look up a Praxova-managed Level Empty by Object name.
+
+    Single place the joint handlers (add_joint, remove_joint,
+    frame_building, list_joints_in_level) reach into bpy.data to
+    resolve a string from the wire into a Level. Errors map cleanly
+    to JSON-RPC codes:
+
+      APP_OBJECT_NOT_FOUND (-32004) when no Object of that name
+        exists. Same code add_level uses when its `building` doesn't
+        resolve — consistent semantics across the bridge.
+      INVALID_PARAMS (-32602) when an Object exists but isn't a
+        Praxova Level (lacks praxova_level or is_level=False). The
+        message names the Object so the LLM can correct the spec.
+    """
+    obj = bpy.context.scene.objects.get(level_name)
+    if obj is None:
+        raise bridge.RPCError(
+            APP_OBJECT_NOT_FOUND,
+            f"No object named {level_name!r} in scene",
+        )
+    if (getattr(obj, 'praxova_level', None) is None
+            or not obj.praxova_level.is_level):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"Object {level_name!r} is not a Praxova Level "
+            "(praxova_level.is_level=False)",
+        )
+    return obj
+
+
+# ---------------------------------------------------------------------------
 # Wall opening param validation (v0.5.1)
 # ---------------------------------------------------------------------------
 
@@ -232,6 +267,143 @@ def _parse_openings(raw, wall_nominal: str) -> list[dict]:
             "jack_count": jack_count,
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Joint param validation (v0.6.2)
+# ---------------------------------------------------------------------------
+
+# Choices come from PraxovaJoint's EnumProperty items in properties.py.
+# Kept inline here so the bridge enforces the wire-format contract
+# without import-time coupling to bpy/properties; if the UI extends
+# either enum in v0.7+ (T joints, California / ladder corners), these
+# tuples will also need to grow.
+_JOINT_TYPE_CHOICES = ("L_CORNER",)
+_JOINT_END_CHOICES = ("START", "END")
+_JOINT_CORNER_STYLE_CHOICES = ("AUTO", "THREE_STUD")
+_JOINT_EXTENDING_CHOICES = ("AUTO", "A", "B")
+
+
+def _resolve_wall_in_level(name: str, level: bpy.types.Object, field: str) -> bpy.types.Object:
+    """Resolve a wall-name string to a wall Empty parented under `level`.
+
+    Three failure shapes, all INVALID_PARAMS so the LLM gets a single
+    error code to inspect, with the message naming both the bad value
+    AND the Level it was checked against:
+
+      - not in scene at all
+      - in scene but not a Praxova wall (missing praxova_wall or
+        is_wall=False)
+      - is a Praxova wall but parented under a different Level (or
+        no Level — cross-Level joints are explicitly out of scope)
+
+    `field` is the wire-format field name ("wall_a_name" / "wall_b_name")
+    so errors point the LLM at the exact param to correct.
+    """
+    obj = bpy.context.scene.objects.get(name)
+    if obj is None:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"{field} {name!r} not found in scene",
+        )
+    if (getattr(obj, 'praxova_wall', None) is None
+            or not obj.praxova_wall.is_wall):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"{field} {name!r} is not a Praxova-managed wall",
+        )
+    if obj.parent is not level:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"{field} {name!r} is not parented under Level "
+            f"{level.name!r}",
+        )
+    return obj
+
+
+def _parse_joint(raw, level: bpy.types.Object) -> dict:
+    """Validate one joint wire-format dict against a Level's walls.
+
+    Returns a dict with every field default-filled (joint_type,
+    wall_a_end / wall_b_end, corner_style, extending_wall) plus the
+    resolved wall Object references (wall_a, wall_b) AND the original
+    name strings (wall_a_name, wall_b_name) so add_joint can both
+    write the PointerProperty refs onto the new PraxovaJoint and echo
+    the names back in its response without a second lookup.
+
+    Mirrors v0.5.1's _parse_openings structurally: required-vs-optional
+    per the wire spec, choices enforced via _require / _optional's
+    `choices` kwarg, names normalised before they touch the
+    PropertyGroup. _resolve_wall_in_level guards against cross-Level
+    joints (per the v0.6.2 design — joints belong to one Level).
+    """
+    if not isinstance(raw, dict):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f'"joint" must be a dict, got {type(raw).__name__}',
+        )
+
+    joint_type = _optional(
+        raw, "joint_type", str, default="L_CORNER",
+        choices=_JOINT_TYPE_CHOICES,
+    )
+    wall_a_name = _require(raw, "wall_a_name", str)
+    wall_b_name = _require(raw, "wall_b_name", str)
+    wall_a_end = _require(
+        raw, "wall_a_end", str, choices=_JOINT_END_CHOICES,
+    )
+    wall_b_end = _require(
+        raw, "wall_b_end", str, choices=_JOINT_END_CHOICES,
+    )
+    corner_style = _optional(
+        raw, "corner_style", str, default="AUTO",
+        choices=_JOINT_CORNER_STYLE_CHOICES,
+    )
+    extending_wall = _optional(
+        raw, "extending_wall", str, default="AUTO",
+        choices=_JOINT_EXTENDING_CHOICES,
+    )
+
+    wall_a = _resolve_wall_in_level(wall_a_name, level, "wall_a_name")
+    wall_b = _resolve_wall_in_level(wall_b_name, level, "wall_b_name")
+
+    return {
+        "joint_type": joint_type,
+        "wall_a_name": wall_a_name,
+        "wall_b_name": wall_b_name,
+        "wall_a_end": wall_a_end,
+        "wall_b_end": wall_b_end,
+        "corner_style": corner_style,
+        "extending_wall": extending_wall,
+        "wall_a": wall_a,
+        "wall_b": wall_b,
+    }
+
+
+def _joint_to_wire(joint, joint_index: int) -> dict:
+    """Render one PraxovaJoint as the canonical wire-format dict.
+
+    Shared between list_joints_in_level (called once per joint) and
+    remove_joint (called once with the to-be-removed joint, before the
+    .remove() call). Same key set _parse_joint accepts on the way in
+    — so a removed joint can be round-tripped back via add_joint with
+    no field mapping.
+
+    wall_a / wall_b come over the wire as Empty-name strings; this
+    helper handles the rare case where a UI-added joint has unset
+    PointerProperty refs (the user added the joint before picking
+    walls) by surfacing them as None instead of crashing on .name.
+    """
+    return {
+        "joint_index": joint_index,
+        "joint_type": joint.joint_type,
+        "wall_a_name": joint.wall_a.name if joint.wall_a else None,
+        "wall_b_name": joint.wall_b.name if joint.wall_b else None,
+        "wall_a_end": joint.wall_a_end,
+        "wall_b_end": joint.wall_b_end,
+        "corner_style": joint.corner_style,
+        "extending_wall": joint.extending_wall,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +1130,151 @@ def add_level(params: dict) -> dict:
 
 
 # ===========================================================================
+# Joint lifecycle (v0.6.2 bridge parity for v0.6 joints)
+# ===========================================================================
+
+def add_joint(params: dict) -> dict:
+    """Append a new joint to a Level's joints collection.
+
+    The bridge writes directly to level.praxova_level.joints
+    (CollectionProperty.add + field assignment) rather than invoking
+    bpy.ops.praxova.add_joint — the UI op exists for the "click the +
+    button then fill fields in the detail panel" flow, but a bridge
+    caller has all the fields up front, so the one-step direct write
+    matches the v0.5.1 frame_wall openings pattern.
+
+    Required:
+        level_name (str): name of the Praxova Level Empty the joint
+            belongs to (resolved via _resolve_level).
+        joint (dict): wire-format spec with these fields:
+              joint_type (str, OPTIONAL, default "L_CORNER"): only
+                "L_CORNER" valid in v0.6.x. v0.7 adds T joints + in-
+                line splice; the param is exposed now for forward-
+                compat.
+              wall_a_name (str, REQUIRED): Object name of the MAIN
+                wall (the wall keeping its plate continuity at the
+                joint end). Must be a Praxova wall parented under
+                `level_name` — cross-Level joints are out of scope.
+              wall_b_name (str, REQUIRED): Object name of the
+                ABUTTING wall (plates shortened by the MAIN wall's
+                wall thickness at the joint end). Same constraints.
+              wall_a_end (str, REQUIRED): "START" (joint at x=0) or
+                "END" (joint at x=wall_length_in) for wall A.
+              wall_b_end (str, REQUIRED): same for wall B.
+              corner_style (str, OPTIONAL, default "AUTO"): "AUTO"
+                inherits the Building's default_corner_style at
+                frame_building time; "THREE_STUD" pins this joint.
+                v0.7 adds CALIFORNIA and LADDER_BLOCKING.
+              extending_wall (str, OPTIONAL, default "AUTO"): which
+                wall's cap plate runs full length across the corner.
+                "AUTO" picks the shorter wall (ties to A);
+                "A" / "B" override.
+
+    Returns:
+        level_name (echo)
+        joint_index (int, 0-based): index of the new joint in the
+            Level's joints collection. Pass to remove_joint or use
+            as the wire-format key for round-tripping.
+        joint (dict): full filled spec — all six wire fields above
+            with defaults made explicit, plus joint_index for
+            symmetry with list_joints_in_level entries.
+
+    Known footgun: wall_a_name / wall_b_name are Object name strings,
+    not stable PropertyGroup IDs. Renaming a wall Empty in Blender
+    invalidates any joint spec the LLM previously cached (the
+    PointerProperty on the existing PraxovaJoint will follow the
+    rename, but a fresh add_joint call with the old name will hit
+    INVALID_PARAMS). Same brittleness as target_name in duplicate_oc
+    / duplicate_e2e — consistent trade-off across the bridge.
+    Workaround: call list_joints_in_level to refresh the canonical
+    names before further joint mutation.
+    """
+    level_name = _require(params, "level_name", str)
+    level = _resolve_level(level_name)
+
+    raw_joint = _require(params, "joint", dict)
+    parsed = _parse_joint(raw_joint, level)
+
+    joints = level.praxova_level.joints
+    item = joints.add()
+    item.joint_type = parsed["joint_type"]
+    item.wall_a = parsed["wall_a"]
+    item.wall_b = parsed["wall_b"]
+    item.wall_a_end = parsed["wall_a_end"]
+    item.wall_b_end = parsed["wall_b_end"]
+    item.corner_style = parsed["corner_style"]
+    item.extending_wall = parsed["extending_wall"]
+
+    new_index = len(joints) - 1
+    level.praxova_level.joints_active = new_index
+
+    return {
+        "level_name": level.name,
+        "joint_index": new_index,
+        "joint": _joint_to_wire(item, new_index),
+    }
+
+
+def remove_joint(params: dict) -> dict:
+    """Remove one joint from a Level's joints collection by index.
+
+    Returns the full spec of the removed joint as an "undo handle":
+    a caller that deleted the wrong joint can immediately call
+    add_joint with the echoed spec to put it back, no scene-state
+    caching required client-side.
+
+    Required:
+        level_name (str): name of the Praxova Level Empty.
+        joint_index (int): 0-based index into
+            level.praxova_level.joints. Out-of-range → INVALID_PARAMS
+            with the current joint count in the message.
+
+    Returns:
+        level_name (echo)
+        joint_index (echo)
+        removed (dict): the joint's full wire spec captured BEFORE
+            the .remove() call — joint_type, wall_a_name,
+            wall_b_name, wall_a_end, wall_b_end, corner_style,
+            extending_wall, joint_index.
+
+    Mirrors the UI op's joints_active clamp:
+    max(0, min(joints_active, len(joints) - 1)) after removal. So
+    after removing the last joint, joints_active is 0 (matching the
+    UIList's "no selection visible" state).
+    """
+    level_name = _require(params, "level_name", str)
+    level = _resolve_level(level_name)
+
+    joint_index = _require(params, "joint_index", int)
+    if isinstance(joint_index, bool):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            'Parameter "joint_index" must be int, got bool',
+        )
+    joints = level.praxova_level.joints
+    n = len(joints)
+    if joint_index < 0 or joint_index >= n:
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f"joint_index {joint_index} out of range "
+            f"[0, {n}) for Level {level_name!r}",
+        )
+
+    removed_wire = _joint_to_wire(joints[joint_index], joint_index)
+    joints.remove(joint_index)
+
+    level.praxova_level.joints_active = max(
+        0, min(level.praxova_level.joints_active, len(joints) - 1),
+    )
+
+    return {
+        "level_name": level.name,
+        "joint_index": joint_index,
+        "removed": removed_wire,
+    }
+
+
+# ===========================================================================
 # Composite framing (v0.4.1 bridge parity for v0.4 frame_wall operator)
 # ===========================================================================
 
@@ -1506,10 +1823,13 @@ METHODS = {
     "add_panel": add_panel,
     "duplicate_oc": duplicate_oc,
     "duplicate_e2e": duplicate_e2e,
-    # v0.6.1: containers for the multi-wall hierarchy. Joint methods
-    # and frame_building land in v0.6.2.
+    # v0.6.1: containers for the multi-wall hierarchy.
     "add_building": add_building,
     "add_level": add_level,
+    # v0.6.2: joint lifecycle. frame_building + list_joints_in_level
+    # land in the same cycle alongside these two.
+    "add_joint": add_joint,
+    "remove_joint": remove_joint,
     "frame_wall": frame_wall,
     "generate_cutlist": generate_cutlist,
     "set_imperial_units": set_imperial_units,
