@@ -119,7 +119,13 @@ def _get_or_make_mesh(name: str, dims_inches: tuple[float, float, float]):
 _EMPTY_END_MODS = {
     'bottom_off': 0.0,
     'lower_top_off': 0.0,
-    'cap_off': 0.0,
+    'cap_off': 0.0,  # legacy: positive-inboard; unused for placement as of v0.6.30
+    # v0.6.30: signed cap-plate offset for the corner-lap geometry.
+    # Positive = outboard (cap extends past wall edge by this much,
+    # creating the lap). Negative = inboard (cap is shortened from
+    # wall edge by this much). FREE ends get 0 — matches v0.5
+    # behavior for joint-less walls.
+    'cap_signed_offset': 0.0,
     'end_stud_override': None,
     'filler_x': None,
     'joint_index': 0,
@@ -210,6 +216,17 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
             'bottom_off': geom['bottom_plate_offset'],
             'lower_top_off': geom['lower_top_plate_offset'],
             'cap_off': geom['cap_plate_offset'],
+            # v0.6.30: signed cap offset for the corner-lap geometry.
+            # See templates.cap_plate_end_offset for sign convention.
+            # MAIN -> -wt_other (cap pulled inboard), ABUTTING ->
+            # +wt_other (cap extends out to lap onto MAIN's lower top
+            # plate at the corner cell). Replaces the old cap_off
+            # field for plate placement; cap_off is kept on mods for
+            # any v0.6.25 code path that still reads it during a
+            # cleanup cycle.
+            'cap_signed_offset': templates.cap_plate_end_offset(
+                ctx['role'], wt_other,
+            ),
             'end_stud_override': geom['end_stud_x_override'],
             'filler_x': geom['filler_stud_x'],
             'joint_index': joint_index_by_end[end],
@@ -814,19 +831,52 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             children.append(obj)
 
         # Top plates stacked from (height - top_count * thickness) up.
-        # v0.6: each top plate's effective length depends on whether it's
-        # the cap (topmost — uses cap_off offsets, which differ based on
-        # whether this wall extends across the corner) or a lower top
-        # plate (uses lower_top_off, identical to bottom_off in the L
-        # corner case). For top_plate_count == 1 the single plate IS the
-        # cap. For higher counts, all but the topmost are treated as
-        # "lower top plates."
+        # v0.6: lower top plate(s) reach in by lower_top_off at each
+        # joint end (matches bottom plate). v0.6.30: cap plate uses
+        # SIGNED cap_signed_offset — outboard at ABUTTING ends (cap
+        # extends past wall edge to lap onto the main wall's lower
+        # top plate at the corner cell) and inboard at MAIN ends
+        # (cap pulled back to leave room for the abutting wall's cap
+        # to land on top). cap_x_start can be NEGATIVE in local
+        # coordinates — that's the lap intruding into the paired
+        # wall's corner cell, which is correct.
         z_top_base_m = (height_in - top_plate_count * thickness_in) * INCH
-        # Pre-compute per-plate (x_start, length) and cache the meshes.
         lower_x_start = mods['START']['lower_top_off']
         lower_length = length_in - lower_x_start - mods['END']['lower_top_off']
-        cap_x_start = mods['START']['cap_off']
-        cap_length = length_in - cap_x_start - mods['END']['cap_off']
+        cap_x_start = -mods['START']['cap_signed_offset']
+        cap_x_end = length_in + mods['END']['cap_signed_offset']
+        cap_length = cap_x_end - cap_x_start
+
+        # v0.6.30: separate stock check for the cap. The cap can be
+        # LONGER than the wall when both ends are ABUTTING (each end
+        # extends by paired_t). For a 16' (192") wall ABUTTING at
+        # both ends with 2x6 paired walls, the cap would need to be
+        # 203" — exceeds 2x6's max 192" stock. Splicing is v0.7+
+        # scope; surface a clear error here so the user knows the
+        # workaround (set extending_wall explicitly to make the
+        # shorter wall MAIN, sidestepping the lap on the long wall).
+        try:
+            cap_stock_in = templates.select_stock_length_in(
+                nominal, cap_length,
+            )
+        except ValueError:
+            max_stock_in = max(templates.LENGTHS_BY_TYPE[nominal]) * 12
+            self.report(
+                {'ERROR'},
+                f"{wall_name}: the cap plate would need to be "
+                f"{cap_length:g}\" to lap both corner ends, but the "
+                f"longest {nominal} stock is {int(max_stock_in)}\". "
+                "This corner requires plate splicing (planned for "
+                "v0.7). Workaround: set extending_wall='A' or 'B' "
+                "explicitly on the affected joint(s) to make the "
+                "shorter wall MAIN instead.",
+            )
+            return {'CANCELLED'}
+        cap_stock_ft = int(round(cap_stock_in / 12))
+        cap_label = templates.lumber_cutlist_label(
+            nominal, cap_stock_ft, 'HORIZONTAL',
+        )
+
         lower_mesh = _get_or_make_mesh(
             f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(lower_length)}",
             (lower_length, width_in, thickness_in),
@@ -841,15 +891,20 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             mesh = cap_mesh if is_cap else lower_mesh
             x_start_in = cap_x_start if is_cap else lower_x_start
             plate_length_in = cap_length if is_cap else lower_length
+            # Cap uses its own stock (may differ when length exceeds
+            # the wall-length stock); lower plates share the v0.5
+            # plate_stock_in sized for length_in.
+            stock_for_plate = cap_stock_in if is_cap else plate_stock_in
+            label_for_plate = cap_label if is_cap else plate_label
             obj = _make_framing_object(
                 context, mesh,
                 f"{wall_name}_TopPlate_{i + 1:02d}",
                 (x_start_in * INCH, 0.0, z_m),
                 nominal=nominal,
                 length_in=plate_length_in,
-                stock_in=plate_stock_in,
+                stock_in=stock_for_plate,
                 orientation='HORIZONTAL',
-                label=plate_label,
+                label=label_for_plate,
             )
             children.append(obj)
 
