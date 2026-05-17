@@ -420,7 +420,23 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
         if units.system != 'IMPERIAL' or units.length_unit != 'INCHES':
             box = layout.box()
             box.label(text="Scene not set to imperial", icon='ERROR')
-            box.operator("praxova.set_imperial_units", icon='SETTINGS')
+            # v0.6.25: custom imperial-unit icon (resources/imperial-
+            # unit.png loaded into the praxova preview collection in
+            # __init__.register_icons). Fall back to the built-in
+            # SETTINGS icon if get_icon_id returns 0 (e.g. icon
+            # collection not loaded — module reload edge case).
+            from . import get_icon_id
+            icon_id = get_icon_id("imperial_unit")
+            if icon_id:
+                box.operator(
+                    "praxova.set_imperial_units",
+                    icon_value=icon_id,
+                )
+            else:
+                box.operator(
+                    "praxova.set_imperial_units",
+                    icon='SETTINGS',
+                )
 
         # --- OC duplication ---
         box = layout.box()

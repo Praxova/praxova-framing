@@ -16,7 +16,10 @@ external MCP server can drive the same operators from an LLM agent.
 # extension loader; the two must be bumped together each release.
 __version__ = "0.6.2"
 
+import os
+
 import bpy
+import bpy.utils.previews
 
 from . import (
     properties,
@@ -33,9 +36,53 @@ from . import server as _server  # v0.3: in-Blender MCP bridge
 
 _registered_classes: list = []
 
+# v0.6.25: custom-icon storage. bpy.utils.previews collections are
+# the standard way to load PNGs as toolbar icons; their icon_id ints
+# go to layout.operator(..., icon_value=<id>). Loaded in
+# register_icons() before any panel draws, freed in unregister_icons()
+# during module teardown.
+_preview_collections: dict = {}
+
+
+def register_icons():
+    """Load custom icons from resources/ into a preview collection."""
+    pcoll = bpy.utils.previews.new()
+    icons_dir = os.path.join(os.path.dirname(__file__), "resources")
+    pcoll.load(
+        "imperial_unit",
+        os.path.join(icons_dir, "imperial-unit.png"),
+        'IMAGE',
+    )
+    _preview_collections["praxova"] = pcoll
+
+
+def unregister_icons():
+    """Release every preview collection. Safe to call at any teardown
+    point — clears the module-level dict so a re-register starts
+    clean."""
+    for pcoll in _preview_collections.values():
+        bpy.utils.previews.remove(pcoll)
+    _preview_collections.clear()
+
+
+def get_icon_id(name: str) -> int:
+    """Return the icon_id for a previously-loaded custom icon, or 0
+    if the named icon isn't loaded yet. UI callers fall back to a
+    built-in icon when get_icon_id returns 0 — covers the brief
+    window between module import and register_icons() running."""
+    pcoll = _preview_collections.get("praxova")
+    if pcoll is None:
+        return 0
+    return pcoll[name].icon_id
+
 
 def register():
     global _registered_classes
+
+    # v0.6.25: load custom icons FIRST so panel draws (which can
+    # fire as soon as classes register) already have access via
+    # get_icon_id.
+    register_icons()
 
     static_classes = [
         # Property groups MUST register before anything that references them.
@@ -158,3 +205,8 @@ def unregister():
     for cls in reversed(_registered_classes):
         bpy.utils.unregister_class(cls)
     _registered_classes.clear()
+
+    # v0.6.25: free custom-icon preview collections LAST so any
+    # in-flight panel draw triggered by class unregistration can
+    # still resolve icon_ids without crashing.
+    unregister_icons()
