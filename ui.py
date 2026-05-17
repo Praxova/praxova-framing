@@ -484,7 +484,9 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
             op = row.operator("praxova.set_fill_span", text=label)
             op.span = span_in
 
-        box.prop(scn, "fill_span_in")
+        # v0.6.25: feet display via the derived fill_span_ft proxy.
+        # Inch storage stays canonical for downstream consumers.
+        box.prop(scn, "fill_span_ft")
         box.prop(scn, "fill_count")
 
         row = box.row(align=True)
@@ -524,7 +526,10 @@ class PRAXOVA_PT_wall_framing(bpy.types.Panel):
                 icon='OBJECT_DATAMODE',
             )
 
-        box.prop(source, "wall_length_in")
+        # v0.6.25: feet display via the derived wall_length_ft proxy
+        # (works for both scratch and per-wall source). Inch storage
+        # stays canonical for ops_frame and the bridge handlers.
+        box.prop(source, "wall_length_ft")
         box.prop(source, "wall_height_in")
         box.prop(source, "wall_nominal")
         box.prop(source, "wall_spacing_oc_in")

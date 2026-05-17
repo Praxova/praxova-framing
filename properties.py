@@ -69,6 +69,36 @@ def _on_fill_span_change(self, context):
 
 
 # ---------------------------------------------------------------------------
+# Feet getters/setters (v0.6.25)
+# ---------------------------------------------------------------------------
+
+# Inch storage is canonical (the operators and bridge handlers all
+# read *_length_in / *_span_in directly); these get/set pairs back
+# derived FloatProperty fields that the N-panel displays in decimal
+# feet, letting carpenters input "12.333" rather than "148". Setting
+# the ft field goes through the inch field's setter so any update
+# callback on the inch property (e.g. _on_fill_span_change) still
+# fires correctly. Same pair shared between PraxovaSceneProps and
+# PraxovaWallProps because both expose wall_length_in with the
+# same attribute name.
+
+def _wall_length_ft_get(self):
+    return self.wall_length_in / 12.0
+
+
+def _wall_length_ft_set(self, value):
+    self.wall_length_in = value * 12.0
+
+
+def _fill_span_ft_get(self):
+    return self.fill_span_in / 12.0
+
+
+def _fill_span_ft_set(self, value):
+    self.fill_span_in = value * 12.0
+
+
+# ---------------------------------------------------------------------------
 # Object tag
 # ---------------------------------------------------------------------------
 
@@ -291,6 +321,21 @@ class PraxovaWallProps(bpy.types.PropertyGroup):
         min=12.0,
         soft_max=1200.0,
         precision=2,
+    )
+    # v0.6.25: decimal-feet display proxy for wall_length_in. Inch
+    # storage stays authoritative; this field is what the Wall Framing
+    # tab binds for user input ("12.333" = 12' 4"). See module-level
+    # _wall_length_ft_get/_set near the top of this file.
+    wall_length_ft: FloatProperty(  # noqa: F821
+        name="Wall Length",
+        description="Wall length in feet (decimal). Example: 12.333 = 12' 4\"",
+        unit='NONE',
+        min=0.0,
+        soft_min=1.0,
+        soft_max=64.0,
+        precision=3,
+        get=_wall_length_ft_get,
+        set=_wall_length_ft_set,
     )
     wall_height_in: FloatProperty(  # noqa: F821
         name="Wall Height (in)",
@@ -517,6 +562,20 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
         precision=2,
         update=_on_fill_span_change,
     )
+    # v0.6.25: decimal-feet display proxy for fill_span_in. Setting
+    # this goes through fill_span_in's update callback, so the auto
+    # fill_count recompute still fires.
+    fill_span_ft: FloatProperty(  # noqa: F821
+        name="Fill Length",
+        description="Fill length in feet (decimal). Example: 16.0 = 16'",
+        unit='NONE',
+        min=0.0,
+        soft_min=1.0,
+        soft_max=100.0,
+        precision=3,
+        get=_fill_span_ft_get,
+        set=_fill_span_ft_set,
+    )
     fill_count: IntProperty(  # noqa: F821
         name="Fill Count",
         description="Number of edge-to-edge duplicates to create",
@@ -549,6 +608,19 @@ class PraxovaSceneProps(bpy.types.PropertyGroup):
         min=12.0,
         soft_max=1200.0,  # 100 ft soft cap
         precision=2,
+    )
+    # v0.6.25: decimal-feet display proxy. See PraxovaWallProps'
+    # wall_length_ft for the same pattern on a per-wall basis.
+    wall_length_ft: FloatProperty(  # noqa: F821
+        name="Wall Length",
+        description="Wall length in feet (decimal). Example: 12.333 = 12' 4\"",
+        unit='NONE',
+        min=0.0,
+        soft_min=1.0,
+        soft_max=64.0,
+        precision=3,
+        get=_wall_length_ft_get,
+        set=_wall_length_ft_set,
     )
     wall_height_in: FloatProperty(  # noqa: F821
         name="Wall Height (in)",
