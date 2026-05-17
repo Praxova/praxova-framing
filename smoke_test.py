@@ -8,8 +8,8 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.25 RPC surface end-to-end (18 methods — unchanged
-from v0.6.2; v0.6.25 was a bug-fix + cosmetic cycle, no bridge schema
+Covers the full v0.6.30 RPC surface end-to-end (18 methods — unchanged
+from v0.6.2; v0.6.25 and v0.6.30 were bug-fix cycles, no bridge schema
 changes): ping (with addon_version and method_count assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
 duplication, edge-to-edge fill, wall framing with optional door/window
@@ -98,9 +98,13 @@ def run(host: str, port: int) -> int:
         # bug fix + cosmetic cycle (extending_wall finally honored;
         # ft display + carpenter readout; custom imperial icon);
         # method_count stays 18 (no bridge schema changes);
-        # addon_version 0.6.2 -> 0.6.25.
-        assert r["addon_version"] == "0.6.25", (
-            f"expected addon_version 0.6.25, got {r['addon_version']!r}"
+        # addon_version 0.6.2 -> 0.6.25. v0.6.30: cap-plate lap
+        # geometry fix at L-joint corners (caps were butt joints
+        # before; now lap mechanically per IRC R602.3.2); method
+        # count stays 18 (pure geometry fix, no schema change);
+        # addon_version 0.6.25 -> 0.6.30.
+        assert r["addon_version"] == "0.6.30", (
+            f"expected addon_version 0.6.30, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"

@@ -2,6 +2,28 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.6.30] — 2026-05-17
+
+### Fixed
+- **L-joint corner tie-in: cap plates now lap correctly.** Cap plate geometry was identical to the lower top plate at each joint end — both shortened inboard at ABUTTING ends, both full at MAIN ends — which meant corners were butt joints with no mechanical tie. The cap is now the INVERSE of the lower top at each joint end: at a MAIN end the cap is shortened INBOARD by the paired wall's wall thickness (leaving room for the abutting wall's cap to land on top); at an ABUTTING end the cap is extended OUTBOARD past the wall edge by the paired wall's wall thickness, geometrically landing on top of the MAIN wall's lower top plate at the corner cell. This is the standard residential lap per IRC R602.3.2.
+- **Asymmetric walls** (MAIN at one end, ABUTTING at the other — common on L-shaped floor plans) now produce a cap plate the same length as the wall but offset, with the cap reaching past the ABUTTING end and pulled inboard at the MAIN end. FREE ends (no joint) reach the wall edge unchanged, preserving v0.5 behavior for joint-less walls.
+
+### Added
+- **Two pure helpers in `templates.py`**: `lower_plate_end_offset(role, paired_t)` and `cap_plate_end_offset(role, paired_t)`. Deliberately inverse sign conventions — lower-plate offset is positive INBOARD (the plate gives way), cap-plate offset is positive OUTBOARD (the cap laps onto the paired wall). Module comment explains the inversion explicitly so the geometry is reasonable about without spelunking the operator. FREE role returns 0 for both, preserving v0.5 behavior.
+- **Dedicated cap stock-fit check** in the frame_wall operator. The cap can now exceed wall length (ABUTTING-at-both-ends extends each end by paired_t), and that can exceed the nominal's max stock — for example a 16' (192") 2x6 wall ABUTTING-both with 2x6 paired walls would need a 17' (203") cap that doesn't fit in 192" stock. The operator catches this via `select_stock_length_in` wrapped in try/except and reports a clear error pointing the user at the v0.7-splice deferral plus the immediate workaround (set `extending_wall='A'` or `'B'` explicitly on the affected joint to make the shorter wall MAIN, sidestepping the lap on the long wall). Lower plates keep using the v0.5 `plate_stock_in` sized for `length_in` since they only ever shrink at joint ends.
+- **Smoke test step `[28]`** queries `list_objects` after step `[27]`'s `frame_building` and asserts the lap geometry on both walls of the existing L corner: `wall_a` (ABUTTING at END) cap extends 3.5" past its wall edge to lap onto `wall_b`'s lower top plate; `wall_b` (MAIN at START) cap is pulled 3.5" inboard at its joint end. The `wall_a` cap at 99.5" is the regression sentinel — if v0.6.0's butt-joint cap geometry comes back, the cap drops to 92.5" and the step fails with a clear "v0.6.0 butt-joint geometry is back" message.
+
+### Changed
+- **Smoke test `addon_version` pin** "0.6.25" → "0.6.30". Method count stays at 18. Smoke test grows 30 → 31 steps; renumbered the three error-path steps to `[29]`/`[30]`/`[31]`.
+- **README** Status line "Beta (v0.6.25)" → "Beta (v0.6.30)". Joints section gains a cap-plate-lap paragraph documenting the new geometry + the stock ceiling for ABUTTING-at-both walls + the v0.7 splice deferral.
+
+### Known limitations
+- Walls that are ABUTTING-at-both-ends with length close to maximum stock will hit a stock ceiling: a 16' 2x6 wall's cap would need to be 17' (203") to lap, exceeding 16' max stock. Such corners now error with a clear message pointing to v0.7 splice support. Workaround: set `extending_wall='A'` or `'B'` explicitly to make the shorter wall MAIN, which avoids the lap on the long wall.
+
+### Bridge
+- Method count: 18 (unchanged)
+- `mcp_server` pkg version: 0.6.25 (unchanged — no schema or behavior change in the bridge surface; this is a pure geometry fix on the operator side)
+
 ## [0.6.25] — 2026-05-17
 
 ### Fixed
