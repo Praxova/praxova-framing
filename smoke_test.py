@@ -101,10 +101,13 @@ def run(host: str, port: int) -> int:
         # addon_version 0.6.2 -> 0.6.25. v0.6.30: cap-plate lap
         # geometry fix at L-joint corners (caps were butt joints
         # before; now lap mechanically per IRC R602.3.2); method
-        # count stays 18 (pure geometry fix, no schema change);
-        # addon_version 0.6.25 -> 0.6.30.
-        assert r["addon_version"] == "0.6.30", (
-            f"expected addon_version 0.6.30, got {r['addon_version']!r}"
+        # count stays 18; addon_version 0.6.25 -> 0.6.30. v0.6.31:
+        # cap-plate ABUTTING-end correction (don't extend past wall
+        # edge; lap happens inside the abutting wall's own footprint
+        # at y in [0, paired_t]); method count stays 18;
+        # addon_version 0.6.30 -> 0.6.31.
+        assert r["addon_version"] == "0.6.31", (
+            f"expected addon_version 0.6.31, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"

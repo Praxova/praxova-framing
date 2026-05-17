@@ -2,6 +2,23 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.6.31] — 2026-05-17
+
+### Fixed
+- **Cap plate no longer extends past the wall edge at ABUTTING ends.** The v0.6.30 fix correctly shortened the cap at MAIN ends but over-corrected at ABUTTING ends by extending the cap past the wall's nominal footprint by `paired_t`. That conflated two different edges: the wall's nominal edge and the lower top plate's actual edge at an ABUTTING end (where the lower top is shortened inboard by `paired_t`). The lap onto the main wall's lower top plate happens INSIDE the corner cell at `y ∈ [0, paired_t]` of the abutting wall's own footprint — which is exactly where the main wall's lower top plate sits in world space at the corner. No extension past the wall edge is needed.
+
+### Changed
+- **`templates.cap_plate_end_offset` ABUTTING branch returns 0** (was `+paired_t` in v0.6.30). MAIN (-paired_t) and FREE (0) branches unchanged. Module-level comment and function docstring rewritten to describe the corrected per-role table; the "deliberately inverse sign conventions" framing from v0.6.30 is gone since the cap no longer goes outboard anywhere.
+- **Smoke test step `[28]`** assertion for `wall_a` cap length: 99.5" → 96.0" (no extension past the ABUTTING end). `wall_b` MAIN-end assertions unchanged. Comment block + sentinel values updated: 99.5" now flags v0.6.30 over-extension regression; 92.5" still flags v0.6.0 butt-joint regression.
+- **Stock SKU on ABUTTING-end caps** drops accordingly — short walls' caps in the v0.6.30 cycle-brief test would have been 155" (14' stock); v0.6.31 makes them 144" (12' stock). The cut list auto-aggregates by cut length, so no separate cut-list code change.
+
+### Known limitations
+- The "ABUTTING-at-both-ends + max stock" edge case from v0.6.30 is no longer reachable through the corrected geometry — caps never exceed wall length under v0.6.31's rules. The defensive `select_stock_length_in` check on `cap_length` in `ops_frame.py` stays in place but is effectively dead code now. A future cleanup cycle can remove it once the new geometry has stayed stable for a release or two.
+
+### Bridge
+- Method count: 18 (unchanged)
+- `mcp_server` pkg version: 0.6.25 (unchanged — pure geometry fix on the operator side, no schema change)
+
 ## [0.6.30] — 2026-05-17
 
 ### Fixed

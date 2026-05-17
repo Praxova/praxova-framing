@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "praxova_framing"
-version = "0.6.30"
+version = "0.6.31"
 name = "Praxova Framing"
 tagline = "Tagged lumber, sheets, and metal panels with OC spacing, cut lists, and MCP bridge"
 maintainer = "Alton Lord <adlord@gmail.com>"

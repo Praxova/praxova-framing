@@ -14,7 +14,7 @@ external MCP server can drive the same operators from an LLM agent.
 # imported by server/handlers.py's ping() so the bridge doesn't carry its
 # own copy. blender_manifest.toml is the canonical version for Blender's
 # extension loader; the two must be bumped together each release.
-__version__ = "0.6.30"
+__version__ = "0.6.31"
 
 import os
 
