@@ -767,7 +767,14 @@ class PRAXOVA_UL_joints(bpy.types.UIList):
             wall_b_name = item.wall_b.name if item.wall_b else "?"
             type_label = {
                 'L_CORNER': "L corner",
+                'T_JOINT':  "T joint",
             }.get(item.joint_type, item.joint_type)
+            # v0.6.50: T joints carry a position along wall_a, not an
+            # end. Show it inline so the user can distinguish T joints
+            # at a glance without opening the detail panel. `g` format
+            # strips trailing zeros (96.0 -> "96", 96.5 -> "96.5").
+            if item.joint_type == 'T_JOINT':
+                type_label = f"{type_label} @{item.wall_a_position_in:g}\""
             corner_label = (
                 item.corner_style if item.corner_style != 'AUTO'
                 else "(default)"
@@ -781,7 +788,8 @@ class PRAXOVA_UL_joints(bpy.types.UIList):
             )
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'
-            layout.label(text="L")
+            # Single-character indicator: T for T_JOINT, L for L_CORNER.
+            layout.label(text="T" if item.joint_type == 'T_JOINT' else "L")
 
 
 def _walls_in_level(level):
@@ -903,40 +911,79 @@ class PRAXOVA_PT_building(bpy.types.Panel):
         col.operator("praxova.remove_joint", text="", icon='REMOVE')
 
         joints = level.praxova_level.joints
+        # v0.6.50: joint detail panel is joint_type-conditional. Fields
+        # common to both joint types (joint_type, wall_a, wall_b,
+        # wall_b_end, corner_style) appear unconditionally; per-type
+        # fields (wall_a's end vs position, extending_wall, resolved-
+        # MAIN readout) appear only for the type that uses them.
+        # Future joint types (in-line splice, etc.) extend by adding
+        # another elif branch below.
         if len(joints) > 0:
             j = joints[level.praxova_level.joints_active]
             detail = box.column(align=True)
             detail.prop(j, "joint_type")
             detail.prop(j, "wall_a")
-            detail.prop(j, "wall_a_end")
-            detail.prop(j, "wall_b")
-            detail.prop(j, "wall_b_end")
-            detail.prop(j, "corner_style")
-            detail.prop(j, "extending_wall")
 
-            # v0.6.25: live resolved-MAIN readout. Skip gracefully
-            # when wall_a / wall_b haven't been picked yet — a
-            # half-filled joint is fine in the UI, validate_joints
-            # surfaces it at frame time. resolve_extending_wall
-            # accepts Object refs and reads .praxova_wall.wall_length_in
-            # itself, so callers just need to pass the two walls.
-            if j.wall_a and j.wall_b:
-                resolved = templates.resolve_extending_wall(
-                    j, j.wall_a, j.wall_b,
-                )
-                resolved_name = (
-                    j.wall_a.name if resolved == 'A' else j.wall_b.name
-                )
-                sub = box.column(align=True)
+            # v0.6.50: wall_a's "end" only matters for L_CORNER (the
+            # joint is AT one end of wall_a). T_JOINT joints connect
+            # mid-wall on wall_a, so they expose a position along
+            # wall_a's length instead.
+            if j.joint_type == 'L_CORNER':
+                detail.prop(j, "wall_a_end")
+            else:  # 'T_JOINT'
+                detail.prop(j, "wall_a_position_in")
+                # Carpenter-format readout below the position field,
+                # matching the pattern used for wall_length_ft /
+                # fill_span_ft elsewhere. Position is stored in inches;
+                # show feet+inches for the builder's eye. scale_y < 1
+                # keeps the readout visually subordinate.
+                pos_in = j.wall_a_position_in
+                feet_whole = int(pos_in // 12)
+                inches_rem = pos_in - feet_whole * 12
+                sub = detail.column(align=True)
                 sub.scale_y = 0.7
                 sub.label(
-                    text=f"  → Resolved MAIN: {resolved_name}",
+                    text=f"  = {feet_whole}' {inches_rem:.1f}\"",
                     icon='INFO',
                 )
 
+            detail.prop(j, "wall_b")
+            detail.prop(j, "wall_b_end")
+            detail.prop(j, "corner_style")
+
+            # v0.6.50: extending_wall and the resolved-MAIN readout
+            # only apply to L_CORNER. T joints have a fixed through/
+            # abutting topology — wall_a is the through wall, wall_b
+            # is the abutting wall, no resolution step.
+            if j.joint_type == 'L_CORNER':
+                detail.prop(j, "extending_wall")
+
+                # v0.6.25: live resolved-MAIN readout. Skip gracefully
+                # when wall_a / wall_b haven't been picked yet — a
+                # half-filled joint is fine in the UI, validate_joints
+                # surfaces it at frame time. resolve_extending_wall
+                # accepts Object refs and reads
+                # .praxova_wall.wall_length_in itself, so callers
+                # just need to pass the two walls.
+                if j.wall_a and j.wall_b:
+                    resolved = templates.resolve_extending_wall(
+                        j, j.wall_a, j.wall_b,
+                    )
+                    resolved_name = (
+                        j.wall_a.name if resolved == 'A' else j.wall_b.name
+                    )
+                    sub = box.column(align=True)
+                    sub.scale_y = 0.7
+                    sub.label(
+                        text=f"  → Resolved MAIN: {resolved_name}",
+                        icon='INFO',
+                    )
+
             # Live validation indicator — same validator the operator
             # uses, so the user sees the same first-failure message
-            # they would get on clicking Frame Building.
+            # they would get on clicking Frame Building. validate_joints
+            # already understands T_JOINT (commit 2 added position-
+            # bounds and joint_type/corner_style compatibility checks).
             ok, msg = templates.validate_joints(joints, walls)
             if not ok:
                 box.label(text=msg, icon='ERROR')
