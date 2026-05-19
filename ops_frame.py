@@ -116,16 +116,14 @@ def _get_or_make_mesh(name: str, dims_inches: tuple[float, float, float]):
 # v0.6 joint resolution
 # ---------------------------------------------------------------------------
 
+# Per-end stud-related modifications. v0.6.40 narrowed this dict to
+# stud overrides and filler positions only — the per-end plate offsets
+# (bottom_off / lower_top_off / cap_off / cap_signed_offset) moved out
+# to the per-plate plate_ranges dict returned alongside, computed via
+# templates.plate_effective_range. The split mirrors the conceptual
+# divide: plates are per-plate (both ends combined into a range), and
+# studs are per-end (one filler per joint, one stud override per joint).
 _EMPTY_END_MODS = {
-    'bottom_off': 0.0,
-    'lower_top_off': 0.0,
-    'cap_off': 0.0,  # legacy: positive-inboard; unused for placement as of v0.6.30
-    # v0.6.30: signed cap-plate offset for the corner-lap geometry.
-    # Positive = outboard (cap extends past wall edge by this much,
-    # creating the lap). Negative = inboard (cap is shortened from
-    # wall edge by this much). FREE ends get 0 — matches v0.5
-    # behavior for joint-less walls.
-    'cap_signed_offset': 0.0,
     'end_stud_override': None,
     'filler_x': None,
     'joint_index': 0,
@@ -134,37 +132,45 @@ _EMPTY_END_MODS = {
 
 def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
     """Read joints on the active wall's parent Level (if any) and turn
-    them into per-end modifications the operator can apply.
+    them into per-end modifications + per-plate effective ranges.
 
     Only existing walls under a Level can have joints touching them.
     New walls (top-level or just-parented to a Level by frame_wall)
     aren't referenced by any Joint yet, so this returns empty context +
-    zero-offset mods for them — and the rest of execute() stays on the
-    v0.5 path.
+    no-op mods/ranges for them — and the rest of execute() stays on
+    the v0.5 path.
 
     Returns:
         joint_context: dict per templates.compute_wall_joint_context
         level_joints: list of joints from the parent Level (or empty)
         mods: dict with 'START' and 'END' entries, each carrying
-            bottom_off / lower_top_off / cap_off / end_stud_override /
-            filler_x / joint_index for that end. joint_index is the
-            1-based index in the Level's joints collection (0 if no
-            joint touches that end).
+            end_stud_override / filler_x / joint_index for that end.
+            joint_index is the 1-based index in the Level's joints
+            collection (0 if no joint touches that end).
+        plate_ranges: dict with 'BOTTOM', 'LOWER_TOP', 'CAP' keys.
+            Each value is a (start_x, end_x) tuple in wall-local
+            coordinates from templates.plate_effective_range. For a
+            wall with no joints, all three are (0, length_in).
     """
     empty_ctx = {'START': None, 'END': None}
     mods = {
         'START': dict(_EMPTY_END_MODS),
         'END':   dict(_EMPTY_END_MODS),
     }
+    no_joint_ranges = {
+        'BOTTOM':    (0.0, length_in),
+        'LOWER_TOP': (0.0, length_in),
+        'CAP':       (0.0, length_in),
+    }
 
     if not is_existing_wall:
-        return empty_ctx, [], mods
+        return empty_ctx, [], mods, no_joint_ranges
 
     parent = active.parent
     if (parent is None
             or getattr(parent, 'praxova_level', None) is None
             or not parent.praxova_level.is_level):
-        return empty_ctx, [], mods
+        return empty_ctx, [], mods, no_joint_ranges
 
     level = parent
     level_joints = list(level.praxova_level.joints)
@@ -191,6 +197,9 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
         elif j.wall_b == active:
             joint_index_by_end[j.wall_b_end] = j_idx
 
+    # Walk both ends, populating the stud-related mods and capturing
+    # paired_t per end for the plate-range computation below.
+    paired_t_by_end: dict[str, float] = {'START': 0.0, 'END': 0.0}
     for end in ('START', 'END'):
         ctx = joint_context[end]
         if ctx is None:
@@ -198,41 +207,52 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
         # The paired wall's WALL thickness (LUMBER_TYPES[...][1], the
         # depth from interior to exterior face — 3.5" for 2x4) drives
         # corner geometry, NOT its stud thickness ([0]). This wall's
-        # OWN stud thickness (thickness_in, set above as
+        # OWN stud thickness (thickness_in, set in execute() as
         # LUMBER_TYPES[nominal][0]) is what the END-side overrides
         # need to offset by the stud's own x-extent.
         paired_wall = ctx['paired_wall']
         paired_nominal = paired_wall.praxova_wall.wall_nominal
         wt_other = templates.LUMBER_TYPES[paired_nominal][1]
+        paired_t_by_end[end] = wt_other
+
         geom = templates.l_corner_geometry(
             st_self=thickness_in,
             wt_other=wt_other,
             role=ctx['role'],
             end=end,
-            is_extending=ctx['is_extending'],
             wall_length_in=length_in,
         )
         mods[end] = {
-            'bottom_off': geom['bottom_plate_offset'],
-            'lower_top_off': geom['lower_top_plate_offset'],
-            'cap_off': geom['cap_plate_offset'],
-            # v0.6.30: signed cap offset for the corner-lap geometry.
-            # See templates.cap_plate_end_offset for sign convention.
-            # MAIN -> -wt_other (cap pulled inboard), ABUTTING ->
-            # +wt_other (cap extends out to lap onto MAIN's lower top
-            # plate at the corner cell). Replaces the old cap_off
-            # field for plate placement; cap_off is kept on mods for
-            # any v0.6.25 code path that still reads it during a
-            # cleanup cycle.
-            'cap_signed_offset': templates.cap_plate_end_offset(
-                ctx['role'], wt_other,
-            ),
             'end_stud_override': geom['end_stud_x_override'],
             'filler_x': geom['filler_stud_x'],
             'joint_index': joint_index_by_end[end],
         }
 
-    return joint_context, level_joints, mods
+    # v0.6.40: per-plate effective ranges via the canonical helper.
+    # Each plate's range encodes the v0.6.31 lap geometry: bottom and
+    # lower top shorten at ABUTTING ends (paired wall takes up that
+    # corner cell); cap shortens at MAIN ends (leaving room for the
+    # abutting wall's cap to lap onto the main's lower top); ABUTTING
+    # cap and FREE ends always reach the wall edge.
+    role_at_start = (
+        joint_context['START']['role'] if joint_context['START'] else None
+    )
+    role_at_end = (
+        joint_context['END']['role'] if joint_context['END'] else None
+    )
+    plate_ranges = {
+        plate_role: templates.plate_effective_range(
+            plate_role,
+            length_in,
+            role_at_start=role_at_start,
+            role_at_end=role_at_end,
+            paired_t_at_start=paired_t_by_end['START'],
+            paired_t_at_end=paired_t_by_end['END'],
+        )
+        for plate_role in ('BOTTOM', 'LOWER_TOP', 'CAP')
+    }
+
+    return joint_context, level_joints, mods, plate_ranges
 
 
 class PRAXOVA_OT_frame_wall(bpy.types.Operator):
@@ -345,10 +365,15 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             )
             return {'CANCELLED'}
 
-        # Stock selection. Plates take the full wall length; studs are
-        # cut down from the smallest stock that fits stud_length_in.
+        # Stud stock selection. Studs are cut down from the smallest
+        # stock that fits stud_length_in. Plate stock is no longer
+        # selected up-front (v0.6.40): the splice planner returns one
+        # or more cut pieces per plate, each with its own length and
+        # its own stock via select_stock_length_in inside the placement
+        # loop. A wall too tall for any single stud (stud_length_in
+        # exceeds the nominal's longest stock) still fails here — stud
+        # splicing isn't a v0.6.40 feature.
         try:
-            plate_stock_in = templates.select_stock_length_in(nominal, length_in)
             stud_stock_in = templates.select_stock_length_in(nominal, stud_length_in)
         except ValueError as e:
             self.report({'ERROR'}, str(e))
@@ -372,10 +397,13 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         # Only existing walls under a Level can have joints touching them
         # (a brand-new wall, even one parented to the Level by frame_wall
         # below, isn't referenced by any Joint yet). For everyone else
-        # the context is empty and mods carry all zeros — the rest of
-        # execute() behaves identically to v0.5.
-        joint_context, level_joints, mods = _resolve_joint_context(
-            active, is_existing_wall, length_in, thickness_in,
+        # the context is empty, mods carry no stud overrides, and
+        # plate_ranges defaults to (0, length_in) on all three plates —
+        # the rest of execute() behaves identically to v0.5.
+        joint_context, level_joints, mods, plate_ranges = (
+            _resolve_joint_context(
+                active, is_existing_wall, length_in, thickness_in,
+            )
         )
 
         # ------------------------------------------------------------------
@@ -417,14 +445,59 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
                 {obj.name for obj in context.scene.objects},
             )
 
-        plate_stock_ft = int(round(plate_stock_in / 12))
+        # Stud label (uniform across all studs in the wall — they
+        # share length and stock). Plate label is computed per piece
+        # inside the placement loops below (v0.6.40), since splice
+        # pieces can have different stock sizes.
         stud_stock_ft = int(round(stud_stock_in / 12))
-        plate_label = templates.lumber_cutlist_label(
-            nominal, plate_stock_ft, 'HORIZONTAL',
-        )
         stud_label = templates.lumber_cutlist_label(
             nominal, stud_stock_ft, 'VERTICAL',
         )
+
+        # ------------------------------------------------------------------
+        # v0.6.40: plate splice planning
+        # ------------------------------------------------------------------
+        # Plates exceeding max stock are split into pieces that butt-join
+        # over a full-height stud (end stud, OC stud, king, or interior
+        # corner filler — collected via collect_full_height_stud_centers,
+        # which knows the operator's stud / king / filler taxonomy and
+        # excludes jacks + cripples). The cap plate offsets ≥24" from
+        # the lower-top splice positions per IRC R602.3.2; the planner
+        # enforces this as a hard constraint and raises SpliceError if
+        # no eligible stud can satisfy the offset, surfacing it as a
+        # clean operator error.
+        max_stock_in = templates.max_stock_length_in(nominal)
+        filler_left_xs = [
+            x for x in (mods['START']['filler_x'], mods['END']['filler_x'])
+            if x is not None
+        ]
+        eligible_stud_centers = templates.collect_full_height_stud_centers(
+            oc_stud_left_xs=stud_xs_in,
+            opening_layouts=opening_layouts,
+            filler_left_xs=filler_left_xs,
+            stud_thickness_in=thickness_in,
+        )
+        try:
+            bot_pieces = templates.plan_plate_splice_pieces(
+                plate_ranges['BOTTOM'][0], plate_ranges['BOTTOM'][1],
+                eligible_stud_centers, max_stock_in,
+            )
+            lower_top_pieces = templates.plan_plate_splice_pieces(
+                plate_ranges['LOWER_TOP'][0], plate_ranges['LOWER_TOP'][1],
+                eligible_stud_centers, max_stock_in,
+            )
+            # Cap splices must offset >=24" from lower-top splices.
+            lower_top_splice_xs = tuple(
+                end for start, end in lower_top_pieces[:-1]
+            )
+            cap_pieces = templates.plan_plate_splice_pieces(
+                plate_ranges['CAP'][0], plate_ranges['CAP'][1],
+                eligible_stud_centers, max_stock_in,
+                excluded_splice_xs=lower_top_splice_xs,
+            )
+        except templates.SpliceError as e:
+            self.report({'ERROR'}, f"{wall_name}: {e}")
+            return {'CANCELLED'}
 
         # ------------------------------------------------------------------
         # Mesh creation (with reuse)
@@ -505,28 +578,47 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
 
         # Bottom plates stacked from z=0 upward.
         # v0.6: a joint at either end can shorten the bottom plate by
-        # the paired wall's stud thickness (ABUTTING walls only — MAIN
+        # the paired wall's wall thickness (ABUTTING walls only — MAIN
         # walls keep bottom + lower top plates at full length).
-        bot_x_start_in = mods['START']['bottom_off']
-        bot_length_in = length_in - bot_x_start_in - mods['END']['bottom_off']
-        bot_plate_dims = (bot_length_in, width_in, thickness_in)
-        bot_plate_mesh_name = (
-            f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(bot_length_in)}"
-        )
-        bot_plate_mesh = _get_or_make_mesh(bot_plate_mesh_name, bot_plate_dims)
+        # v0.6.40: range comes from plate_effective_range via
+        # _resolve_joint_context, and the plate may be split into
+        # multiple cut pieces by the splice planner (above). For walls
+        # that don't need splicing, bot_pieces is a single-element
+        # list and the inner loop runs once — the no-splice case is
+        # naming-preserving so smoke tests that look up
+        # f"{wall_name}_BottomPlate_NN" by name still pass.
+        n_bot_pieces = len(bot_pieces)
         for i in range(bottom_plate_count):
             z_m = i * thickness_in * INCH
-            obj = _make_framing_object(
-                context, bot_plate_mesh,
-                f"{wall_name}_BottomPlate_{i + 1:02d}",
-                (bot_x_start_in * INCH, 0.0, z_m),
-                nominal=nominal,
-                length_in=bot_length_in,
-                stock_in=plate_stock_in,
-                orientation='HORIZONTAL',
-                label=plate_label,
-            )
-            children.append(obj)
+            for piece_idx, (px_start, px_end) in enumerate(bot_pieces, start=1):
+                piece_length_in = px_end - px_start
+                piece_stock_in = templates.select_stock_length_in(
+                    nominal, piece_length_in,
+                )
+                piece_stock_ft = int(round(piece_stock_in / 12))
+                piece_label = templates.lumber_cutlist_label(
+                    nominal, piece_stock_ft, 'HORIZONTAL',
+                )
+                piece_mesh_name = (
+                    f"praxova_mesh_wall_plate_{nominal}_"
+                    f"{_fmt_inches(piece_length_in)}"
+                )
+                piece_mesh = _get_or_make_mesh(
+                    piece_mesh_name,
+                    (piece_length_in, width_in, thickness_in),
+                )
+                piece_suffix = "" if n_bot_pieces == 1 else f"_p{piece_idx}"
+                obj = _make_framing_object(
+                    context, piece_mesh,
+                    f"{wall_name}_BottomPlate_{i + 1:02d}{piece_suffix}",
+                    (px_start * INCH, 0.0, z_m),
+                    nominal=nominal,
+                    length_in=piece_length_in,
+                    stock_in=piece_stock_in,
+                    orientation='HORIZONTAL',
+                    label=piece_label,
+                )
+                children.append(obj)
 
         z_stud_base_m = bottom_plate_count * thickness_in * INCH
 
@@ -831,82 +923,54 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             children.append(obj)
 
         # Top plates stacked from (height - top_count * thickness) up.
-        # v0.6: lower top plate(s) reach in by lower_top_off at each
-        # joint end (matches bottom plate). v0.6.30: cap plate uses
-        # SIGNED cap_signed_offset — outboard at ABUTTING ends (cap
-        # extends past wall edge to lap onto the main wall's lower
-        # top plate at the corner cell) and inboard at MAIN ends
-        # (cap pulled back to leave room for the abutting wall's cap
-        # to land on top). cap_x_start can be NEGATIVE in local
-        # coordinates — that's the lap intruding into the paired
-        # wall's corner cell, which is correct.
+        # v0.6: lower top plate(s) shorten at ABUTTING ends (matching
+        # the bottom plate). v0.6.30/31: cap plate inverts — pulled
+        # INBOARD at MAIN ends to leave room for the abutting wall's
+        # cap to lap onto the main's lower top at the corner cell, and
+        # reaches the wall edge at ABUTTING ends (the lap happens
+        # INSIDE the abutting wall's own [0, paired_t] strip in world
+        # space). v0.6.40: ranges come from plate_effective_range; each
+        # plate may be split into multiple cut pieces by the splice
+        # planner (above). Lower top and cap can have different piece
+        # counts — they're planned independently, with the cap's plan
+        # offset ≥24" from the lower top's splice xs per IRC R602.3.2.
         z_top_base_m = (height_in - top_plate_count * thickness_in) * INCH
-        lower_x_start = mods['START']['lower_top_off']
-        lower_length = length_in - lower_x_start - mods['END']['lower_top_off']
-        cap_x_start = -mods['START']['cap_signed_offset']
-        cap_x_end = length_in + mods['END']['cap_signed_offset']
-        cap_length = cap_x_end - cap_x_start
-
-        # v0.6.30: separate stock check for the cap. The cap can be
-        # LONGER than the wall when both ends are ABUTTING (each end
-        # extends by paired_t). For a 16' (192") wall ABUTTING at
-        # both ends with 2x6 paired walls, the cap would need to be
-        # 203" — exceeds 2x6's max 192" stock. Splicing is v0.7+
-        # scope; surface a clear error here so the user knows the
-        # workaround (set extending_wall explicitly to make the
-        # shorter wall MAIN, sidestepping the lap on the long wall).
-        try:
-            cap_stock_in = templates.select_stock_length_in(
-                nominal, cap_length,
-            )
-        except ValueError:
-            max_stock_in = max(templates.LENGTHS_BY_TYPE[nominal]) * 12
-            self.report(
-                {'ERROR'},
-                f"{wall_name}: the cap plate would need to be "
-                f"{cap_length:g}\" to lap both corner ends, but the "
-                f"longest {nominal} stock is {int(max_stock_in)}\". "
-                "This corner requires plate splicing (planned for "
-                "v0.7). Workaround: set extending_wall='A' or 'B' "
-                "explicitly on the affected joint(s) to make the "
-                "shorter wall MAIN instead.",
-            )
-            return {'CANCELLED'}
-        cap_stock_ft = int(round(cap_stock_in / 12))
-        cap_label = templates.lumber_cutlist_label(
-            nominal, cap_stock_ft, 'HORIZONTAL',
-        )
-
-        lower_mesh = _get_or_make_mesh(
-            f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(lower_length)}",
-            (lower_length, width_in, thickness_in),
-        )
-        cap_mesh = _get_or_make_mesh(
-            f"praxova_mesh_wall_plate_{nominal}_{_fmt_inches(cap_length)}",
-            (cap_length, width_in, thickness_in),
-        )
+        n_lower_pieces = len(lower_top_pieces)
+        n_cap_pieces = len(cap_pieces)
         for i in range(top_plate_count):
             is_cap = (i == top_plate_count - 1)
             z_m = z_top_base_m + i * thickness_in * INCH
-            mesh = cap_mesh if is_cap else lower_mesh
-            x_start_in = cap_x_start if is_cap else lower_x_start
-            plate_length_in = cap_length if is_cap else lower_length
-            # Cap uses its own stock (may differ when length exceeds
-            # the wall-length stock); lower plates share the v0.5
-            # plate_stock_in sized for length_in.
-            stock_for_plate = cap_stock_in if is_cap else plate_stock_in
-            label_for_plate = cap_label if is_cap else plate_label
-            obj = _make_framing_object(
-                context, mesh,
-                f"{wall_name}_TopPlate_{i + 1:02d}",
-                (x_start_in * INCH, 0.0, z_m),
-                nominal=nominal,
-                length_in=plate_length_in,
-                stock_in=stock_for_plate,
-                orientation='HORIZONTAL',
-                label=label_for_plate,
-            )
-            children.append(obj)
+            pieces = cap_pieces if is_cap else lower_top_pieces
+            n_pieces = n_cap_pieces if is_cap else n_lower_pieces
+            for piece_idx, (px_start, px_end) in enumerate(pieces, start=1):
+                piece_length_in = px_end - px_start
+                piece_stock_in = templates.select_stock_length_in(
+                    nominal, piece_length_in,
+                )
+                piece_stock_ft = int(round(piece_stock_in / 12))
+                piece_label = templates.lumber_cutlist_label(
+                    nominal, piece_stock_ft, 'HORIZONTAL',
+                )
+                piece_mesh_name = (
+                    f"praxova_mesh_wall_plate_{nominal}_"
+                    f"{_fmt_inches(piece_length_in)}"
+                )
+                piece_mesh = _get_or_make_mesh(
+                    piece_mesh_name,
+                    (piece_length_in, width_in, thickness_in),
+                )
+                piece_suffix = "" if n_pieces == 1 else f"_p{piece_idx}"
+                obj = _make_framing_object(
+                    context, piece_mesh,
+                    f"{wall_name}_TopPlate_{i + 1:02d}{piece_suffix}",
+                    (px_start * INCH, 0.0, z_m),
+                    nominal=nominal,
+                    length_in=piece_length_in,
+                    stock_in=piece_stock_in,
+                    orientation='HORIZONTAL',
+                    label=piece_label,
+                )
+                children.append(obj)
 
         # ------------------------------------------------------------------
         # Parent everything to the Empty
@@ -935,12 +999,27 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             if n_openings
             else ""
         )
+        # v0.6.40: splice info. Total piece count exceeds plate stack
+        # count when any plate was spliced. n_splices is the count of
+        # splice joints (one per piece beyond the first, per stack
+        # level). Surface it so the user notices the splice without
+        # having to inspect the cut list.
+        n_splices = (
+            bottom_plate_count * (len(bot_pieces) - 1)
+            + (top_plate_count - 1) * (len(lower_top_pieces) - 1)
+            + (len(cap_pieces) - 1)
+        )
+        splice_suffix = (
+            f" ({n_splices} plate splice{'s' if n_splices != 1 else ''})"
+            if n_splices
+            else ""
+        )
         self.report(
             {'INFO'},
             f"Framed {wall_name}: {n_studs} studs "
             f"({nominal} x {_fmt_inches(stud_length_in)}\") + "
             f"{n_plates} plates ({nominal} x {_fmt_inches(length_in)}\")"
-            f"{opening_suffix}.",
+            f"{splice_suffix}{opening_suffix}.",
         )
         return {'FINISHED'}
 

@@ -2,6 +2,63 @@
 
 All notable changes to Praxova Framing are documented here. The project follows [Semantic Versioning](https://semver.org/) with the convention that pre-1.0 versions (0.x) are considered beta — APIs and data model may change between minor versions.
 
+## [0.6.41] — 2026-05-18
+
+### Added
+- **`splice_summary` field on `frame_wall` response.** Replaces the v0.4.1 `plate_stock_in` field, which is no longer meaningful for spliced walls (each piece has its own stock). Shape: `{n_splices: int, bottom: {pieces, splice_xs}, lower_top: {pieces, splice_xs}, cap: {pieces, splice_xs}}`. The `splice_xs` lists give the per-plate butt-joint x-coordinates in wall-local coordinates — so a caller can verify the IRC R602.3.2 24" cap-vs-lower-top offset held without re-running the planner. `n_splices` aggregates across stack-level instances: `bottom_splices * bottom_plate_count + lower_top_splices * (top_plate_count - 1) + cap_splices`.
+- **`splice_summary` field on each `frame_building` walls_framed entry.** Same shape as frame_wall's splice_summary — populated from the per-wall pre-flight (see below). Joint-aware: a wall framed under joint context that shortens its cap range (MAIN-at-END or MAIN-at-START with paired_t > 0) gets a splice plan computed against the reduced range.
+- **`_predict_wall_splice_plans` helper in `server/handlers.py`.** Private bridge helper that mirrors the operator's commit-3 splice pipeline (stud_positions → end-stud overrides → opening filter → eligible stud centers → plate_effective_range → plan_plate_splice_pieces × 3 with the cap's 24" exclusion list). Used by both `frame_wall` (Phase 8.5 pre-flight) and `frame_building` (per-wall pre-flight after `validate_joints`). Single source of truth via templates pure helpers — no risk of operator/bridge divergence.
+- **`_build_splice_summary` helper in `server/handlers.py`.** Formats the splice plan dict into the user-facing `splice_summary` shape.
+- **Splice pre-flight in `frame_wall` Phase 8.5.** Runs `_predict_wall_splice_plans` AFTER Phase 7's re-parenting (so REBUILD walls see their final parent Level's joint context) but BEFORE Phase 9's `bpy.ops.praxova.frame_wall` call. `templates.SpliceError` is caught and re-raised as `bridge.RPCError(INVALID_PARAMS, "{wall_name}: ...")` with the failing range and offset constraint inline — without this, the operator's `self.report({'ERROR'}, ...)` would be swallowed by `_check_op_result`'s generic CANCELLED translation, leaving the LLM with a useless "operator was cancelled" message.
+- **Per-wall splice pre-flight in `frame_building`.** After the existing `validate_joints` check, iterate every wall in the Level and run `_predict_wall_splice_plans`. First SpliceError surfaces as `INVALID_PARAMS` naming the offending wall — before the orchestrator touches anything. Plans are keyed by wall name and reused to build each walls_framed entry's splice_summary.
+- **Smoke test step `[32]`: 24' 2x6 standalone splice.** 288" × 108" 2x6 wall at 16 OC, no openings, no joints. Pins splice positions: `bottom.splice_xs == [192.0]`, `lower_top.splice_xs == [192.0]`, `cap.splice_xs == [160.0]` (offset rule binding — 192 ± 24 excludes the natural choice, planner shifts to 160). Pins `n_splices == 3`, each plate role has 2 pieces. Also verifies the `_pN` suffix appears on 6 plate-piece object names in `new_objects` (3 plate roles × 2 pieces each).
+- **Smoke test step `[33]`: 20' 2x4 standalone splice.** 240" × 108" 2x4 wall, same algorithm coverage at a different nominal + length. Confirms the planner generalizes — splice positions land at the same x-coords (192 / 192 / 160) since the algorithm is length-of-wall-independent for the first splice.
+- **Smoke test step `[34]`: splice in `frame_building` walls_framed.** 24' 2x6 wall_a + 96" 2x6 wall_b under a fresh Building/Level, joined at wall_a's END to wall_b's START with AUTO extending (longer wall is MAIN, so wall_a is MAIN). Verifies per-wall splice_summary in the orchestrator response: wall_a has 3 splices with cap landing at 160 even though MAIN-at-END shortens the cap range to (0, 282.5); wall_b is under 192" so n_splices == 0. Pins that the joint-aware pre-flight feeds the splice planner the right plate ranges.
+- **README "In-line plate splices" section.** (Carried over from v0.6.40 — placeholder marker `v0.6.41` text removed, retroactively documents the now-shipped bridge surface.)
+
+### Changed
+- **`mcp_server` package version 0.6.25 → 0.6.41.** Description gains "in-line plate splices" in the feature list. `praxova_framing_mcp/server.py` docstrings updated: `frame_wall` "Stock vs cut length" paragraph mentions splice; Returns block replaces `stud_stock_in, plate_stock_in` with `stud_stock_in` only + a full `splice_summary` shape description; `new_objects` description mentions the `_pN` suffix on spliced plate piece names; Raises paragraph documents the new SpliceError → INVALID_PARAMS path. `frame_building` per-wall return gains `splice_summary` documentation; Raises paragraph documents per-wall splice failure surfacing.
+- **`frame_wall` response no longer carries `plate_stock_in`.** Existing v0.4.1 clients reading this field need to migrate to `splice_summary` (per-piece stocks land on each placed plate Object via the operator's commit-3 placement loop and surface in the cut list — the bridge response no longer needs a separate field). Pre-flight `select_stock_length_in(nominal, length_in)` in `frame_wall` Phase 3 is removed accordingly; `stud_stock_in` is still computed and returned.
+- **Smoke test `addon_version` pin 0.6.40 → 0.6.41.**
+- **Smoke test step `[9]` `plate_stock_in == 96.0` assertion replaced by `splice_summary` no-splice assertions.** A 48" wall is well under the 192" max stock, so all plates are single-piece. Also asserts `"plate_stock_in" not in r` to catch a regression that re-adds the dead field.
+- **Smoke test steps `[10]`, `[13]`, `[14]`, `[27]` gain minimal `splice_summary` checks** — `n_splices == 0` for all the existing pre-v0.6.41 walls, since none are long enough to splice. Confirms backward-compatible behavior on the splice path.
+
+### Notes
+- Method count stays at 18 — `frame_wall` and `frame_building` are extended, not added. The v0.6 bridge surface is now fully splice-aware.
+- Smoke test grows 31 → 34 steps.
+- Trade-off accepted: `_predict_wall_splice_plans` duplicates the operator's commit-3 splice planning logic in the bridge handler. Both paths call the same `templates.*` pure helpers under the hood, so behavioral divergence is bounded; if it becomes a maintenance burden a future cycle can factor out a shared higher-level helper in `templates.py`.
+
+## [0.6.40] — 2026-05-18
+
+### Added
+- **In-line plate splices** for walls whose plates exceed the longest available stock. The splice planner splits each affected plate into pieces that butt-join over a full-height stud — end studs, surviving OC studs, king studs, and THREE_STUD corner filler studs are all eligible (jacks and cripples are excluded as they don't provide a continuous load path). Splices are stud-snapped INBOARD from the ideal position when no stud lands exactly at the max-stock cutoff (matches field practice — accept a slightly short first piece rather than retrofit).
+- **Cap plate splice offset rule** per IRC R602.3.2. Cap plate splices must offset ≥24" from the nearest lower top plate splice. Enforced as a HARD constraint: when no eligible stud satisfies the offset, the operator reports a specific error (failing range + offset constraint) and cancels rather than placing a non-compliant splice.
+- **`templates.MAX_STOCK_LENGTH_IN = 192.0`** (16') and **`templates.TOP_PLATE_SPLICE_OFFSET_MIN_IN = 24.0`** as module-level constants. `templates.max_stock_length_in(nominal)` is a function indirection returning `min(MAX_STOCK_LENGTH_IN, per_nominal_max_in)` — capping at 16' as the conservative residential default while respecting per-nominal stock ceilings (e.g. 1x2 caps at 8').
+- **`templates.SpliceError`** exception (defined at module top for easy import) raised when a splice can't be placed.
+- **`templates.plate_effective_range(plate_role, wall_length_in, role_at_start, role_at_end, paired_t_at_start, paired_t_at_end)`** — canonical plate range helper. Returns `(start_x, end_x)` after joint modifications at both ends. Supersedes `lower_plate_end_offset` and `cap_plate_end_offset`.
+- **`templates.plan_plate_splice_pieces(...)`** — the splice algorithm. Returns list of `(start_x, end_x)` tuples, one per cut piece. Accepts an `excluded_splice_xs` argument so the cap can offset from lower top splices.
+- **`templates.collect_full_height_stud_centers(...)`** — gathers eligible stud anchors from OC studs, opening layouts (kings), and joint fillers; excludes jacks and cripples.
+- **`_pN` suffix on spliced plate piece names** — `BottomPlate_01_p1`, `BottomPlate_01_p2`, etc. Walls without splices keep single-piece naming for backward compatibility.
+- **README**: new "In-line plate splices" section between "Header sizing" and "Multi-wall coordination" documenting max stock, eligible anchors, the offset rule, stud snapping, naming, and cut-list integration.
+
+### Changed
+- **`templates.l_corner_geometry`** narrowed to stud-related geometry only. Plate offset fields (`bottom_plate_offset`, `lower_top_plate_offset`, `cap_plate_offset`) and the `is_extending` parameter were removed; the function now returns just `end_stud_x_override` and `filler_stud_x`. Plate ranges flow through `plate_effective_range` instead.
+- **`templates.compute_wall_joint_context`** drops the `is_extending` field from each per-end context dict. It was redundant with `role == 'MAIN'` under the v0.6.25 semantics and only fed `l_corner_geometry`'s removed cap_plate_offset branch.
+- **`ops_frame.py` `_resolve_joint_context`** now returns a 4-tuple including `plate_ranges` — a dict with `'BOTTOM'`, `'LOWER_TOP'`, `'CAP'` keys, each mapping to a `(start_x, end_x)` from `plate_effective_range`. Per-end `mods` shrinks to stud-only fields (`end_stud_override`, `filler_x`, `joint_index`).
+- **Plate placement in `frame_wall.execute()`** refactored to loop over splice pieces per stack level. Per-piece stock + cutlist label + mesh computed inside the loop via `select_stock_length_in` and `_get_or_make_mesh`.
+- **Pre-flight plate stock lookup removed** from the validation block. Spliced pieces compute their own stock per piece; studs still get the up-front `stud_stock_in` check (stud splicing isn't a v0.6.40 feature).
+- **Cap stock-fit error block removed** from the top plate section. Replaced by the SpliceError catch around the splice planner calls.
+- **Report message** gains a `(N plate splices)` suffix when any plate was spliced.
+
+### Removed
+- **`templates.lower_plate_end_offset`** and **`templates.cap_plate_end_offset`** — both superseded by `plate_effective_range`. Their inverse sign convention documentation (per v0.6.30's introduction) goes with them.
+- **`_EMPTY_END_MODS` fields** `bottom_off`, `lower_top_off`, `cap_off`, `cap_signed_offset` — replaced by per-plate ranges in the parallel `plate_ranges` dict.
+
+### Notes
+- Method count stays at 18. Bridge parity arrives in v0.6.41, including new smoke steps `[32]`/`[33]`/`[34]` that exercise the splice path through the MCP bridge.
+- mcp_server package version unchanged at 0.6.25.
+- Smoke test `addon_version` assertion bumped 0.6.31 → 0.6.40 (step `[1]` ping). All 31 existing smoke steps preserve their behavior — walls in those steps are ≤ 96" so no splice path is triggered.
+
 ## [0.6.31] — 2026-05-17
 
 ### Fixed

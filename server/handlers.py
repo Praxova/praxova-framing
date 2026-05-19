@@ -1342,6 +1342,225 @@ def remove_joint(params: dict) -> dict:
 # Composite framing (v0.4.1 bridge parity for v0.4 frame_wall operator)
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# v0.6.41 in-line splice pre-flight + summary builder
+# ---------------------------------------------------------------------------
+#
+# The operator's commit-3 splice integration catches SpliceError and emits
+# {'CANCELLED'} with a self.report({'ERROR'}, ...) message. _check_op_result
+# below turns CANCELLED into a generic APP_OPERATOR_FAILED error that
+# discards the operator's message — fine for an in-Blender user staring at
+# the info bar, but useless for an LLM agent that only sees the JSON-RPC
+# response. v0.6.41 pre-flights the splice planner here so SpliceError
+# surfaces as a clean INVALID_PARAMS with the specific failing range and
+# the offset constraint inline, matching the v0.5.1 validate_openings
+# pre-flight pattern (same single-source-of-truth via the templates
+# pure helpers — no divergence risk).
+#
+# _predict_wall_splice_plans mirrors the operator's pipeline:
+#   stud_positions → end_stud_override → opening_framing_layout →
+#   filter_studs_around_openings → collect_full_height_stud_centers →
+#   plate_effective_range → plan_plate_splice_pieces x3 (cap consumes
+#   lower-top splice xs as the 24" exclusion list).
+# It returns the same three-key dict the operator computes internally.
+# The bridge then formats it into the user-facing splice_summary via
+# _build_splice_summary.
+
+
+def _predict_wall_splice_plans(
+    *,
+    wall_target_obj,
+    length_in: float,
+    height_in: float,
+    nominal: str,
+    spacing_oc_in: float,
+    top_plate_count: int,
+    bottom_plate_count: int,
+    target_openings: list,
+) -> dict:
+    """Pre-flight splice planner for ONE wall. Mirrors frame_wall.execute().
+
+    For REBUILD walls (wall_target_obj is a Praxova wall Empty), joint
+    context is read from the wall's parent Level (if it's a Level with
+    joints touching this wall). For CREATE walls (wall_target_obj is
+    None), joint context is empty by definition — a not-yet-existing
+    wall isn't referenced by any joint.
+
+    Returns:
+        {'BOTTOM': pieces, 'LOWER_TOP': pieces, 'CAP': pieces} where
+        each value is a list of (start_x, end_x) tuples from
+        templates.plan_plate_splice_pieces. Single-piece plates
+        (wall fits in max stock) are a single-element list.
+
+    Raises:
+        templates.SpliceError: if any plate's splice can't be placed.
+            Caller turns this into a bridge.RPCError(INVALID_PARAMS).
+    """
+    thickness_in = templates.LUMBER_TYPES[nominal][0]
+    max_stock_in = templates.max_stock_length_in(nominal)
+
+    # Joint context (REBUILD with parent Level) or all-None defaults.
+    joint_context: dict = {'START': None, 'END': None}
+    paired_t_by_end: dict[str, float] = {'START': 0.0, 'END': 0.0}
+    end_stud_override_by_end: dict = {'START': None, 'END': None}
+    filler_left_xs: list[float] = []
+
+    if wall_target_obj is not None:
+        parent = wall_target_obj.parent
+        if (parent is not None
+                and getattr(parent, 'praxova_level', None) is not None
+                and parent.praxova_level.is_level):
+            level_joints = list(parent.praxova_level.joints)
+            building_default = 'THREE_STUD'
+            grand = parent.parent
+            if (grand is not None
+                    and getattr(grand, 'praxova_building', None) is not None
+                    and grand.praxova_building.is_building):
+                building_default = (
+                    grand.praxova_building.default_corner_style
+                )
+            joint_context = templates.compute_wall_joint_context(
+                wall_target_obj, level_joints, building_default,
+            )
+            for end in ('START', 'END'):
+                ctx = joint_context[end]
+                if ctx is None:
+                    continue
+                paired_wall = ctx['paired_wall']
+                paired_nominal = paired_wall.praxova_wall.wall_nominal
+                wt_other = templates.LUMBER_TYPES[paired_nominal][1]
+                paired_t_by_end[end] = wt_other
+                geom = templates.l_corner_geometry(
+                    st_self=thickness_in,
+                    wt_other=wt_other,
+                    role=ctx['role'],
+                    end=end,
+                    wall_length_in=length_in,
+                )
+                end_stud_override_by_end[end] = (
+                    geom['end_stud_x_override']
+                )
+                if geom['filler_stud_x'] is not None:
+                    filler_left_xs.append(geom['filler_stud_x'])
+
+    # OC studs with end-stud overrides applied (mirrors ops_frame.py).
+    oc_stud_xs = templates.stud_positions(
+        length_in, spacing_oc_in, thickness_in,
+    )
+    if end_stud_override_by_end['START'] is not None:
+        oc_stud_xs[0] = end_stud_override_by_end['START']
+    if end_stud_override_by_end['END'] is not None:
+        oc_stud_xs[-1] = end_stud_override_by_end['END']
+
+    # Opening layouts + filter studs around openings.
+    opening_layouts = [
+        templates.opening_framing_layout(
+            item, nominal, height_in,
+            top_plate_count, bottom_plate_count,
+        )
+        for item in target_openings
+    ]
+    if target_openings:
+        oc_stud_xs = templates.filter_studs_around_openings(
+            oc_stud_xs, thickness_in, target_openings, opening_layouts,
+        )
+
+    eligible_stud_centers = templates.collect_full_height_stud_centers(
+        oc_stud_left_xs=oc_stud_xs,
+        opening_layouts=opening_layouts,
+        filler_left_xs=filler_left_xs,
+        stud_thickness_in=thickness_in,
+    )
+
+    role_at_start = (
+        joint_context['START']['role'] if joint_context['START'] else None
+    )
+    role_at_end = (
+        joint_context['END']['role'] if joint_context['END'] else None
+    )
+    plate_ranges = {
+        role: templates.plate_effective_range(
+            role, length_in,
+            role_at_start=role_at_start,
+            role_at_end=role_at_end,
+            paired_t_at_start=paired_t_by_end['START'],
+            paired_t_at_end=paired_t_by_end['END'],
+        )
+        for role in ('BOTTOM', 'LOWER_TOP', 'CAP')
+    }
+
+    # Splice plans. Cap consumes lower-top splice xs as the 24"
+    # exclusion list (IRC R602.3.2). SpliceError propagates up.
+    bot_pieces = templates.plan_plate_splice_pieces(
+        plate_ranges['BOTTOM'][0], plate_ranges['BOTTOM'][1],
+        eligible_stud_centers, max_stock_in,
+    )
+    lower_top_pieces = templates.plan_plate_splice_pieces(
+        plate_ranges['LOWER_TOP'][0], plate_ranges['LOWER_TOP'][1],
+        eligible_stud_centers, max_stock_in,
+    )
+    lower_top_splice_xs = tuple(
+        end for start, end in lower_top_pieces[:-1]
+    )
+    cap_pieces = templates.plan_plate_splice_pieces(
+        plate_ranges['CAP'][0], plate_ranges['CAP'][1],
+        eligible_stud_centers, max_stock_in,
+        excluded_splice_xs=lower_top_splice_xs,
+    )
+
+    return {
+        'BOTTOM': bot_pieces,
+        'LOWER_TOP': lower_top_pieces,
+        'CAP': cap_pieces,
+    }
+
+
+def _build_splice_summary(
+    splice_plans: dict,
+    bottom_plate_count: int,
+    top_plate_count: int,
+) -> dict:
+    """Format splice_plans into the v0.6.41 frame_wall response shape.
+
+    splice_xs are the per-plate butt-joint positions (one per piece
+    beyond the first). n_splices counts every stack-level instance:
+    bottom plate splices * bottom_plate_count
+    + lower top plate splices * (top_plate_count - 1)
+    + cap plate splices (the cap is one plate, the topmost in the
+    stack). For default counts (1 bottom plate, 2 top plates) this
+    equals bottom + lower_top + cap splice counts.
+    """
+    bot = splice_plans['BOTTOM']
+    lt = splice_plans['LOWER_TOP']
+    cap = splice_plans['CAP']
+
+    bot_splice_xs = [end for start, end in bot[:-1]]
+    lt_splice_xs = [end for start, end in lt[:-1]]
+    cap_splice_xs = [end for start, end in cap[:-1]]
+
+    n_splices = (
+        len(bot_splice_xs) * bottom_plate_count
+        + len(lt_splice_xs) * (top_plate_count - 1)
+        + len(cap_splice_xs)
+    )
+
+    return {
+        "n_splices": n_splices,
+        "bottom": {
+            "pieces": len(bot),
+            "splice_xs": bot_splice_xs,
+        },
+        "lower_top": {
+            "pieces": len(lt),
+            "splice_xs": lt_splice_xs,
+        },
+        "cap": {
+            "pieces": len(cap),
+            "splice_xs": cap_splice_xs,
+        },
+    }
+
+
 def frame_wall(params: dict) -> dict:
     """Frame a wall — CREATE a new one or REBUILD an existing one in place.
 
@@ -1407,13 +1626,38 @@ def frame_wall(params: dict) -> dict:
     stud length > 0, stock fits, openings within wall, etc.).
 
     Returns (in addition to the v0.5.1 fields wall_name, n_studs,
-    n_plates, stud_length_in, stud_stock_in, plate_stock_in,
-    n_openings, openings_summary, new_objects, plus the input echoes):
+    n_plates, stud_length_in, stud_stock_in, n_openings,
+    openings_summary, new_objects, plus the input echoes):
         wall_target_used (bool): True for REBUILD, False for CREATE.
         level_name (str | None): the wall's parent Level Empty name,
             None for top-level walls.
         rotation_deg_z (float): the wall Empty's Z rotation in degrees
             after the call.
+        splice_summary (dict, v0.6.41): per-plate splice details.
+            Replaces the v0.4.1 plate_stock_in field (each plate may
+            now be multiple cut pieces with different stocks, so a
+            single plate_stock_in field is no longer meaningful).
+            Shape:
+              n_splices (int): total splice joint count across all
+                placed plates. Equal to bottom_splices *
+                bottom_plate_count + lower_top_splices *
+                (top_plate_count - 1) + cap_splices.
+              bottom, lower_top, cap (dict): per-plate-type detail:
+                pieces (int): number of cut pieces this plate role
+                  is divided into. 1 means no splice; 2+ means
+                  spliced (one fewer splice joint than pieces).
+                splice_xs (list[float]): butt-joint x-coordinates in
+                  wall-local coords, in order from x=0 to wall_end.
+                  Empty when pieces == 1. Cap splice_xs always
+                  offset >= 24" from lower_top splice_xs per IRC
+                  R602.3.2 (enforced as a hard constraint — a wall
+                  whose stud layout can't satisfy the offset returns
+                  INVALID_PARAMS with a specific message rather than
+                  framing).
+
+    Splice failures (SpliceError raised by the pre-flight) surface
+    as INVALID_PARAMS with a "{wall_name}: ..." prefix and the
+    failing range + offset constraint inline.
     """
     # ------------------------------------------------------------------
     # Phase 1: meta-args resolution (level / wall_target / rotation)
@@ -1558,12 +1802,16 @@ def frame_wall(params: dict) -> dict:
         )
 
     try:
-        plate_stock_in = templates.select_stock_length_in(nominal, length_in)
         stud_stock_in = templates.select_stock_length_in(
             nominal, stud_length_in,
         )
     except ValueError as e:
         raise bridge.RPCError(bridge.INVALID_PARAMS, str(e))
+    # NOTE (v0.6.41): plate_stock_in lookup removed — spliced plates
+    # have per-piece stocks that vary by cut length, so a single
+    # plate_stock_in is meaningless. The actual splice plan is
+    # computed in Phase 8.5 below; per-piece stocks land on each
+    # placed plate Object via the operator's commit-3 placement loop.
 
     # ------------------------------------------------------------------
     # Phase 4: openings parse (per-dict validation, default-fill)
@@ -1697,6 +1945,42 @@ def frame_wall(params: dict) -> dict:
         bpy.context.view_layer.objects.active = None
 
     # ------------------------------------------------------------------
+    # Phase 8.5: splice pre-flight (v0.6.41)
+    # ------------------------------------------------------------------
+    # Computed AFTER Phase 7's re-parenting so REBUILD walls see their
+    # final parent Level's joint context. For CREATE, wall_target_obj
+    # is None and the pre-flight skips joint reads. SpliceError gets
+    # converted to a clean INVALID_PARAMS so the LLM client sees the
+    # specific failing range and offset constraint inline — the
+    # operator's commit-3 self.report on the same SpliceError would
+    # otherwise be swallowed by _check_op_result's generic CANCELLED
+    # translation. The plans computed here are the same ones the
+    # operator computes in Phase 9, so Phase 11's splice_summary is
+    # built from them rather than re-deriving from placed Objects.
+    # target_openings is set by Phase 6 to the post-writethrough list
+    # (wp.wall_openings for REBUILD, sp.wall_openings for CREATE) so
+    # we read the same data the operator will.
+    try:
+        splice_plans = _predict_wall_splice_plans(
+            wall_target_obj=wall_target_obj if is_rebuild else None,
+            length_in=length_in,
+            height_in=height_in,
+            nominal=nominal,
+            spacing_oc_in=spacing_oc_in,
+            top_plate_count=top_plate_count,
+            bottom_plate_count=bottom_plate_count,
+            target_openings=target_openings,
+        )
+    except templates.SpliceError as e:
+        wall_name_hint = (
+            wall_target_obj.name if wall_target_obj is not None
+            else "(new wall)"
+        )
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS, f"{wall_name_hint}: {e}",
+        )
+
+    # ------------------------------------------------------------------
     # Phase 9: run the op
     # ------------------------------------------------------------------
     before = {o.name for o in scene.objects}
@@ -1800,7 +2084,13 @@ def frame_wall(params: dict) -> dict:
         "n_plates": n_plates,
         "stud_length_in": stud_length_in,
         "stud_stock_in": stud_stock_in,
-        "plate_stock_in": plate_stock_in,
+        # v0.6.41: plate_stock_in replaced by splice_summary. Each
+        # plate is potentially multiple cut pieces with different
+        # stocks, so a single plate_stock_in field doesn't represent
+        # what was actually placed.
+        "splice_summary": _build_splice_summary(
+            splice_plans, bottom_plate_count, top_plate_count,
+        ),
         "n_openings": len(target_openings),
         "openings_summary": openings_summary,
         "new_objects": new_names,
@@ -1837,6 +2127,14 @@ def frame_building(params: dict) -> dict:
     Then sets scene.praxova_framing.active_level so the UI op's
     invariants hold, and invokes bpy.ops.praxova.frame_building.
 
+    v0.6.41 additionally pre-flights each wall's splice plan (via
+    _predict_wall_splice_plans), surfacing SpliceError as a clean
+    INVALID_PARAMS with a "{wall_name}: ..." prefix BEFORE the
+    orchestrator runs. Without this, a SpliceError mid-orchestration
+    would surface as a generic CANCELLED that doesn't tell the LLM
+    which wall failed or why. The pre-computed plans then feed each
+    wall's splice_summary in the walls_framed response.
+
     Required:
         level_name (str): name of the Praxova Level Empty.
 
@@ -1865,6 +2163,10 @@ def frame_building(params: dict) -> dict:
                 slot). Always non-empty for walls that got corner
                 fillers; can be empty for walls that have no joints
                 touching them at all.
+              splice_summary (v0.6.41): same shape as frame_wall's
+                splice_summary field — n_splices total, plus per-
+                plate {pieces, splice_xs} for bottom / lower_top /
+                cap. See frame_wall docstring for details.
     """
     level_name = _require(params, "level_name", str)
     level = _resolve_level(level_name)
@@ -1891,6 +2193,33 @@ def frame_building(params: dict) -> dict:
     )
     if not ok:
         raise bridge.RPCError(bridge.INVALID_PARAMS, msg)
+
+    # v0.6.41: per-wall splice pre-flight. Same single-source-of-
+    # truth pattern as the joint validator above — _predict_wall_
+    # splice_plans mirrors the per-wall splice planning the orches-
+    # trator will do, catching SpliceError BEFORE any wall is touched
+    # rather than discovering it mid-orchestration via a generic
+    # CANCELLED. The plans are keyed by wall name so Phase 4's per-
+    # wall response builder can format each into a splice_summary
+    # without re-running the planner.
+    splice_plans_by_wall: dict = {}
+    for wall in walls:
+        wp = wall.praxova_wall
+        try:
+            splice_plans_by_wall[wall.name] = _predict_wall_splice_plans(
+                wall_target_obj=wall,
+                length_in=float(wp.wall_length_in),
+                height_in=float(wp.wall_height_in),
+                nominal=wp.wall_nominal,
+                spacing_oc_in=float(wp.wall_spacing_oc_in),
+                top_plate_count=int(wp.wall_top_plate_count),
+                bottom_plate_count=int(wp.wall_bottom_plate_count),
+                target_openings=list(wp.wall_openings),
+            )
+        except templates.SpliceError as e:
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS, f"{wall.name}: {e}",
+            )
 
     scene = bpy.context.scene
     sp = scene.praxova_framing
@@ -1959,6 +2288,14 @@ def frame_building(params: dict) -> dict:
             "n_studs": n_studs,
             "n_corner_fillers": n_corner_fillers,
             "joint_indices_touching": joint_indices_touching,
+            # v0.6.41: per-wall splice details from pre-flight. Same
+            # shape as frame_wall's splice_summary field — see that
+            # docstring for the field-by-field rundown.
+            "splice_summary": _build_splice_summary(
+                splice_plans_by_wall[wall.name],
+                int(wp.wall_bottom_plate_count),
+                int(wp.wall_top_plate_count),
+            ),
         })
 
     return {

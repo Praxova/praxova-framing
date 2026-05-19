@@ -10,6 +10,23 @@ import bpy
 INCH = 0.0254
 
 
+# Module-level exception. Lives at the top rather than next to its single
+# raise site (plan_plate_splice_pieces, v0.6.40) so it's discoverable from
+# any importer that catches it — chiefly the frame_wall operator and the
+# MCP bridge handler, neither of which import the splice helpers section
+# directly.
+class SpliceError(Exception):
+    """A plate's effective range exceeds max stock but no full-height
+    stud is positioned to support a code-compliant in-line splice.
+
+    Caught by frame_wall (v0.6.40+) and surfaced via
+    self.report({'ERROR'}, ...); caught by the MCP bridge handler and
+    converted to INVALID_PARAMS. The message is user-facing — it
+    identifies the failing plate range and whether the
+    cap-vs-lower-top 24" offset rule (IRC R602.3.2) was binding.
+    """
+
+
 # ===========================================================================
 # Lumber
 # ===========================================================================
@@ -687,8 +704,10 @@ def redistribute_openings_evenly(openings, wall_length_in: float) -> None:
 #                  and its end stud is moved inboard so it lands flush
 #                  with the shortened plates.
 #   "extending"    synonym for MAIN under the v0.6.25 semantics. The
-#                  is_extending flag on context entries is True iff
-#                  role == 'MAIN'.
+#                  is_extending flag carried on context entries through
+#                  v0.6.31 was redundant with role=='MAIN' and was
+#                  removed in v0.6.40 along with the per-end plate
+#                  offset helpers it served.
 
 
 def resolve_extending_wall(joint, wall_a, wall_b) -> str:
@@ -740,88 +759,88 @@ def resolve_corner_style(joint, building_default: str) -> str:
     return joint.corner_style
 
 
-# ---------------------------------------------------------------------------
-# Per-end plate offsets (v0.6.30 cap-plate lap, corrected in v0.6.31)
-# ---------------------------------------------------------------------------
+# v0.6.40: canonical plate-range helper.
 #
-# Two helpers cover the plate-end geometry at L corners — one for the
-# lower plate stack (bottom + lower top), one for the cap plate.
-# Neither plate physically extends past the wall's nominal footprint;
-# the lap happens INSIDE the corner cell (y in [0, paired_t] of the
-# abutting wall's own footprint, which is exactly where the main
-# wall's lower top plate sits in world space).
+# Returns the (start_x, end_x) of a plate after joint modifications at
+# both ends, in the wall's local frame (x = 0 at the wall's START edge,
+# x = wall_length_in at the END edge). Supersedes lower_plate_end_offset
+# and cap_plate_end_offset for callers that want the actual plate
+# coordinates rather than signed-offset deltas — chiefly the v0.6.40
+# splice planner, which needs to know the range to fit cut pieces into.
 #
-# Per-role table:
+# Encodes the same per-role behavior the offset helpers express, but as
+# coordinates rather than offsets:
 #
-#   end role  | lower plate (bottom + lower top)    | cap plate
-#   ----------|-------------------------------------|---------------------
-#   MAIN      | reaches wall edge (offset 0)        | shortened INBOARD
-#             |                                     |   by paired_t
-#   ABUTTING  | shortened INBOARD by paired_t       | reaches wall edge
-#             |                                     |   (offset 0)
-#   FREE      | reaches wall edge (offset 0)        | reaches wall edge
+#   plate_role  | role at end | resulting end coord
+#   ------------|-------------|------------------------------------------
+#   BOTTOM      | MAIN/FREE   | wall edge (0 or length_in)
+#   BOTTOM      | ABUTTING    | shortened by paired_t
+#   LOWER_TOP   | MAIN/FREE   | wall edge
+#   LOWER_TOP   | ABUTTING    | shortened by paired_t
+#   CAP         | MAIN        | shortened by paired_t  (inboard, leaves
+#                             |                         room for lap)
+#   CAP         | ABUTTING    | wall edge              (lap happens
+#                             |                         INSIDE this wall
+#                             |                         at y ∈ [0, paired_t])
+#   CAP         | FREE        | wall edge
 #
-# At MAIN ends the cap retreats inboard so the abutting wall's cap
-# can land in the corner cell on top of the main wall's lower top.
-# At ABUTTING ends the cap reaches the wall edge — its [0, paired_t]
-# strip lands directly above the main wall's lower top plate at the
-# corner cell, creating the lap inside the building footprint.
-#
-# v0.6.30 had the ABUTTING cap returning +paired_t (extending the cap
-# past the wall edge into nothing), confusing the wall's nominal
-# footprint with the lower top plate's actual edge — those two are
-# different by paired_t at an ABUTTING end. v0.6.31 returns 0 there
-# and the lap still works because it happens inside the wall's own
-# footprint, not outside it.
-#
-# Sign convention for cap_plate_end_offset: negative = inboard
-# (cap is shortened from the wall edge by this much). Positive
-# values aren't currently produced — the helper never returns a
-# value that would push the cap outboard.
+# Both role_at_* params accept 'MAIN', 'ABUTTING', or None (no joint at
+# that end). paired_t_at_* is the paired wall's wall thickness
+# (LUMBER_TYPES[paired_nominal][1]) — ignored when the corresponding
+# role is None, so the caller can pass 0.0 there.
 
 
-def lower_plate_end_offset(role: str, paired_t: float) -> float:
-    """Inboard offset (positive into the wall) for bottom + lower top
-    plates at one end of a wall.
+def plate_effective_range(
+    plate_role: str,
+    wall_length_in: float,
+    role_at_start: str | None,
+    role_at_end: str | None,
+    paired_t_at_start: float,
+    paired_t_at_end: float,
+) -> tuple[float, float]:
+    """Return (start_x, end_x) of a plate in the wall's local frame.
 
-    Returns paired_t when role == 'ABUTTING' (the abutting wall's
-    plates get out of the way of the main wall's corner cell), else
-    0 (MAIN and FREE both reach the wall edge unchanged).
+    Args:
+        plate_role: 'BOTTOM' | 'LOWER_TOP' | 'CAP'.
+        wall_length_in: this wall's length in inches.
+        role_at_start: 'MAIN' | 'ABUTTING' | None (no joint at START).
+        role_at_end:   'MAIN' | 'ABUTTING' | None (no joint at END).
+        paired_t_at_start: paired wall's wall thickness at START in
+            inches (ignored when role_at_start is None — pass 0.0).
+        paired_t_at_end: paired wall's wall thickness at END in inches
+            (ignored when role_at_end is None — pass 0.0).
+
+    Returns:
+        (start_x, end_x) in inches. Always satisfies
+        0 <= start_x < end_x <= wall_length_in under v0.6.31 geometry —
+        no plate extends past the wall's nominal footprint.
+
+    Raises:
+        ValueError: if plate_role isn't one of the three valid values.
     """
-    return paired_t if role == 'ABUTTING' else 0.0
+    if plate_role not in ('BOTTOM', 'LOWER_TOP', 'CAP'):
+        raise ValueError(
+            f"plate_role must be 'BOTTOM', 'LOWER_TOP', or 'CAP'; "
+            f"got {plate_role!r}"
+        )
 
+    start_x = 0.0
+    end_x = wall_length_in
 
-def cap_plate_end_offset(role: str, paired_t: float) -> float:
-    """Signed offset for the cap plate end.
+    # START end
+    if role_at_start == 'ABUTTING' and plate_role in ('BOTTOM', 'LOWER_TOP'):
+        start_x = paired_t_at_start
+    elif role_at_start == 'MAIN' and plate_role == 'CAP':
+        start_x = paired_t_at_start
+    # All other combos at START leave start_x at 0.0.
 
-    Negative = inboard (cap is shortened from the wall edge by this much).
-    Zero     = no offset (cap reaches the wall edge — the typical case
-               for ABUTTING and FREE ends).
+    # END end (mirror)
+    if role_at_end == 'ABUTTING' and plate_role in ('BOTTOM', 'LOWER_TOP'):
+        end_x = wall_length_in - paired_t_at_end
+    elif role_at_end == 'MAIN' and plate_role == 'CAP':
+        end_x = wall_length_in - paired_t_at_end
 
-    Mapping by role:
-        MAIN      -> -paired_t  (cap pulled inboard to make room for
-                                  the abutting wall's cap to lap into
-                                  the corner cell on top of the MAIN
-                                  wall's lower top plate)
-        ABUTTING  ->  0         (cap reaches the wall edge — the lap
-                                  happens INSIDE the abutting wall's
-                                  own footprint at y in [0, paired_t],
-                                  which is exactly where the MAIN
-                                  wall's lower top plate lives in
-                                  world space at the corner cell)
-        FREE      ->  0         (no joint, no lap)
-
-    v0.6.31 fix: ABUTTING returns 0, not +paired_t. The v0.6.30 value
-    extended the cap past the wall's nominal edge, conflating the
-    wall's footprint with the lower top plate's actual edge — those
-    two are different by paired_t at an ABUTTING end. See the
-    module-level comment for the corrected per-role table.
-    """
-    if role == 'MAIN':
-        return -paired_t
-    if role == 'ABUTTING':
-        return 0.0
-    return 0.0
+    return (start_x, end_x)
 
 
 def compute_wall_joint_context(
@@ -839,8 +858,6 @@ def compute_wall_joint_context(
         paired_wall:       Object (the other wall in the joint)
         paired_wall_end:   'START' | 'END' (which end of the paired wall)
         corner_style:      resolved style (no more AUTO)
-        is_extending:      bool — True if THIS wall's cap plate extends
-                           across the corner at THIS end
 
     Caller is expected to have validated `joints` via validate_joints
     first; this function silently skips joints with unset wall_a / wall_b
@@ -848,6 +865,11 @@ def compute_wall_joint_context(
     A wall with two joints at the same end (which validate_joints
     catches) would overwrite — but should be a validation failure
     long before this function is called from frame_wall.
+
+    v0.6.40 removed the 'is_extending' field — it was redundant with
+    role under the v0.6.25 "MAIN == extending" semantics, and the only
+    consumer (l_corner_geometry's cap_plate_offset branch) is gone now
+    that plate ranges flow through plate_effective_range.
     """
     context = {'START': None, 'END': None}
     for joint in joints:
@@ -880,11 +902,6 @@ def compute_wall_joint_context(
             joint, joint.wall_a, joint.wall_b,
         )
         role = 'MAIN' if extending == this_slot else 'ABUTTING'
-        # is_extending is redundant under v0.6.25's "MAIN == extending"
-        # model but kept for l_corner_geometry's existing
-        # cap_plate_offset branch (cap full-length on MAIN, shortened
-        # on ABUTTING).
-        is_extending = (role == 'MAIN')
 
         context[this_end] = {
             'joint_type': joint.joint_type,
@@ -894,7 +911,6 @@ def compute_wall_joint_context(
             'corner_style': resolve_corner_style(
                 joint, building_default_corner_style,
             ),
-            'is_extending': is_extending,
         }
     return context
 
@@ -904,15 +920,22 @@ def l_corner_geometry(
     wt_other: float,
     role: str,
     end: str,
-    is_extending: bool,
     wall_length_in: float,
 ) -> dict:
-    """Per-piece offsets for ONE wall at ONE end of an L joint.
+    """Per-end stud-related geometry for ONE wall at ONE end of an L joint.
 
     Two calls cover a wall with joints at both ends; the operator
-    combines the START and END offsets when laying out plates and
-    studs. For a wall with no joint at a given end, the caller skips
-    this function and uses v0.5 defaults.
+    combines the START and END results when laying out studs. For a
+    wall with no joint at a given end, the caller skips this function
+    and uses v0.5 defaults.
+
+    v0.6.40 narrowed this helper to stud-only: per-end plate offsets
+    moved out to plate_effective_range (which returns coordinate
+    ranges directly), and the is_extending parameter went with them.
+    What remains here is the end-stud reposition (ABUTTING walls move
+    inboard by wt_other so they land flush with their shortened
+    plates) and the interior corner filler stud position (MAIN walls
+    only, per THREE_STUD corner style).
 
     LUMBER_TYPES indices in v0.6.0 mixed stud thickness ([0]) with
     wall thickness ([1]) at joints — produced 1.5" lap on 2x4 corners
@@ -924,28 +947,20 @@ def l_corner_geometry(
 
     Args:
         st_self: this wall's stud thickness (LUMBER_TYPES[nominal][0],
-            1.5" for 2x4). Used only where the value represents the
-            stud's OWN x-extent — currently just the end stud x
-            override on the END side and the filler stud x on the END
-            side, where the stud's left edge is offset by its own
-            width from the right edge that lands at the corner.
+            1.5" for 2x4). Used where the value represents the stud's
+            OWN x-extent — the end stud x override on the END side
+            and the filler stud x on the END side, where the stud's
+            left edge is offset by its own width from the right edge
+            that lands at the corner.
         wt_other: the paired wall's wall thickness
             (LUMBER_TYPES[paired_nominal][1], 3.5" for 2x4). Used for
             "how much the other wall takes up at the corner" —
-            abutting plate shortening, cap plate shortening, end stud
-            reposition base, and filler stud position.
+            end stud reposition base and filler stud position.
         role: 'MAIN' or 'ABUTTING'.
         end: 'START' (joint at x=0) or 'END' (joint at x=wall_length_in).
-        is_extending: True if this wall's cap plate runs full-length
-            across the corner; False if the cap plate is shortened by
-            wt_other at this end.
         wall_length_in: this wall's length in inches.
 
     Returns:
-        bottom_plate_offset (in): cut off this much from the joint
-            end of the bottom plate. 0 for MAIN, wt_other for ABUTTING.
-        lower_top_plate_offset (in): same shape as bottom plate.
-        cap_plate_offset (in): 0 if this wall extends, else wt_other.
         end_stud_x_override (float | None): left-edge x-coord to use for
             this wall's end stud at the joint end. None means use v0.5
             default (flush with the wall end). ABUTTING walls move
@@ -959,19 +974,11 @@ def l_corner_geometry(
             wall's interior face on the START side.
     """
     out = {
-        'bottom_plate_offset': 0.0,
-        'lower_top_plate_offset': 0.0,
-        'cap_plate_offset': 0.0,
         'end_stud_x_override': None,
         'filler_stud_x': None,
     }
 
-    cap_offset = 0.0 if is_extending else wt_other
-
     if role == 'MAIN':
-        # Plates run full length at the joint end (bottom + lower top).
-        # Cap plate shortened only if MAIN does NOT extend.
-        out['cap_plate_offset'] = cap_offset
         # Filler stud one wt_other inboard from the wall end (interior
         # face aligned with the paired wall's interior face in world
         # space). The stud has its OWN width (st_self) on the inboard
@@ -981,11 +988,6 @@ def l_corner_geometry(
         else:  # 'START'
             out['filler_stud_x'] = wt_other
     else:  # 'ABUTTING'
-        # Plates shortened by wt_other at the joint end (bottom + lower
-        # top). Cap follows is_extending.
-        out['bottom_plate_offset'] = wt_other
-        out['lower_top_plate_offset'] = wt_other
-        out['cap_plate_offset'] = cap_offset
         # End stud repositioned to land flush with the shortened plates.
         # On END side the stud's own width (st_self) shifts the LEFT
         # edge inboard from the right edge that aligns with plate end.
@@ -1036,6 +1038,242 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
             used[key] = i
 
     return (True, "")
+
+
+# ===========================================================================
+# In-line plate splice helpers (v0.6.40)
+# ===========================================================================
+#
+# When a wall's plate length exceeds the longest available stock, the
+# plate is split into multiple pieces that butt-join over a full-height
+# stud (end stud, OC stud, king, or interior corner filler — NOT a jack
+# or cripple, which don't provide a continuous load path to the cap).
+#
+# Per IRC R602.3.2, a cap plate splice must be offset at least 24" from
+# any lower top plate splice. Enforced as a HARD constraint: if no valid
+# stud satisfies the offset, plan_plate_splice_pieces raises SpliceError
+# rather than falling back to a non-compliant splice. The user adjusts
+# wall length or stud layout so a valid splice exists.
+#
+# Stud-snapping: when the ideal splice position (cur + max_stock) lacks
+# a stud, the planner shifts INBOARD to the largest stud at or before
+# the ideal — i.e., the first piece is allowed to be shorter than max
+# stock so the splice lands on real framing. This matches what a
+# carpenter does in the field: accept a slightly short first piece
+# rather than retrofit an extra stud just to splice over.
+#
+# v0.6.40 caps max stock at 16' (192") across all nominals. Per-nominal
+# max stock tables and user-settable stock are deferred — the
+# max_stock_length_in() function indirection is in place to make those
+# additions a one-function patch.
+#
+# SpliceError is defined at module top (above the Lumber section) so
+# importers that catch it don't need to reach into this section.
+
+
+# Common max stock for residential lumber. 2x4 / 2x6 / 2x8 / 2x10 / 2x12
+# all top out here in typical big-box and yard inventories. 4x and 6x
+# stock is sometimes available in 20', but rarely for someone building
+# to residential code without a stamped supplier — capping at 16' is the
+# conservative default.
+MAX_STOCK_LENGTH_IN: float = 192.0
+
+# IRC R602.3.2: minimum offset between a cap plate splice and the
+# nearest lower top plate splice. Enforced as a hard constraint by
+# plan_plate_splice_pieces.
+TOP_PLATE_SPLICE_OFFSET_MIN_IN: float = 24.0
+
+
+def max_stock_length_in(nominal: str) -> float:
+    """Return the maximum stock length in inches for the given nominal.
+
+    Function indirection (rather than a bare constant lookup at call
+    sites) so future per-nominal tables or user-settable stock can be
+    added without changing every caller.
+
+    v0.6.40 returns min(MAX_STOCK_LENGTH_IN, max(LENGTHS_BY_TYPE[nominal])).
+    The min() floors at the per-nominal stock ceiling so nominals with
+    shorter max stock than 16' (e.g. 1x2 caps at 8') don't get a
+    splice plan that produces pieces beyond their available stock.
+    For nominals whose available stock exceeds 16' (4x and 6x stock
+    sometimes goes to 20'), MAX_STOCK_LENGTH_IN wins — capping at the
+    conservative residential default per the v0.6.40 design.
+
+    Args:
+        nominal: lumber size key (e.g. '2x4'). Must be in LUMBER_TYPES.
+
+    Returns:
+        Maximum stock length in inches that the splice planner will
+        assume is available for this nominal.
+
+    Raises:
+        ValueError: if `nominal` isn't in LUMBER_TYPES — surfaces typos
+            and stale tags rather than silently returning a default,
+            matching select_stock_length_in's posture above.
+    """
+    if nominal not in LUMBER_TYPES:
+        raise ValueError(f"Unknown nominal {nominal!r}")
+    per_nominal_max_in = max(LENGTHS_BY_TYPE[nominal]) * 12.0
+    return min(MAX_STOCK_LENGTH_IN, per_nominal_max_in)
+
+
+def plan_plate_splice_pieces(
+    plate_start_x: float,
+    plate_end_x: float,
+    stud_centers_eligible: list[float],
+    max_stock_in: float,
+    excluded_splice_xs: tuple[float, ...] = (),
+    offset_min_in: float = TOP_PLATE_SPLICE_OFFSET_MIN_IN,
+) -> list[tuple[float, float]]:
+    """Plan how to cut a plate into pieces that each fit within max stock.
+
+    Returns a list of (start_x, end_x) tuples in plate-local coordinates,
+    one per cut piece. For plates that fit in max stock the result is a
+    single-element list [(plate_start_x, plate_end_x)].
+
+    Splice algorithm: walk left to right, greedily placing each splice
+    at the LARGEST eligible stud center at or before
+    (current_start + max_stock). This minimizes the number of splices
+    and matches field practice — get the most lumber out of each stock
+    piece. When excluded_splice_xs is non-empty (the cap-plate case),
+    stud centers within offset_min_in of any excluded position are
+    filtered out before picking the largest — this enforces the IRC
+    R602.3.2 24" offset rule against the lower top plate's splices.
+
+    Args:
+        plate_start_x: left edge of the plate in wall-local coords.
+        plate_end_x: right edge of the plate in wall-local coords.
+            Must be > plate_start_x.
+        stud_centers_eligible: sorted unique list of x-coords of
+            full-height stud centers, in wall-local coords. Use
+            collect_full_height_stud_centers to build this from an
+            operator's stud / king / filler positions.
+        max_stock_in: maximum piece length in inches.
+            Use max_stock_length_in(nominal).
+        excluded_splice_xs: x-coords of splices in another plate that
+            this plate must not splice within offset_min_in of. Used
+            for the cap plate (pass lower top splices here); leave
+            empty for the lower top and bottom plates.
+        offset_min_in: minimum distance from any excluded splice.
+            Default TOP_PLATE_SPLICE_OFFSET_MIN_IN (24").
+
+    Returns:
+        List of (start_x, end_x) tuples, in order. Each piece's length
+        (end_x - start_x) is in (0, max_stock_in].
+
+    Raises:
+        SpliceError: if any required splice can't be placed — either no
+            stud center falls in the valid range, or all stud centers
+            in the range are excluded by the offset rule. The message
+            identifies the failing range and whether the offset rule
+            was binding.
+    """
+    L_eff = plate_end_x - plate_start_x
+    if L_eff <= max_stock_in:
+        return [(plate_start_x, plate_end_x)]
+
+    pieces: list[tuple[float, float]] = []
+    cur = plate_start_x
+
+    while plate_end_x - cur > max_stock_in:
+        ideal_max = cur + max_stock_in
+        # Studs strictly past cur (no zero-length piece) and at or
+        # before the ideal max (so the piece fits in max stock).
+        in_range = [
+            sc for sc in stud_centers_eligible
+            if cur < sc <= ideal_max
+        ]
+        if excluded_splice_xs:
+            candidates = [
+                sc for sc in in_range
+                if all(
+                    abs(sc - ex) >= offset_min_in
+                    for ex in excluded_splice_xs
+                )
+            ]
+        else:
+            candidates = in_range
+
+        if not candidates:
+            if excluded_splice_xs and in_range:
+                excluded_str = ", ".join(
+                    f"{x:.2f}\"" for x in excluded_splice_xs
+                )
+                offset_note = (
+                    f" while keeping >={offset_min_in:g}\" from lower "
+                    f"top plate splice(s) at {excluded_str}"
+                )
+            else:
+                offset_note = ""
+            raise SpliceError(
+                f"No eligible stud between x={cur:.2f}\" and "
+                f"x={ideal_max:.2f}\" to support a plate splice"
+                f"{offset_note}. Adjust wall length, stud layout, or "
+                f"opening positions so a full-height stud lands in "
+                f"this range."
+            )
+
+        splice_x = max(candidates)
+        pieces.append((cur, splice_x))
+        cur = splice_x
+
+    pieces.append((cur, plate_end_x))
+    return pieces
+
+
+def collect_full_height_stud_centers(
+    oc_stud_left_xs: list[float],
+    opening_layouts: list[dict],
+    filler_left_xs: list[float],
+    stud_thickness_in: float,
+) -> list[float]:
+    """Build the sorted unique list of full-height stud centers.
+
+    "Full-height" = end-to-end vertical load path from bottom plate to
+    cap plate, eligible to anchor an in-line plate splice. Includes:
+
+      - End studs and surviving OC studs (already in oc_stud_left_xs
+        after end_stud_override + filter_studs_around_openings)
+      - King studs from each opening (full-height by construction)
+      - Interior corner filler studs from MAIN-role joint ends
+
+    Excludes jacks (don't reach the top plates) and cripples (don't
+    reach both plate stacks).
+
+    Args:
+        oc_stud_left_xs: left-edge x-coords of every regular OC stud
+            (and end studs, with any joint end-stud overrides applied).
+            Same list the operator places as `{wall_name}_Stud_NN`.
+        opening_layouts: list of dicts from opening_framing_layout,
+            one per opening on this wall.
+        filler_left_xs: left-edge x-coords of corner filler studs from
+            MAIN-role joint ends. Empty list if the wall has no
+            MAIN-role joints.
+        stud_thickness_in: stud cross-section thickness along wall
+            length (LUMBER_TYPES[nominal][0]).
+
+    Returns:
+        Sorted unique list of stud center x-coords. The caller passes
+        this to plan_plate_splice_pieces as stud_centers_eligible.
+    """
+    half_t = stud_thickness_in / 2.0
+    centers: set[float] = set()
+
+    for x in oc_stud_left_xs:
+        centers.add(x + half_t)
+
+    for layout in opening_layouts:
+        # Left king's left edge is king_left_x; center is +half_t.
+        centers.add(layout['king_left_x'] + half_t)
+        # Right king's RIGHT edge is king_right_x; its left edge sits
+        # at king_right_x - stud_thickness, center at -half_t from
+        # king_right_x.
+        centers.add(layout['king_right_x'] - half_t)
+
+    for x in filler_left_xs:
+        centers.add(x + half_t)
+
+    return sorted(centers)
 
 
 # Backward-compatibility aliases for v0.1 callers.

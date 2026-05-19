@@ -105,9 +105,18 @@ def run(host: str, port: int) -> int:
         # cap-plate ABUTTING-end correction (don't extend past wall
         # edge; lap happens inside the abutting wall's own footprint
         # at y in [0, paired_t]); method count stays 18;
-        # addon_version 0.6.30 -> 0.6.31.
-        assert r["addon_version"] == "0.6.31", (
-            f"expected addon_version 0.6.31, got {r['addon_version']!r}"
+        # addon_version 0.6.30 -> 0.6.31. v0.6.40: in-line plate
+        # splices (UI/operator only); method_count stays 18.
+        # addon_version 0.6.31 -> 0.6.40. v0.6.41: bridge parity for
+        # the splice path — response shape gains splice_summary
+        # (frame_wall + per-wall in frame_building.walls_framed),
+        # SpliceError surfaces as INVALID_PARAMS via pre-flight, and
+        # new smoke steps [32]/[33]/[34] exercise the splice path
+        # end-to-end. method_count stays 18 — splice is folded into
+        # the existing frame_wall / frame_building schema, no new
+        # methods. addon_version 0.6.40 -> 0.6.41.
+        assert r["addon_version"] == "0.6.41", (
+            f"expected addon_version 0.6.41, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"
@@ -227,9 +236,28 @@ def run(host: str, port: int) -> int:
         assert r["stud_stock_in"] == 96.0, (
             f"smallest 2x4 stock fitting 91.5 is 8' = 96\", got {r['stud_stock_in']}"
         )
-        assert r["plate_stock_in"] == 96.0, (
-            f"smallest 2x4 stock fitting 48 is 8' = 96\", got {r['plate_stock_in']}"
+        # v0.6.41: plate_stock_in replaced by splice_summary. A 48"
+        # wall is well under the 192" max stock, so no plate gets
+        # spliced — every plate is a single piece (no splices).
+        assert "plate_stock_in" not in r, (
+            f"plate_stock_in should be removed in v0.6.41, got {r.get('plate_stock_in')!r}"
         )
+        assert r["splice_summary"]["n_splices"] == 0, (
+            f"48\" wall should produce 0 splices, got "
+            f"{r['splice_summary']['n_splices']}"
+        )
+        assert r["splice_summary"]["bottom"]["pieces"] == 1, (
+            f"48\" wall bottom plate should be 1 piece, got "
+            f"{r['splice_summary']['bottom']['pieces']}"
+        )
+        assert r["splice_summary"]["bottom"]["splice_xs"] == [], (
+            f"48\" wall bottom plate splice_xs should be empty, got "
+            f"{r['splice_summary']['bottom']['splice_xs']}"
+        )
+        assert r["splice_summary"]["lower_top"]["pieces"] == 1
+        assert r["splice_summary"]["lower_top"]["splice_xs"] == []
+        assert r["splice_summary"]["cap"]["pieces"] == 1
+        assert r["splice_summary"]["cap"]["splice_xs"] == []
         # new_objects: 1 Empty parent + 3 studs + 3 plates = 7 names.
         # The Empty itself is included because the before/after diff
         # over scene.objects catches every new scene member.
@@ -323,6 +351,12 @@ def run(host: str, port: int) -> int:
             f"plates + 2 kings + 2 jacks + 2 headers + 1 spacer + 3 "
             f"cripples), got {len(r['new_objects'])}: {r['new_objects']}"
         )
+        # v0.6.41: 96" wall is well under the 192" max stock, no
+        # splices expected even with the door cutting through it.
+        assert r["splice_summary"]["n_splices"] == 0, (
+            f"96\" wall should produce 0 splices, got "
+            f"{r['splice_summary']['n_splices']}"
+        )
 
         print("\n[11] add_building name='TestBuilding'")
         # v0.6.1: container bridge parity. add_building creates the
@@ -406,6 +440,11 @@ def run(host: str, port: int) -> int:
             f"CREATE call should have wall_target_used=False, "
             f"got {r['wall_target_used']}"
         )
+        # v0.6.41: 48" wall, no openings, no joints — no splices.
+        assert r["splice_summary"]["n_splices"] == 0, (
+            f"48\" wall should produce 0 splices, got "
+            f"{r['splice_summary']['n_splices']}"
+        )
 
         print(f"\n[14] frame_wall wall_target={wall_03_name} length_in=72")
         # v0.6.1: REBUILD path. wall_target picks in-place mode; only
@@ -441,6 +480,13 @@ def run(host: str, port: int) -> int:
         assert abs(r["rotation_deg_z"] - 90.0) < 1e-4, (
             f"REBUILD with no rotation_deg_z param should preserve "
             f"existing ~90 deg rotation, got {r['rotation_deg_z']}"
+        )
+        # v0.6.41: 72" wall after REBUILD, no openings, no joints —
+        # no splices. Confirms splice_summary is computed for
+        # REBUILD calls the same as CREATE.
+        assert r["splice_summary"]["n_splices"] == 0, (
+            f"72\" REBUILD wall should produce 0 splices, got "
+            f"{r['splice_summary']['n_splices']}"
         )
 
         print("\n[15] list_objects (praxova only)")
@@ -827,6 +873,22 @@ def run(host: str, port: int) -> int:
             f"when extending_wall='B'. Got "
             f"n_corner_fillers={wall_a_entry['n_corner_fillers']}."
         )
+        # v0.6.41: walls_framed entries now carry splice_summary.
+        # Both walls in this Level are 96" — well under the 192"
+        # max stock — so neither has splices. Verify the field
+        # exists and reports 0 splices per wall.
+        assert "splice_summary" in wall_a_entry, (
+            f"v0.6.41 walls_framed entry should include "
+            f"splice_summary, got keys: {sorted(wall_a_entry)}"
+        )
+        assert wall_a_entry["splice_summary"]["n_splices"] == 0, (
+            f"wall_a (96\" 2x4) should have 0 splices, got "
+            f"{wall_a_entry['splice_summary']['n_splices']}"
+        )
+        assert wall_b_entry["splice_summary"]["n_splices"] == 0, (
+            f"wall_b (96\" 2x4) should have 0 splices, got "
+            f"{wall_b_entry['splice_summary']['n_splices']}"
+        )
 
         print("\n[28] list_objects → verify cap-plate lap geometry (v0.6.31)")
         # v0.6.30 / v0.6.31 cap-plate lap geometry: cap and lower top
@@ -952,6 +1014,192 @@ def run(host: str, port: int) -> int:
             cli.call("does_not_exist")
         except RuntimeError as e:
             print(f"  -> got expected error: {e}")
+
+        # ==============================================================
+        # v0.6.41 splice path coverage ([32]–[34]).
+        # ==============================================================
+        # v0.6.40 introduced in-line plate splices in the operator; the
+        # smoke test side was deferred to v0.6.41 because it exercises
+        # the bridge's response shape (splice_summary) and the splice
+        # pre-flight that turns SpliceError into INVALID_PARAMS. The
+        # three steps below cover: standalone 2x6 splice with the cap
+        # offset rule firing ([32]), standalone 2x4 splice at a
+        # different length to confirm the planner generalizes ([33]),
+        # and a joint-aware splice via frame_building's per-wall
+        # splice_summary in walls_framed ([34]).
+        #
+        # All splice positions are computed by hand from the v0.6.40
+        # plan_plate_splice_pieces algorithm: greedy largest-stud-
+        # center ≤ ideal_max (192" = 16') with the 24" cap-vs-lower-
+        # top offset rule excluding centers within [splice - 24,
+        # splice + 24]. Eligible centers are OC stud centers (and
+        # joint filler centers when present); jacks and cripples are
+        # excluded as they don't provide a continuous load path.
+
+        print("\n[32] frame_wall 24' x 9' 2x6 — splice path (no joint)")
+        # 288" (24') 2x6 wall, 108" tall, default 16 OC, 1 bottom +
+        # 2 top plates. No openings, no joints. With max_stock = 192"
+        # and stud thickness 1.5", stud_positions yields 19 OC studs
+        # with centers at 0.75, 16, 32, 48, ..., 272, 287.25.
+        # Splices:
+        #   BOTTOM (range 0..288): largest center ≤ 192 is 192.0
+        #     -> pieces [(0, 192), (192, 288)]; splice_xs = [192.0]
+        #   LOWER_TOP (range 0..288): same -> splice_xs = [192.0]
+        #   CAP (range 0..288): lower_top splice excludes centers in
+        #     [168, 216] -> 176/192/208 all excluded; largest center
+        #     ≤ 192 outside that band is 160.0
+        #     -> pieces [(0, 160), (160, 288)]; splice_xs = [160.0]
+        # n_splices = 1*1 (1 bottom plate) + 1*1 (top_plate_count-1
+        # lower top plates) + 1 cap = 3.
+        r = cli.call("frame_wall", {
+            "length_in": 288.0,
+            "height_in": 108.0,
+            "nominal": "2x6",
+            "spacing_oc_in": 16.0,
+        })
+        print(f"  -> splice_summary={r['splice_summary']}")
+        ss = r["splice_summary"]
+        assert ss["n_splices"] == 3, (
+            f"expected n_splices=3 (1 bot + 1 lower_top + 1 cap), "
+            f"got {ss['n_splices']}"
+        )
+        assert ss["bottom"]["pieces"] == 2, (
+            f"bottom should be spliced into 2 pieces, got "
+            f"{ss['bottom']['pieces']}"
+        )
+        assert ss["bottom"]["splice_xs"] == [192.0], (
+            f"bottom splice should land at x=192.0 (largest center "
+            f"≤ 192), got {ss['bottom']['splice_xs']}"
+        )
+        assert ss["lower_top"]["pieces"] == 2
+        assert ss["lower_top"]["splice_xs"] == [192.0], (
+            f"lower_top splice should land at x=192.0, got "
+            f"{ss['lower_top']['splice_xs']}"
+        )
+        assert ss["cap"]["pieces"] == 2
+        assert ss["cap"]["splice_xs"] == [160.0], (
+            f"cap splice should land at x=160.0 (IRC R602.3.2 24\" "
+            f"offset from lower_top@192 forces the planner inboard "
+            f"to the next eligible center), got {ss['cap']['splice_xs']}"
+        )
+        # Spliced plates carry the v0.6.40 _pN suffix on their Object
+        # names. Each plate role contributes 2 pieces, so 6 plate-
+        # piece objects total. Verify a couple of representative
+        # names appear in new_objects.
+        spliced_names = [
+            n for n in r["new_objects"]
+            if n.endswith("_p1") or n.endswith("_p2")
+        ]
+        assert len(spliced_names) == 6, (
+            f"expected 6 spliced plate piece names (3 plate roles × "
+            f"2 pieces), got {len(spliced_names)}: {spliced_names}"
+        )
+
+        print("\n[33] frame_wall 20' x 9' 2x4 — splice path, shorter wall")
+        # 240" (20') 2x4 wall, 108" tall, default 16 OC. Same algorithm
+        # as [32] but the second cap piece is shorter (80" vs 128")
+        # because the wall is shorter. Pins the planner generalizes
+        # across nominals + lengths.
+        #   BOTTOM (range 0..240): splice at 192 (same as [32])
+        #     -> second piece 48"
+        #   LOWER_TOP: splice at 192 -> second piece 48"
+        #   CAP (range 0..240): excluded [168, 216], splice at 160
+        #     -> second piece 80"
+        r = cli.call("frame_wall", {
+            "length_in": 240.0,
+            "height_in": 108.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 16.0,
+        })
+        print(f"  -> splice_summary={r['splice_summary']}")
+        ss = r["splice_summary"]
+        assert ss["n_splices"] == 3, (
+            f"20' 2x4 expected n_splices=3, got {ss['n_splices']}"
+        )
+        assert ss["bottom"]["splice_xs"] == [192.0]
+        assert ss["lower_top"]["splice_xs"] == [192.0]
+        assert ss["cap"]["splice_xs"] == [160.0], (
+            f"cap splice should still land at 160 (24\" offset rule), "
+            f"got {ss['cap']['splice_xs']}"
+        )
+
+        print("\n[34] frame_building with one wall needing splices")
+        # 24' 2x6 wall_a + 96" 2x6 wall_b, joined at wall_a END ->
+        # wall_b START, extending_wall=AUTO (longer wall is MAIN).
+        # Verifies per-wall splice_summary in the frame_building
+        # walls_framed array.
+        #
+        # wall_a (MAIN at END), paired_t = 5.5" (2x6):
+        #   plate_effective_range:
+        #     BOTTOM:    (0, 288)        — MAIN keeps lower full
+        #     LOWER_TOP: (0, 288)        — same
+        #     CAP:       (0, 282.5)      — MAIN cap pulled inboard
+        #                                  by paired_t at joint end
+        #   Filler stud center at 281.0 + 0.75 = 281.75 (one extra
+        #   eligible center beyond the standalone case).
+        #   Splices: BOTTOM/LOWER_TOP same as [32] (splice at 192).
+        #   CAP range 0..282.5: largest center ≤ 192 outside [168,216]
+        #     is 160 -> splice_xs = [160.0]; second cap piece is
+        #     282.5 - 160 = 122.5".
+        #
+        # wall_b (ABUTTING at START), paired_t = 5.5", length 96":
+        #   plate ranges: BOTTOM/LOWER_TOP (5.5, 96), CAP (0, 96).
+        #   All under 192" -> no splices.
+        r = cli.call("add_building", {"name": "SpliceTestBldg"})
+        splice_bldg = r["building_name"]
+        splice_level = r["level_name"]
+
+        r = cli.call("frame_wall", {
+            "length_in": 288.0,
+            "height_in": 108.0,
+            "nominal": "2x6",
+            "spacing_oc_in": 16.0,
+            "level": splice_level,
+        })
+        splice_wall_a = r["wall_name"]
+
+        r = cli.call("frame_wall", {
+            "length_in": 96.0,
+            "height_in": 108.0,
+            "nominal": "2x6",
+            "spacing_oc_in": 16.0,
+            "level": splice_level,
+        })
+        splice_wall_b = r["wall_name"]
+
+        cli.call("add_joint", {
+            "level_name": splice_level,
+            "joint": {
+                "wall_a_name": splice_wall_a,
+                "wall_b_name": splice_wall_b,
+                "wall_a_end": "END",
+                "wall_b_end": "START",
+            },
+        })
+
+        r = cli.call("frame_building", {"level_name": splice_level})
+        print(f"  -> walls_framed={r['walls_framed']}")
+        wa = next(
+            e for e in r["walls_framed"] if e["wall_name"] == splice_wall_a
+        )
+        wb = next(
+            e for e in r["walls_framed"] if e["wall_name"] == splice_wall_b
+        )
+        assert wa["splice_summary"]["n_splices"] == 3, (
+            f"wall_a (288\" 2x6 MAIN) should have 3 splices, got "
+            f"{wa['splice_summary']['n_splices']}"
+        )
+        assert wa["splice_summary"]["bottom"]["splice_xs"] == [192.0]
+        assert wa["splice_summary"]["lower_top"]["splice_xs"] == [192.0]
+        assert wa["splice_summary"]["cap"]["splice_xs"] == [160.0], (
+            f"wall_a cap splice should land at 160 even with cap "
+            f"range shortened to (0, 282.5) by MAIN-at-END joint "
+            f"context, got {wa['splice_summary']['cap']['splice_xs']}"
+        )
+        assert wb["splice_summary"]["n_splices"] == 0, (
+            f"wall_b (96\" 2x6 ABUTTING) should have 0 splices, got "
+            f"{wb['splice_summary']['n_splices']}"
+        )
 
         print("\nAll checks passed.")
         return 0

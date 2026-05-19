@@ -691,9 +691,13 @@ def frame_wall(
     Stock vs cut length: every cut piece is sourced from the smallest
     stock that fits. For an 8' wall with 1 bottom + 2 top plates of 2x4,
     studs are 91.5" cut from 96" (8 ft) stock. The returned
-    stud_stock_in and plate_stock_in tell you what to order from the
-    lumberyard. Jack, header, and cripple stock sizes follow the same
-    rule and surface in the cut list.
+    stud_stock_in tells you what to order for studs. v0.6.41 added
+    in-line plate splices for walls whose plates exceed the longest
+    available stock (capped at 16' / 192" per IRC residential
+    practice); each spliced piece carries its own stock size which
+    appears in the cut list and in the splice_summary return field.
+    Jack, header, and cripple stock sizes follow the same rule and
+    surface in the cut list.
 
     Args:
         length_in: Wall length along +X in inches. Must be > 0 and at
@@ -789,8 +793,33 @@ def frame_wall(
         n_plates: top_plate_count + bottom_plate_count
         stud_length_in: cut length of each regular stud (height - plate
             stack)
-        stud_stock_in, plate_stock_in: purchased stock the studs and
-            plates are cut from (smallest standard length that fits)
+        stud_stock_in: purchased stock the studs are cut from (smallest
+            standard length that fits)
+        splice_summary (v0.6.41): per-plate splice details. Replaces
+            the v0.4.1 plate_stock_in field. Each plate may now be
+            spliced into multiple cut pieces with different stocks,
+            so a single plate_stock_in field is no longer meaningful.
+            Shape:
+
+              {
+                "n_splices": int,
+                "bottom":    {"pieces": int, "splice_xs": [float, ...]},
+                "lower_top": {"pieces": int, "splice_xs": [float, ...]},
+                "cap":       {"pieces": int, "splice_xs": [float, ...]},
+              }
+
+            pieces is the number of cut pieces (1 means no splice).
+            splice_xs are the butt-joint x-coords in wall-local
+            coordinates, in order from x=0 to wall end (empty when
+            pieces == 1). Cap splice_xs always offset ≥24" from
+            lower_top splice_xs per IRC R602.3.2 — enforced as a
+            HARD constraint via pre-flight: a wall whose stud
+            layout can't satisfy the offset returns INVALID_PARAMS
+            with the specific failing range and offset constraint
+            inline, rather than framing a non-compliant splice.
+            n_splices counts every stack-level instance: bottom
+            splices * bottom_plate_count + lower_top splices *
+            (top_plate_count - 1) + cap splices.
         n_openings: always present (0 when openings omitted)
         openings_summary: always present (empty list when none). One dict
             per opening with the ACTUAL values used after default-fill:
@@ -806,17 +835,22 @@ def frame_wall(
               }
 
         new_objects: sorted list of every new object name — the Empty,
-            all plates, all regular studs, plus per-opening kings, jacks,
-            two header members, the untagged 1/2" plywood spacer, an
-            optional rough sill (windows), and any header / sill
-            cripples.
+            all plates (with `_pN` suffix when spliced, e.g.
+            BottomPlate_01_p1, BottomPlate_01_p2), all regular studs,
+            plus per-opening kings, jacks, two header members, the
+            untagged 1/2" plywood spacer, an optional rough sill
+            (windows), and any header / sill cripples.
 
     Raises INVALID_PARAMS (-32602) for impossible geometry: wall too
     short for two end studs, wall too short for the plate stack,
-    stud/plate length exceeding any available stock for the chosen
-    nominal, per-opening dict shape errors (with 1-based index), or
-    cross-field opening errors (overlap, off-wall, header too tall,
-    sill in plate).
+    stud length exceeding any available stock for the chosen nominal,
+    per-opening dict shape errors (with 1-based index), cross-field
+    opening errors (overlap, off-wall, header too tall, sill in plate),
+    or splice failures (no eligible stud anchors a required splice, or
+    the 24" cap-vs-lower-top offset rule can't be satisfied — v0.6.41).
+    Splice errors carry a "{wall_name}: ..." prefix and the specific
+    failing range so the LLM can see exactly which stud layout to
+    adjust.
 
     Building hierarchy and re-framing (v0.6.1):
 
@@ -945,13 +979,25 @@ def frame_building(level_name: str) -> dict:
                                                        #   (MAIN walls of
                                                        #   THREE_STUD joints
                                                        #   only)
-                "joint_indices_touching":  [int, ...]  # 0-based indices
+                "joint_indices_touching":  [int, ...] # 0-based indices
                                                        #   into the Level's
                                                        #   joints collection
                                                        #   that reference
                                                        #   this wall (in
                                                        #   either wall_a or
                                                        #   wall_b slot)
+                "splice_summary":          dict        # v0.6.41 — per-
+                                                       #   plate splice
+                                                       #   details; same
+                                                       #   shape as
+                                                       #   frame_wall's
+                                                       #   splice_summary
+                                                       #   field. See
+                                                       #   frame_wall for
+                                                       #   the n_splices /
+                                                       #   bottom /
+                                                       #   lower_top / cap
+                                                       #   rundown.
               }
 
     For per-wall opening detail (jack lengths, header lengths, cripple
@@ -961,9 +1007,12 @@ def frame_building(level_name: str) -> dict:
     over N separate frame_wall calls.
 
     Raises INVALID_PARAMS (-32602) for: missing/non-Level `level_name`,
-    Level with no walls, or any joint validation failure (orphaned
+    Level with no walls, any joint validation failure (orphaned
     wall_a/wall_b, walls outside the Level, self-joint, or duplicate
-    (wall, end) pair).
+    (wall, end) pair), or any per-wall splice failure (v0.6.41 — same
+    SpliceError conditions frame_wall raises, surfaced as
+    "{wall_name}: ..." with the specific failing range so the LLM can
+    identify which wall needs adjustment).
     """
     return _call("frame_building", {"level_name": level_name})
 
