@@ -390,19 +390,31 @@ class PraxovaWallProps(bpy.types.PropertyGroup):
 class PraxovaJoint(bpy.types.PropertyGroup):
     """One joint between two walls within a Level.
 
-    v0.6 ships L corners only; T joints and in-line splice arrive in v0.7.
-    Wall A is the MAIN wall (its plates / corner-side studs are mostly
-    preserved); Wall B is the ABUTTING wall (its plates are shortened by
-    A's stud thickness at the joint end). Top plate continuity is
-    controlled by `extending_wall`: AUTO picks the shorter wall (tie to A)
-    per the convention that longer walls are harder to splice.
+    v0.6.50 ships two joint_types: L_CORNER (two walls meet at 90° at
+    their ends) and T_JOINT (one wall butts into the side of a through
+    wall at a position along its length). IN_LINE_SPLICE (joining two
+    walls end-to-end as if they were one continuous wall) remains
+    deferred — distinct from v0.6.40's in-wall plate-splice feature.
+
+    L_CORNER: Wall A is the MAIN wall (plates / corner-side studs
+    mostly preserved); Wall B is the ABUTTING wall (plates shortened
+    by A's stud thickness at the joint end). Top plate continuity is
+    controlled by `extending_wall`: AUTO picks the LONGER wall (tie
+    to A) per the residential convention that longer walls form the
+    outside and shorter walls butt in.
+
+    T_JOINT: wall_a is always the through wall (continuous plates);
+    wall_b is always the abutting wall whose end butts into wall_a's
+    side. `wall_a_position_in` gives wall_b's near-edge connection
+    point along wall_a's length. `extending_wall` and `wall_a_end`
+    are unused. `wall_a_position_in` is unused for L_CORNER joints.
     """
 
     joint_type: EnumProperty(  # noqa: F821
         name="Joint Type",
         items=[
-            ('L_CORNER', "L Corner", "Two walls meet at 90 degrees"),
-            # v0.7: ('T_JOINT', ...), ('IN_LINE_SPLICE', ...)
+            ('L_CORNER', "L Corner", "Two walls meet at 90 degrees at their ends"),
+            ('T_JOINT',  "T Joint",  "One wall (wall_b) butts into the side of a through wall (wall_a) at a position along its length"),
         ],
         default='L_CORNER',
     )
@@ -445,12 +457,28 @@ class PraxovaJoint(bpy.types.PropertyGroup):
         ],
         default='START',
     )
+    wall_a_position_in: FloatProperty(  # noqa: F821
+        name="Wall A position (in)",
+        description=(
+            "For T_JOINT joints only: wall_a-local x coordinate where "
+            "wall_b's near edge connects. wall_b's footprint on wall_a "
+            "spans [position, position + wt_b] where wt_b is wall_b's "
+            "wall thickness (3.5\" for 2x4, 5.5\" for 2x6, etc). "
+            "Ignored for L_CORNER joints."
+        ),
+        default=0.0,
+        min=0.0,
+        soft_max=1200.0,
+        precision=2,
+        unit='LENGTH',
+    )
     corner_style: EnumProperty(  # noqa: F821
         name="Corner style",
         items=[
-            ('AUTO',       "Auto (use Building default)", ""),
-            ('THREE_STUD', "Three-stud", "Three vertical studs forming a corner-post bundle"),
-            # v0.7: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
+            ('AUTO',            "Auto (resolve from joint_type)", "Resolves to THREE_STUD for L_CORNER, T_BACKING_STUDS for T_JOINT"),
+            ('THREE_STUD',      "Three-stud",      "Three vertical studs forming a corner-post bundle (L_CORNER only)"),
+            ('T_BACKING_STUDS', "T backing studs", "Two backing studs on the through wall flanking the abutting wall's end-stud footprint (T_JOINT only)"),
+            # Later sprint: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
         ],
         default='AUTO',
     )
