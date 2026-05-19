@@ -749,74 +749,138 @@ def resolve_extending_wall(joint, wall_a, wall_b) -> str:
 
 
 def resolve_corner_style(joint, building_default: str) -> str:
-    """Resolve a joint's corner_style, substituting the Building's default
-    when the joint says AUTO. For v0.6 this always returns 'THREE_STUD'
-    (only style available), but the indirection through Building default
-    is what v0.7 will hang California / ladder-blocking styles on.
+    """Resolve a joint's corner_style based on joint_type.
+
+    Semantics:
+      AUTO + L_CORNER → building_default ('THREE_STUD' in v0.6.x; a
+        future cycle could add CALIFORNIA / LADDER_BLOCKING as
+        alternative L-corner defaults).
+      AUTO + T_JOINT  → 'T_BACKING_STUDS' (unconditional in v0.6.50 —
+        only T-joint style available; the Building's
+        default_corner_style stays L-only this cycle, with a sibling
+        default_t_style field deferred until more T-joint styles are
+        added).
+      Explicit values (THREE_STUD / T_BACKING_STUDS) honored verbatim
+        — validate_joints rejects type/style mismatches up front so
+        this function doesn't have to defend against them.
     """
-    if joint.corner_style == 'AUTO':
-        return building_default
-    return joint.corner_style
+    if joint.corner_style != 'AUTO':
+        return joint.corner_style
+    if joint.joint_type == 'T_JOINT':
+        return 'T_BACKING_STUDS'
+    return building_default
 
 
-# v0.6.40: canonical plate-range helper.
+# v0.6.50: canonical multi-range plate-range helper.
 #
-# Returns the (start_x, end_x) of a plate after joint modifications at
-# both ends, in the wall's local frame (x = 0 at the wall's START edge,
-# x = wall_length_in at the END edge). Supersedes lower_plate_end_offset
-# and cap_plate_end_offset for callers that want the actual plate
-# coordinates rather than signed-offset deltas — chiefly the v0.6.40
-# splice planner, which needs to know the range to fit cut pieces into.
+# Returns the list of disjoint (start_x, end_x) ranges for a plate
+# after joint modifications at both ends + interior T-joint cap
+# notches, in the wall's local frame (x = 0 at the wall's START
+# edge, x = wall_length_in at the END edge). One element per
+# contiguous piece; for plates without interior notches (every L-
+# corner-only wall and every wall without joints) the list has
+# exactly one element, so the v0.6.41 single-tuple contract is a
+# proper subset of the new shape.
 #
-# Encodes the same per-role behavior the offset helpers express, but as
-# coordinates rather than offsets:
+# The list-of-ranges return is what makes cap notching by T joints
+# tractable: each disjoint range goes through plan_plate_splice_pieces
+# independently; the splice planner doesn't need to know T joints
+# exist, just gets called once per range. Bottom and lower top
+# plates ignore mid_joints and stay single-range — they're continuous
+# through T joints by design.
 #
-#   plate_role  | role at end | resulting end coord
-#   ------------|-------------|------------------------------------------
-#   BOTTOM      | MAIN/FREE   | wall edge (0 or length_in)
-#   BOTTOM      | ABUTTING    | shortened by paired_t
-#   LOWER_TOP   | MAIN/FREE   | wall edge
-#   LOWER_TOP   | ABUTTING    | shortened by paired_t
-#   CAP         | MAIN        | shortened by paired_t  (inboard, leaves
-#                             |                         room for lap)
-#   CAP         | ABUTTING    | wall edge              (lap happens
-#                             |                         INSIDE this wall
-#                             |                         at y ∈ [0, paired_t])
-#   CAP         | FREE        | wall edge
+# Per-end behavior depends on (role, joint_type, plate_role):
+#
+#   role        joint_type   plate_role         start/end_x behavior
+#   --------    ----------   ----------------   --------------------
+#   MAIN        L_CORNER     BOTTOM, LOWER_TOP  wall edge
+#   MAIN        L_CORNER     CAP                shortened INBOARD by paired_t
+#   ABUTTING    L_CORNER     BOTTOM, LOWER_TOP  shortened INBOARD by paired_t
+#   ABUTTING    L_CORNER     CAP                wall edge (lap inside)
+#   ABUTTING    T_JOINT      BOTTOM, LOWER_TOP  wall edge (no shortening —
+#                                               wall_b butts against wall_a)
+#   ABUTTING    T_JOINT      CAP                extended OUTBOARD by paired_t
+#                                               (wall_b's cap laps onto
+#                                               wall_a's lower top plate)
+#   MAIN        T_JOINT      —                  not applicable (T joints
+#                                               have a fixed through/abutting
+#                                               topology; through wall is
+#                                               wall_a, not assigned a role
+#                                               at its ends by joints)
+#   None        n/a          any                wall edge (no joint at end)
+#
+# OUTBOARD extensions yield negative start_x (joint at START) or
+# end_x > wall_length_in (joint at END). Intentional — the operator's
+# placement loop handles negative-start meshes naturally (mesh length =
+# end - start, position = (start, ...)); wall_b's cap object lands with
+# its origin past the wall Empty's footprint by paired_t.
 #
 # Both role_at_* params accept 'MAIN', 'ABUTTING', or None (no joint at
 # that end). paired_t_at_* is the paired wall's wall thickness
 # (LUMBER_TYPES[paired_nominal][1]) — ignored when the corresponding
-# role is None, so the caller can pass 0.0 there.
+# role is None, so the caller can pass 0.0 there. joint_type_at_* is
+# 'L_CORNER' | 'T_JOINT' | None; when None alongside a non-None role,
+# behavior defaults to L_CORNER (the only v0.6.41 joint_type — keeps
+# pre-migration callers behaving identically).
 
 
-def plate_effective_range(
+def plate_effective_ranges(
     plate_role: str,
     wall_length_in: float,
+    *,
     role_at_start: str | None,
     role_at_end: str | None,
     paired_t_at_start: float,
     paired_t_at_end: float,
-) -> tuple[float, float]:
-    """Return (start_x, end_x) of a plate in the wall's local frame.
+    joint_type_at_start: str | None = None,
+    joint_type_at_end: str | None = None,
+    mid_joints: list[dict] | None = None,
+) -> list[tuple[float, float]]:
+    """Return the list of disjoint (start_x, end_x) ranges for a plate.
+
+    Single source of truth for plate geometry after joint modifications
+    at both ends + interior T-joint cap notches. Returns one tuple per
+    contiguous piece in wall-local coordinates; for plates without
+    interior notches the list has exactly one element.
+
+    See module-level comment above for the full per-end behavior
+    table by (role, joint_type, plate_role).
+
+    Interior notches (cap plate only, when this wall is wall_a in T
+    joints): each mid_joint entry defines a notch from `position_in`
+    to `position_in + paired_wt`. The cap range is partitioned into
+    sub-ranges between consecutive notches. mid_joints must be sorted
+    by position_in. Bottom and lower top plates ignore mid_joints —
+    they're continuous through T joints by design.
 
     Args:
         plate_role: 'BOTTOM' | 'LOWER_TOP' | 'CAP'.
         wall_length_in: this wall's length in inches.
-        role_at_start: 'MAIN' | 'ABUTTING' | None (no joint at START).
-        role_at_end:   'MAIN' | 'ABUTTING' | None (no joint at END).
-        paired_t_at_start: paired wall's wall thickness at START in
-            inches (ignored when role_at_start is None — pass 0.0).
-        paired_t_at_end: paired wall's wall thickness at END in inches
-            (ignored when role_at_end is None — pass 0.0).
+        role_at_start, role_at_end: 'MAIN' | 'ABUTTING' | None.
+        paired_t_at_start, paired_t_at_end: paired wall's wall
+            thickness at each end (LUMBER_TYPES[paired_nominal][1]).
+            Ignored when the corresponding role is None.
+        joint_type_at_start, joint_type_at_end: 'L_CORNER' |
+            'T_JOINT' | None. Required when the corresponding role
+            is non-None — controls the per-end behavior table above.
+            Default None for v0.6.41 callers that haven't migrated;
+            in that case the function treats it as 'L_CORNER' (the
+            only v0.6.41 joint_type) for backward-compat.
+        mid_joints: list of T-joint contexts where this wall is the
+            through wall. Each entry must carry 'position_in' (float)
+            and 'paired_wt' (float, the paired wall's wall thickness
+            for the notch width). Empty / None means no notches.
+            Only affects plate_role == 'CAP'.
 
     Returns:
-        (start_x, end_x) in inches. Always satisfies
-        0 <= start_x < end_x <= wall_length_in under v0.6.31 geometry —
-        no plate extends past the wall's nominal footprint.
+        List of (start_x, end_x) tuples in wall-local inches, sorted
+        ascending and disjoint. Always at least one element. Each
+        tuple satisfies start_x < end_x.
 
     Raises:
-        ValueError: if plate_role isn't one of the three valid values.
+        ValueError: if plate_role isn't valid; or if mid_joints isn't
+            sorted by position_in; or if a notch falls outside the
+            base range computed from end mods.
     """
     if plate_role not in ('BOTTOM', 'LOWER_TOP', 'CAP'):
         raise ValueError(
@@ -824,23 +888,88 @@ def plate_effective_range(
             f"got {plate_role!r}"
         )
 
+    # Backward-compat: None joint_type alongside a non-None role
+    # means L_CORNER (the only v0.6.41 joint_type).
+    jt_start = joint_type_at_start
+    if role_at_start is not None and jt_start is None:
+        jt_start = 'L_CORNER'
+    jt_end = joint_type_at_end
+    if role_at_end is not None and jt_end is None:
+        jt_end = 'L_CORNER'
+
+    # ---- Base range from end modifications ----
     start_x = 0.0
     end_x = wall_length_in
 
     # START end
-    if role_at_start == 'ABUTTING' and plate_role in ('BOTTOM', 'LOWER_TOP'):
-        start_x = paired_t_at_start
-    elif role_at_start == 'MAIN' and plate_role == 'CAP':
-        start_x = paired_t_at_start
-    # All other combos at START leave start_x at 0.0.
+    if jt_start == 'L_CORNER':
+        if role_at_start == 'ABUTTING' and plate_role in ('BOTTOM', 'LOWER_TOP'):
+            start_x = paired_t_at_start
+        elif role_at_start == 'MAIN' and plate_role == 'CAP':
+            start_x = paired_t_at_start
+    elif jt_start == 'T_JOINT':
+        # T_JOINT only ever has role 'ABUTTING' on the end-context dict.
+        # Bottom and lower top: wall edge (no shortening). Cap: outboard
+        # extension by paired_t.
+        if role_at_start == 'ABUTTING' and plate_role == 'CAP':
+            start_x = -paired_t_at_start
 
     # END end (mirror)
-    if role_at_end == 'ABUTTING' and plate_role in ('BOTTOM', 'LOWER_TOP'):
-        end_x = wall_length_in - paired_t_at_end
-    elif role_at_end == 'MAIN' and plate_role == 'CAP':
-        end_x = wall_length_in - paired_t_at_end
+    if jt_end == 'L_CORNER':
+        if role_at_end == 'ABUTTING' and plate_role in ('BOTTOM', 'LOWER_TOP'):
+            end_x = wall_length_in - paired_t_at_end
+        elif role_at_end == 'MAIN' and plate_role == 'CAP':
+            end_x = wall_length_in - paired_t_at_end
+    elif jt_end == 'T_JOINT':
+        if role_at_end == 'ABUTTING' and plate_role == 'CAP':
+            end_x = wall_length_in + paired_t_at_end
 
-    return (start_x, end_x)
+    # ---- Single-range fast paths ----
+    if plate_role != 'CAP' or not mid_joints:
+        return [(start_x, end_x)]
+
+    # ---- Cap with mid_joints: partition by notches ----
+    # Verify mid_joints is sorted by position_in. Cheap check; the
+    # only authoritative caller (compute_wall_joint_context) sorts
+    # explicitly, but defensive checks here keep the helper honest
+    # if anyone else builds the list by hand.
+    prev_pos = float('-inf')
+    for mj in mid_joints:
+        if mj['position_in'] < prev_pos:
+            raise ValueError(
+                "mid_joints must be sorted by position_in ascending"
+            )
+        prev_pos = mj['position_in']
+
+    ranges: list[tuple[float, float]] = []
+    cur_x = start_x
+    for mj in mid_joints:
+        n_start = mj['position_in']
+        n_end = n_start + mj['paired_wt']
+        if n_start < cur_x or n_end > end_x:
+            raise ValueError(
+                f"T-joint cap notch [{n_start:g}, {n_end:g}] falls "
+                f"outside the cap range [{start_x:g}, {end_x:g}] "
+                f"(possibly overlapping a previous notch or extending "
+                f"past wall_length_in)"
+            )
+        if n_start > cur_x:
+            ranges.append((cur_x, n_start))
+        cur_x = n_end
+    if cur_x < end_x:
+        ranges.append((cur_x, end_x))
+
+    # Defensive: skip any zero-width sub-range. Shouldn't happen
+    # given the sorted+disjoint contract above, but cheap to guard.
+    ranges = [(s, e) for (s, e) in ranges if e > s]
+    if not ranges:
+        # Pathological all-notch case: every byte of the cap range
+        # was consumed by notches. Return a single empty-ish range
+        # at start_x so downstream code doesn't break on an empty
+        # list. (Real walls won't hit this — backing studs occupy
+        # st_a between notches, so notches can't tile the whole cap.)
+        ranges = [(start_x, start_x)]
+    return ranges
 
 
 def compute_wall_joint_context(
@@ -848,37 +977,70 @@ def compute_wall_joint_context(
     joints,
     building_default_corner_style: str,
 ) -> dict:
-    """For each end of `wall_obj`, find the joint touching it (if any).
+    """For each end of `wall_obj`, find the joint touching it; also
+    collect T joints where `wall_obj` is the through wall (wall_a).
 
-    Returns a dict with 'START' and 'END' keys. Each value is either None
-    (no joint at that end) or a dict with:
+    Returns a dict with three keys:
 
-        joint_type:        'L_CORNER' (only v0.6 type)
-        role:              'MAIN' | 'ABUTTING'
+        'START': end-context dict | None
+        'END':   end-context dict | None
+        'mid_joints': list[dict]  — T joints where wall_obj is wall_a
+                                    (the through wall), sorted by
+                                    position_in ascending. Empty list
+                                    when wall_obj is not the through
+                                    wall in any T joint.
+
+    Each per-end context dict carries:
+
+        joint_type:        'L_CORNER' | 'T_JOINT'
+        role:              'MAIN' | 'ABUTTING'  (for T_JOINT this is
+                           always 'ABUTTING' — T joints have a fixed
+                           through/abutting topology, not resolved
+                           via extending_wall)
         paired_wall:       Object (the other wall in the joint)
         paired_wall_end:   'START' | 'END' (which end of the paired wall)
         corner_style:      resolved style (no more AUTO)
 
+    Callers dispatch on joint_type to distinguish L_CORNER ABUTTING
+    (cap stays at wall edge, lap inside) from T_JOINT ABUTTING (cap
+    extends outboard, laps onto wall_a's lower top plate).
+
+    Each mid_joints entry carries:
+
+        joint_type:        'T_JOINT' (only one mid-joint type in v0.6.50)
+        joint_index:       1-based index in the Level's joints
+                           collection, used for naming
+                           TBacker_Joint<NN>_L/_R objects in commit 3
+                           (matches the L-corner CornerFiller_Joint<NN>
+                           convention).
+        position_in:       wall_a-local x at wall_b's near edge
+                           (joint.wall_a_position_in).
+        paired_wall:       Object (= joint.wall_b).
+        paired_wall_end:   'START' | 'END' — which end of wall_b
+                           connects to wall_a.
+        corner_style:      resolved style (e.g. 'T_BACKING_STUDS').
+
     Caller is expected to have validated `joints` via validate_joints
     first; this function silently skips joints with unset wall_a / wall_b
     so it doesn't blow up on partial state during interactive editing.
-    A wall with two joints at the same end (which validate_joints
-    catches) would overwrite — but should be a validation failure
-    long before this function is called from frame_wall.
 
-    v0.6.40 removed the 'is_extending' field — it was redundant with
-    role under the v0.6.25 "MAIN == extending" semantics, and the only
-    consumer (l_corner_geometry's cap_plate_offset branch) is gone now
-    that plate ranges flow through plate_effective_range.
+    v0.6.40 removed the 'is_extending' field from end-context dicts —
+    it was redundant with role under the v0.6.25 "MAIN == extending"
+    semantics, and the only consumer (l_corner_geometry's
+    cap_plate_offset branch) is gone now that plate ranges flow
+    through plate_effective_ranges.
+
+    v0.6.50 adds the 'mid_joints' key and T_JOINT support: T_JOINT
+    abutting walls populate the per-end dict (role hardcoded to
+    'ABUTTING'); T_JOINT through walls accumulate into mid_joints.
     """
-    context = {'START': None, 'END': None}
-    for joint in joints:
+    context: dict = {'START': None, 'END': None, 'mid_joints': []}
+    for j_idx, joint in enumerate(joints, start=1):
         if joint.wall_a is None or joint.wall_b is None:
             continue
 
         # Identify wall_obj's slot in the joint (a or b) and its
-        # paired wall — independent of role, which is determined
-        # below by extending_wall resolution.
+        # paired wall — independent of role.
         if wall_obj == joint.wall_a:
             this_slot = 'A'
             this_end = joint.wall_a_end
@@ -892,11 +1054,43 @@ def compute_wall_joint_context(
         else:
             continue
 
-        # v0.6.25: role follows resolve_extending_wall, not slot.
-        # The MAIN wall is the one whose plates run continuous through
-        # the corner (gets the filler stud); the ABUTTING wall has
-        # its plates shortened. v0.6.0 hardcoded MAIN to wall_a; that
-        # caused explicit extending_wall='A'/'B' to be ignored and
+        if joint.joint_type == 'T_JOINT':
+            # T joints have a fixed topology: wall_a is the through
+            # wall, wall_b is the abutting wall. No extending_wall
+            # resolution; role is determined by slot.
+            if this_slot == 'A':
+                # wall_obj is the through wall — record as a mid_joint
+                # entry. The per-end dict at this_end is NOT touched
+                # because a T joint doesn't bind wall_a's end.
+                context['mid_joints'].append({
+                    'joint_type': 'T_JOINT',
+                    'joint_index': j_idx,
+                    'position_in': joint.wall_a_position_in,
+                    'paired_wall': paired_wall,
+                    'paired_wall_end': paired_wall_end,
+                    'corner_style': resolve_corner_style(
+                        joint, building_default_corner_style,
+                    ),
+                })
+            else:
+                # wall_obj is the abutting wall — record per-end.
+                # role is unconditionally ABUTTING for T joints.
+                context[this_end] = {
+                    'joint_type': 'T_JOINT',
+                    'role': 'ABUTTING',
+                    'paired_wall': paired_wall,
+                    'paired_wall_end': paired_wall_end,
+                    'corner_style': resolve_corner_style(
+                        joint, building_default_corner_style,
+                    ),
+                }
+            continue
+
+        # L_CORNER branch (v0.6.25): role follows resolve_extending_wall,
+        # not slot. The MAIN wall is the one whose plates run continuous
+        # through the corner (gets the filler stud); the ABUTTING wall
+        # has its plates shortened. v0.6.0 hardcoded MAIN to wall_a;
+        # that caused explicit extending_wall='A'/'B' to be ignored and
         # AUTO never to pick by length.
         extending = resolve_extending_wall(
             joint, joint.wall_a, joint.wall_b,
@@ -904,7 +1098,7 @@ def compute_wall_joint_context(
         role = 'MAIN' if extending == this_slot else 'ABUTTING'
 
         context[this_end] = {
-            'joint_type': joint.joint_type,
+            'joint_type': 'L_CORNER',
             'role': role,
             'paired_wall': paired_wall,
             'paired_wall_end': paired_wall_end,
@@ -912,6 +1106,10 @@ def compute_wall_joint_context(
                 joint, building_default_corner_style,
             ),
         }
+
+    # Stable order: sort mid_joints by position_in ascending. Downstream
+    # naming and visual diff stability both rely on this.
+    context['mid_joints'].sort(key=lambda mj: mj['position_in'])
     return context
 
 
@@ -930,7 +1128,7 @@ def l_corner_geometry(
     and uses v0.5 defaults.
 
     v0.6.40 narrowed this helper to stud-only: per-end plate offsets
-    moved out to plate_effective_range (which returns coordinate
+    moved out to plate_effective_ranges (which returns coordinate
     ranges directly), and the is_extending parameter went with them.
     What remains here is the end-stud reposition (ABUTTING walls move
     inboard by wt_other so they land flush with their shortened
@@ -999,6 +1197,58 @@ def l_corner_geometry(
     return out
 
 
+def t_joint_geometry_for_wall_a(
+    position_in: float,
+    st_a: float,
+    wt_b: float,
+) -> dict:
+    """Per-T-joint geometry pieces for ONE T joint, viewed from the
+    through wall (wall_a).
+
+    Single source of truth for the wall_a-side geometry of a T joint:
+    where the two backing studs land along wall_a's length, and where
+    the cap-plate notch lives. The operator uses both — backing stud
+    placement uses backing_stud_xs as left-edge x-coords; the cap-
+    plate effective ranges consume cap_notch_range to partition the
+    cap into sub-ranges.
+
+    Backing studs: two studs flank wall_b's end-stud footprint on
+    wall_a's interior face. Their right and left faces respectively
+    are flush with wall_b's left and right edges, providing drywall
+    nailing for wall_b's interior face return on both sides.
+
+      LEFT  backing stud: left edge at (position - st_a),
+                          right edge at position  (flush w/ wall_b L)
+      RIGHT backing stud: left edge at (position + wt_b),
+                          right edge at (position + wt_b + st_a)
+                          (left flush w/ wall_b R)
+
+    Cap notch: wall_a's cap plate is interrupted at (position,
+    position + wt_b) — the wt_b-wide gap where wall_b's extended
+    cap plate lands on top of wall_a's lower top plate. Per IRC
+    R602.3.2.
+
+    Args:
+        position_in: wall_a-local x at wall_b's near (left) face.
+        st_a: wall_a's stud thickness (LUMBER_TYPES[wall_a_nominal][0],
+            1.5" for 2x4) — backing stud x-extent.
+        wt_b: wall_b's wall thickness (LUMBER_TYPES[wall_b_nominal][1],
+            3.5" for 2x4) — width of wall_b's footprint on wall_a +
+            cap notch width.
+
+    Returns:
+        Dict with:
+            backing_stud_xs:  tuple[float, float] — left-edge x of the
+                left and right backing studs respectively.
+            cap_notch_range: tuple[float, float] — (start_x, end_x)
+                of the cap notch.
+    """
+    return {
+        'backing_stud_xs': (position_in - st_a, position_in + wt_b),
+        'cap_notch_range': (position_in, position_in + wt_b),
+    }
+
+
 def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
     """Cross-check the joints list against the Level's walls.
 
@@ -1010,7 +1260,19 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
          the Level being framed).
       3. wall_a != wall_b (no self-joint).
       4. No two joints reference the same (wall, end) — a wall can have
-         at most one joint per end.
+         at most one joint per end. T_JOINT joints don't bind wall_a's
+         end (the joint is at a position along the wall, not at an
+         end), so only wall_b's end is checked for T joints.
+      5. corner_style and joint_type are compatible: THREE_STUD only
+         valid with L_CORNER; T_BACKING_STUDS only valid with T_JOINT.
+         AUTO is always valid.
+      6. T_JOINT wall_a_position_in is within [st_a, wall_a_length -
+         wt_b - st_a] so backing studs and wall_b's footprint fit
+         within wall_a's length axis. Other geometry conflicts
+         (overlapping openings, other joints, end-stud cells of
+         L-corner joints at wall_a's ends) are intentionally NOT
+         checked here in v0.6.50 — they surface later as splice /
+         placement errors or visually in the viewport.
     """
     wall_set = set(walls_in_level)
 
@@ -1022,12 +1284,46 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
         if joint.wall_a == joint.wall_b:
             return (False, f"Joint {i}: wall_a and wall_b must be different walls")
 
+        # Compatibility check (5).
+        if joint.joint_type == 'L_CORNER' and joint.corner_style == 'T_BACKING_STUDS':
+            return (
+                False,
+                f"Joint {i}: corner_style 'T_BACKING_STUDS' is only valid "
+                f"with joint_type 'T_JOINT'",
+            )
+        if joint.joint_type == 'T_JOINT' and joint.corner_style == 'THREE_STUD':
+            return (
+                False,
+                f"Joint {i}: corner_style 'THREE_STUD' is only valid "
+                f"with joint_type 'L_CORNER'",
+            )
+
+        # T_JOINT position bounds (6).
+        if joint.joint_type == 'T_JOINT':
+            st_a = LUMBER_TYPES[joint.wall_a.praxova_wall.wall_nominal][0]
+            wt_b = LUMBER_TYPES[joint.wall_b.praxova_wall.wall_nominal][1]
+            wall_a_length = joint.wall_a.praxova_wall.wall_length_in
+            pos = joint.wall_a_position_in
+            min_pos = st_a
+            max_pos = wall_a_length - wt_b - st_a
+            if pos < min_pos or pos > max_pos:
+                return (
+                    False,
+                    f"Joint {i}: wall_a_position_in={pos:g}\" must be in "
+                    f"[{min_pos:g}, {max_pos:g}] so backing studs and "
+                    f"wall_b's footprint fit within wall_a "
+                    f"({joint.wall_a.name!r}, length {wall_a_length:g}\")",
+                )
+
     used: dict[tuple[str, str], int] = {}
     for i, joint in enumerate(joints, start=1):
-        for wall, end in (
-            (joint.wall_a, joint.wall_a_end),
-            (joint.wall_b, joint.wall_b_end),
-        ):
+        # T joints don't bind wall_a's end (the joint is at a position
+        # along the wall, not at an end). wall_b's end IS at the joint
+        # regardless of joint_type, so it's always checked.
+        ends_to_check = [(joint.wall_b, joint.wall_b_end)]
+        if joint.joint_type == 'L_CORNER':
+            ends_to_check.append((joint.wall_a, joint.wall_a_end))
+        for wall, end in ends_to_check:
             key = (wall.name, end)
             if key in used:
                 return (
@@ -1226,6 +1522,8 @@ def collect_full_height_stud_centers(
     opening_layouts: list[dict],
     filler_left_xs: list[float],
     stud_thickness_in: float,
+    *,
+    backing_stud_left_xs: list[float] | tuple[float, ...] = (),
 ) -> list[float]:
     """Build the sorted unique list of full-height stud centers.
 
@@ -1235,7 +1533,9 @@ def collect_full_height_stud_centers(
       - End studs and surviving OC studs (already in oc_stud_left_xs
         after end_stud_override + filter_studs_around_openings)
       - King studs from each opening (full-height by construction)
-      - Interior corner filler studs from MAIN-role joint ends
+      - Interior corner filler studs from MAIN-role L-corner joint ends
+      - T-joint backing studs on the through wall (wall_a) — two per
+        T joint, flanking wall_b's footprint; both run full height
 
     Excludes jacks (don't reach the top plates) and cripples (don't
     reach both plate stacks).
@@ -1247,10 +1547,15 @@ def collect_full_height_stud_centers(
         opening_layouts: list of dicts from opening_framing_layout,
             one per opening on this wall.
         filler_left_xs: left-edge x-coords of corner filler studs from
-            MAIN-role joint ends. Empty list if the wall has no
-            MAIN-role joints.
+            MAIN-role L-corner joint ends. Empty list if the wall has
+            no MAIN-role L-corner joints.
         stud_thickness_in: stud cross-section thickness along wall
             length (LUMBER_TYPES[nominal][0]).
+        backing_stud_left_xs: left-edge x-coords of T-joint backing
+            studs on this wall (only populated when this wall is
+            wall_a in one or more T joints). Empty by default; commit
+            3 wires the operator and bridge predictor to pass two
+            entries per mid_joint from t_joint_geometry_for_wall_a.
 
     Returns:
         Sorted unique list of stud center x-coords. The caller passes
@@ -1271,6 +1576,9 @@ def collect_full_height_stud_centers(
         centers.add(layout['king_right_x'] - half_t)
 
     for x in filler_left_xs:
+        centers.add(x + half_t)
+
+    for x in backing_stud_left_xs:
         centers.add(x + half_t)
 
     return sorted(centers)

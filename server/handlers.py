@@ -1360,8 +1360,8 @@ def remove_joint(params: dict) -> dict:
 # _predict_wall_splice_plans mirrors the operator's pipeline:
 #   stud_positions → end_stud_override → opening_framing_layout →
 #   filter_studs_around_openings → collect_full_height_stud_centers →
-#   plate_effective_range → plan_plate_splice_pieces x3 (cap consumes
-#   lower-top splice xs as the 24" exclusion list).
+#   plate_effective_ranges → plan_plate_splice_pieces per range (cap
+#   consumes lower-top splice xs as the 24" exclusion list).
 # It returns the same three-key dict the operator computes internally.
 # The bridge then formats it into the user-facing splice_summary via
 # _build_splice_summary.
@@ -1479,34 +1479,49 @@ def _predict_wall_splice_plans(
         joint_context['END']['role'] if joint_context['END'] else None
     )
     plate_ranges = {
-        role: templates.plate_effective_range(
+        role: templates.plate_effective_ranges(
             role, length_in,
             role_at_start=role_at_start,
             role_at_end=role_at_end,
             paired_t_at_start=paired_t_by_end['START'],
             paired_t_at_end=paired_t_by_end['END'],
+            joint_type_at_start=(
+                joint_context['START']['joint_type']
+                if joint_context['START'] else None
+            ),
+            joint_type_at_end=(
+                joint_context['END']['joint_type']
+                if joint_context['END'] else None
+            ),
+            mid_joints=None,  # T-joint awareness lands in v0.6.51
         )
         for role in ('BOTTOM', 'LOWER_TOP', 'CAP')
     }
 
     # Splice plans. Cap consumes lower-top splice xs as the 24"
     # exclusion list (IRC R602.3.2). SpliceError propagates up.
-    bot_pieces = templates.plan_plate_splice_pieces(
-        plate_ranges['BOTTOM'][0], plate_ranges['BOTTOM'][1],
-        eligible_stud_centers, max_stock_in,
-    )
-    lower_top_pieces = templates.plan_plate_splice_pieces(
-        plate_ranges['LOWER_TOP'][0], plate_ranges['LOWER_TOP'][1],
-        eligible_stud_centers, max_stock_in,
-    )
+    # v0.6.50: plate_ranges values are LISTS of disjoint ranges;
+    # iterate and extend so the flattened pieces lists keep the
+    # v0.6.41 shape for callers downstream.
+    bot_pieces = []
+    for r_start, r_end in plate_ranges['BOTTOM']:
+        bot_pieces.extend(templates.plan_plate_splice_pieces(
+            r_start, r_end, eligible_stud_centers, max_stock_in,
+        ))
+    lower_top_pieces = []
+    for r_start, r_end in plate_ranges['LOWER_TOP']:
+        lower_top_pieces.extend(templates.plan_plate_splice_pieces(
+            r_start, r_end, eligible_stud_centers, max_stock_in,
+        ))
     lower_top_splice_xs = tuple(
         end for start, end in lower_top_pieces[:-1]
     )
-    cap_pieces = templates.plan_plate_splice_pieces(
-        plate_ranges['CAP'][0], plate_ranges['CAP'][1],
-        eligible_stud_centers, max_stock_in,
-        excluded_splice_xs=lower_top_splice_xs,
-    )
+    cap_pieces = []
+    for r_start, r_end in plate_ranges['CAP']:
+        cap_pieces.extend(templates.plan_plate_splice_pieces(
+            r_start, r_end, eligible_stud_centers, max_stock_in,
+            excluded_splice_xs=lower_top_splice_xs,
+        ))
 
     return {
         'BOTTOM': bot_pieces,

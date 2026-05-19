@@ -120,7 +120,8 @@ def _get_or_make_mesh(name: str, dims_inches: tuple[float, float, float]):
 # stud overrides and filler positions only — the per-end plate offsets
 # (bottom_off / lower_top_off / cap_off / cap_signed_offset) moved out
 # to the per-plate plate_ranges dict returned alongside, computed via
-# templates.plate_effective_range. The split mirrors the conceptual
+# templates.plate_effective_ranges (v0.6.50 list-returning rename of
+# the v0.6.40 plate_effective_range). The split mirrors the conceptual
 # divide: plates are per-plate (both ends combined into a range), and
 # studs are per-end (one filler per joint, one stud override per joint).
 _EMPTY_END_MODS = {
@@ -148,19 +149,23 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
             joint_index is the 1-based index in the Level's joints
             collection (0 if no joint touches that end).
         plate_ranges: dict with 'BOTTOM', 'LOWER_TOP', 'CAP' keys.
-            Each value is a (start_x, end_x) tuple in wall-local
-            coordinates from templates.plate_effective_range. For a
-            wall with no joints, all three are (0, length_in).
+            Each value is a list of (start_x, end_x) tuples in
+            wall-local coordinates from
+            templates.plate_effective_ranges; single-element list for
+            L-corner-only walls or walls without joints. Multi-range
+            results land in v0.6.50 commit 3 when the cap is notched
+            by T joints (the through wall, wall_a). For a wall with
+            no joints, all three are [(0, length_in)].
     """
-    empty_ctx = {'START': None, 'END': None}
+    empty_ctx = {'START': None, 'END': None, 'mid_joints': []}
     mods = {
         'START': dict(_EMPTY_END_MODS),
         'END':   dict(_EMPTY_END_MODS),
     }
     no_joint_ranges = {
-        'BOTTOM':    (0.0, length_in),
-        'LOWER_TOP': (0.0, length_in),
-        'CAP':       (0.0, length_in),
+        'BOTTOM':    [(0.0, length_in)],
+        'LOWER_TOP': [(0.0, length_in)],
+        'CAP':       [(0.0, length_in)],
     }
 
     if not is_existing_wall:
@@ -228,12 +233,16 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
             'joint_index': joint_index_by_end[end],
         }
 
-    # v0.6.40: per-plate effective ranges via the canonical helper.
-    # Each plate's range encodes the v0.6.31 lap geometry: bottom and
-    # lower top shorten at ABUTTING ends (paired wall takes up that
-    # corner cell); cap shortens at MAIN ends (leaving room for the
-    # abutting wall's cap to lap onto the main's lower top); ABUTTING
-    # cap and FREE ends always reach the wall edge.
+    # v0.6.50: per-plate effective ranges via the canonical list-
+    # returning helper. Each plate's range list encodes the v0.6.31
+    # lap geometry: bottom and lower top shorten at L-corner ABUTTING
+    # ends (paired wall takes up that corner cell); cap shortens at
+    # L-corner MAIN ends (leaving room for the abutting wall's cap to
+    # lap onto the main's lower top); L-corner ABUTTING cap and FREE
+    # ends reach the wall edge. The list-of-tuples shape is what makes
+    # cap notching by T joints tractable in commit 3 — for v0.6.50
+    # commit 2, no T joints can be created yet, so every plate range
+    # list has exactly one element.
     role_at_start = (
         joint_context['START']['role'] if joint_context['START'] else None
     )
@@ -241,13 +250,25 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
         joint_context['END']['role'] if joint_context['END'] else None
     )
     plate_ranges = {
-        plate_role: templates.plate_effective_range(
+        plate_role: templates.plate_effective_ranges(
             plate_role,
             length_in,
             role_at_start=role_at_start,
             role_at_end=role_at_end,
             paired_t_at_start=paired_t_by_end['START'],
             paired_t_at_end=paired_t_by_end['END'],
+            joint_type_at_start=(
+                joint_context['START']['joint_type']
+                if joint_context['START'] else None
+            ),
+            joint_type_at_end=(
+                joint_context['END']['joint_type']
+                if joint_context['END'] else None
+            ),
+            # mid_joints empty in commit 2; commit 3 will populate from
+            # joint_context['mid_joints'] after computing each one's
+            # paired_wt from LUMBER_TYPES.
+            mid_joints=None,
         )
         for plate_role in ('BOTTOM', 'LOWER_TOP', 'CAP')
     }
@@ -478,23 +499,36 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             stud_thickness_in=thickness_in,
         )
         try:
-            bot_pieces = templates.plan_plate_splice_pieces(
-                plate_ranges['BOTTOM'][0], plate_ranges['BOTTOM'][1],
-                eligible_stud_centers, max_stock_in,
-            )
-            lower_top_pieces = templates.plan_plate_splice_pieces(
-                plate_ranges['LOWER_TOP'][0], plate_ranges['LOWER_TOP'][1],
-                eligible_stud_centers, max_stock_in,
-            )
+            # v0.6.50: plate_ranges values are now LISTS of disjoint
+            # (start_x, end_x) ranges. Each range goes through the
+            # splice planner independently and the results are
+            # concatenated. For L-corner-only walls every list has
+            # exactly one element so the flattened pieces lists
+            # match v0.6.41 behavior. The multi-range case arrives
+            # when the cap is notched by T joints (commit 3).
+            bot_pieces = []
+            for r_start, r_end in plate_ranges['BOTTOM']:
+                bot_pieces.extend(templates.plan_plate_splice_pieces(
+                    r_start, r_end, eligible_stud_centers, max_stock_in,
+                ))
+            lower_top_pieces = []
+            for r_start, r_end in plate_ranges['LOWER_TOP']:
+                lower_top_pieces.extend(templates.plan_plate_splice_pieces(
+                    r_start, r_end, eligible_stud_centers, max_stock_in,
+                ))
             # Cap splices must offset >=24" from lower-top splices.
+            # Since lower top is never multi-range in v0.6.50 (T joints
+            # only notch the cap), lower_top_pieces[:-1] picks genuine
+            # internal splice points within a single contiguous range.
             lower_top_splice_xs = tuple(
                 end for start, end in lower_top_pieces[:-1]
             )
-            cap_pieces = templates.plan_plate_splice_pieces(
-                plate_ranges['CAP'][0], plate_ranges['CAP'][1],
-                eligible_stud_centers, max_stock_in,
-                excluded_splice_xs=lower_top_splice_xs,
-            )
+            cap_pieces = []
+            for r_start, r_end in plate_ranges['CAP']:
+                cap_pieces.extend(templates.plan_plate_splice_pieces(
+                    r_start, r_end, eligible_stud_centers, max_stock_in,
+                    excluded_splice_xs=lower_top_splice_xs,
+                ))
         except templates.SpliceError as e:
             self.report({'ERROR'}, f"{wall_name}: {e}")
             return {'CANCELLED'}
@@ -580,7 +614,7 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         # v0.6: a joint at either end can shorten the bottom plate by
         # the paired wall's wall thickness (ABUTTING walls only — MAIN
         # walls keep bottom + lower top plates at full length).
-        # v0.6.40: range comes from plate_effective_range via
+        # v0.6.40: range comes from plate_effective_ranges via
         # _resolve_joint_context, and the plate may be split into
         # multiple cut pieces by the splice planner (above). For walls
         # that don't need splicing, bot_pieces is a single-element
@@ -929,11 +963,12 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         # cap to lap onto the main's lower top at the corner cell, and
         # reaches the wall edge at ABUTTING ends (the lap happens
         # INSIDE the abutting wall's own [0, paired_t] strip in world
-        # space). v0.6.40: ranges come from plate_effective_range; each
-        # plate may be split into multiple cut pieces by the splice
-        # planner (above). Lower top and cap can have different piece
-        # counts — they're planned independently, with the cap's plan
-        # offset ≥24" from the lower top's splice xs per IRC R602.3.2.
+        # space). v0.6.40: ranges come from plate_effective_ranges;
+        # each plate may be split into multiple cut pieces by the
+        # splice planner (above). Lower top and cap can have different
+        # piece counts — they're planned independently, with the cap's
+        # plan offset ≥24" from the lower top's splice xs per IRC
+        # R602.3.2.
         z_top_base_m = (height_in - top_plate_count * thickness_in) * INCH
         n_lower_pieces = len(lower_top_pieces)
         n_cap_pieces = len(cap_pieces)
