@@ -8,11 +8,11 @@ a Praxova wall Empty, the operator re-frames it in place using the
 wall's own PraxovaWallProps; otherwise it creates a new wall from scene
 scratch.
 
-v0.6 adds two container-creation operators in this module:
+v0.6 adds container-creation operators in this module:
     PRAXOVA_OT_add_building — create a Building Empty plus a default Level
     PRAXOVA_OT_add_level    — add another Level under the active Building
-Joint management (add_joint, remove_joint) and the frame_building
-orchestrator land in commit 5.
+plus joint management (add_joint, remove_joint) and the frame_building
+multi-wall orchestrator.
 
 Geometry conventions (single isolated wall, v0.4):
     +X: wall length
@@ -25,11 +25,14 @@ studs flush with the wall ends, intermediate studs at on-center spacing
 measured from x=0, the final bay tight when wall length isn't a multiple
 of on-center spacing. This preserves 4'/8' sheathing seam alignment.
 
-Not in v0.6 (deferred):
-    - T joints, in-line splice (v0.7)
-    - California corner, ladder blocking corner styles (v0.7)
+Not yet shipped:
+    - In-line splice joint_type (joining two walls end-to-end as one wall;
+      distinct from v0.6.40's plate splicing along a single wall, which
+      already ships)
+    - California corner, ladder-blocking corner styles (later sprint)
     - Multi-Level framing in one pass (v0.8+)
-    - Direction/rotation parameter (user transforms the Empty afterward)
+    - Direction/rotation parameter for frame_wall (user transforms the
+      Empty afterward)
     - Headers other than (2) 2x + 1/2" plywood spacer
 """
 
@@ -153,9 +156,10 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
             wall-local coordinates from
             templates.plate_effective_ranges; single-element list for
             L-corner-only walls or walls without joints. Multi-range
-            results land in v0.6.50 commit 3 when the cap is notched
-            by T joints (the through wall, wall_a). For a wall with
-            no joints, all three are [(0, length_in)].
+            results land when the cap is notched by T joints (this
+            wall is wall_a in one or more T joints) or extended by
+            T joints (this wall is wall_b in a T_JOINT at one end).
+            For a wall with no joints, all three are [(0, length_in)].
     """
     empty_ctx = {'START': None, 'END': None, 'mid_joints': []}
     mods = {
@@ -239,16 +243,36 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
     # ends (paired wall takes up that corner cell); cap shortens at
     # L-corner MAIN ends (leaving room for the abutting wall's cap to
     # lap onto the main's lower top); L-corner ABUTTING cap and FREE
-    # ends reach the wall edge. The list-of-tuples shape is what makes
-    # cap notching by T joints tractable in commit 3 — for v0.6.50
-    # commit 2, no T joints can be created yet, so every plate range
-    # list has exactly one element.
+    # ends reach the wall edge. The list-of-tuples shape carries
+    # multi-range output for two T-joint cases:
+    #   - this wall is wall_a (through wall) in one or more T joints:
+    #     the cap is partitioned into sub-ranges between the notches.
+    #   - this wall is wall_b (abutting wall) in a T_JOINT at one end:
+    #     the cap range extends OUTBOARD past the wall_length_in edge
+    #     by paired_t (negative start or end > length).
     role_at_start = (
         joint_context['START']['role'] if joint_context['START'] else None
     )
     role_at_end = (
         joint_context['END']['role'] if joint_context['END'] else None
     )
+    # Translate joint_context['mid_joints'] into the {position_in,
+    # paired_wt} dicts that plate_effective_ranges consumes for cap-
+    # notch partitioning. paired_wt is the abutting wall's WALL
+    # thickness (LUMBER_TYPES[..][1], 3.5" for 2x4) — the wt_B vs
+    # st_B distinction from the v0.6.50 design: wall_b's footprint
+    # on wall_a's length axis is its wall thickness, because wall_b
+    # is rotated 90° relative to wall_a so wall_b's local-Y maps to
+    # wall_a's local-X.
+    mid_joints_for_ranges = [
+        {
+            'position_in': mj['position_in'],
+            'paired_wt': templates.LUMBER_TYPES[
+                mj['paired_wall'].praxova_wall.wall_nominal
+            ][1],
+        }
+        for mj in joint_context['mid_joints']
+    ]
     plate_ranges = {
         plate_role: templates.plate_effective_ranges(
             plate_role,
@@ -265,10 +289,7 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
                 joint_context['END']['joint_type']
                 if joint_context['END'] else None
             ),
-            # mid_joints empty in commit 2; commit 3 will populate from
-            # joint_context['mid_joints'] after computing each one's
-            # paired_wt from LUMBER_TYPES.
-            mid_joints=None,
+            mid_joints=mid_joints_for_ranges,
         )
         for plate_role in ('BOTTOM', 'LOWER_TOP', 'CAP')
     }
@@ -428,6 +449,37 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         )
 
         # ------------------------------------------------------------------
+        # v0.6.50: T-joint backing stud derivation
+        # ------------------------------------------------------------------
+        # For each T joint where this wall is wall_a (the through wall),
+        # compute the two backing-stud positions and capture the joint
+        # index for naming. Backing studs flank wall_b's end-stud
+        # footprint on wall_a's interior face, providing drywall nailing
+        # for wall_b's interior face return on both sides. Empty list
+        # for L-corner-only walls and walls with no T-joint mid contexts.
+        # Order is per-joint-then-L/R; since joint_context['mid_joints']
+        # is already sorted by position_in (ascending along wall_a), the
+        # resulting backing_studs list is also monotonic in x, which
+        # keeps TBacker_Joint<NN>_L/_R naming stable across reframes.
+        backing_studs: list[dict] = []
+        for mj in joint_context['mid_joints']:
+            paired_nominal = mj['paired_wall'].praxova_wall.wall_nominal
+            wt_b = templates.LUMBER_TYPES[paired_nominal][1]
+            geom = templates.t_joint_geometry_for_wall_a(
+                position_in=mj['position_in'],
+                st_a=thickness_in,
+                wt_b=wt_b,
+            )
+            left_x, right_x = geom['backing_stud_xs']
+            backing_studs.append({
+                'x': left_x,  'side': 'L', 'joint_index': mj['joint_index'],
+            })
+            backing_studs.append({
+                'x': right_x, 'side': 'R', 'joint_index': mj['joint_index'],
+            })
+        backing_stud_xs = [b['x'] for b in backing_studs]
+
+        # ------------------------------------------------------------------
         # Derived values
         # ------------------------------------------------------------------
         # Raw OC layout, then v0.5 filtered layout after per-opening
@@ -455,6 +507,18 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         stud_xs_in = templates.filter_studs_around_openings(
             raw_stud_xs_in, thickness_in, openings, opening_layouts,
         )
+        # v0.6.50: drop OC studs whose footprint overlaps any T-joint
+        # backing-stud position on this wall. Applied AFTER
+        # filter_studs_around_openings so a single OC stud colliding
+        # with both a king bracket and a backing stud is dropped by
+        # whichever filter sees it first (idempotent composition).
+        if backing_studs:
+            backing_intervals = [
+                (b['x'], b['x'] + thickness_in) for b in backing_studs
+            ]
+            stud_xs_in = templates.filter_studs_around_intervals(
+                stud_xs_in, thickness_in, backing_intervals,
+            )
         # v0.6: wall_name comes from the existing Empty (in-place mode) or
         # the next-unused Wall_NN slot (new mode). Child names are derived
         # via f"{wall_name}_BottomPlate_NN" etc., so picking the right name
@@ -497,6 +561,7 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             opening_layouts=opening_layouts,
             filler_left_xs=filler_left_xs,
             stud_thickness_in=thickness_in,
+            backing_stud_left_xs=backing_stud_xs,
         )
         try:
             # v0.6.50: plate_ranges values are now LISTS of disjoint
@@ -956,6 +1021,28 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             )
             children.append(obj)
 
+        # v0.6.50: T-joint backing studs (this wall is wall_a / the
+        # through wall). Two studs per joint flanking wall_b's end-stud
+        # footprint on wall_a's interior face; both share the regular
+        # wall-stud mesh (identical cross-section + length, different
+        # role at the joint). Object names follow the design's
+        # TBacker_Joint<NN>_<side> convention, parallel to v0.6's
+        # CornerFiller_Joint<NN>. The cut list counts these as
+        # additional studs in the wall (sharing stud_label), so they
+        # aggregate naturally into the ORDER SUMMARY's stud count.
+        for backing in backing_studs:
+            obj = _make_framing_object(
+                context, stud_mesh,
+                f"TBacker_Joint{backing['joint_index']:02d}_{backing['side']}",
+                (backing['x'] * INCH, 0.0, z_stud_base_m),
+                nominal=nominal,
+                length_in=stud_length_in,
+                stock_in=stud_stock_in,
+                orientation='VERTICAL',
+                label=stud_label,
+            )
+            children.append(obj)
+
         # Top plates stacked from (height - top_count * thickness) up.
         # v0.6: lower top plate(s) shorten at ABUTTING ends (matching
         # the bottom plate). v0.6.30/31: cap plate inverts — pulled
@@ -1036,13 +1123,24 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         )
         # v0.6.40: splice info. Total piece count exceeds plate stack
         # count when any plate was spliced. n_splices is the count of
-        # splice joints (one per piece beyond the first, per stack
-        # level). Surface it so the user notices the splice without
-        # having to inspect the cut list.
+        # splice joints (butt joints between pieces of the same plate
+        # role within a single contiguous range), per stack level.
+        # Surface it so the user notices the splice without having to
+        # inspect the cut list.
+        #
+        # v0.6.50: per plate role, splices_per_role = total pieces -
+        # number of sub-ranges. For single-range plates (always true
+        # for BOTTOM and LOWER_TOP; true for CAP on L-corner-only and
+        # no-joint walls) this reduces to len(pieces) - 1, matching
+        # v0.6.41. For multi-range CAP (T-joint notches on wall_a),
+        # the notch boundaries between sub-ranges are NOT splices —
+        # they're structural gaps where wall_b's cap lands on wall_a's
+        # lower top. Subtracting len(plate_ranges['CAP']) excludes
+        # those notch boundaries from the splice count.
         n_splices = (
-            bottom_plate_count * (len(bot_pieces) - 1)
-            + (top_plate_count - 1) * (len(lower_top_pieces) - 1)
-            + (len(cap_pieces) - 1)
+            bottom_plate_count * (len(bot_pieces) - len(plate_ranges['BOTTOM']))
+            + (top_plate_count - 1) * (len(lower_top_pieces) - len(plate_ranges['LOWER_TOP']))
+            + (len(cap_pieces) - len(plate_ranges['CAP']))
         )
         splice_suffix = (
             f" ({n_splices} plate splice{'s' if n_splices != 1 else ''})"

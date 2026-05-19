@@ -586,6 +586,48 @@ def filter_studs_around_openings(
     return out
 
 
+def filter_studs_around_intervals(
+    stud_xs: list[float],
+    stud_thickness_in: float,
+    blocking_intervals: list[tuple[float, float]],
+) -> list[float]:
+    """Drop stud positions whose [x, x+t] footprint overlaps any blocking interval.
+
+    Generalization of filter_studs_around_openings — takes raw
+    (start_x, end_x) intervals rather than opening layout dicts.
+    Used by frame_wall (v0.6.50) to filter OC studs around T-joint
+    backing-stud footprints; could later be reused as a building
+    block for refactoring filter_studs_around_openings if the
+    two filters' shapes converge further.
+
+    Args:
+        stud_xs: left-edge x-coords of studs to filter.
+        stud_thickness_in: stud x-extent.
+        blocking_intervals: list of (start_x, end_x) intervals. A
+            stud is dropped if its [x, x+t] overlaps ANY interval
+            (standard half-open interval overlap test: x + t >
+            start AND x < end).
+
+    Returns:
+        Subset of stud_xs, in input order, that don't overlap any
+        blocking interval. Empty blocking_intervals returns stud_xs
+        unchanged.
+    """
+    if not blocking_intervals:
+        return list(stud_xs)
+    out: list[float] = []
+    for x in stud_xs:
+        x_right = x + stud_thickness_in
+        collides = False
+        for b_start, b_end in blocking_intervals:
+            if x_right > b_start and x < b_end:
+                collides = True
+                break
+        if not collides:
+            out.append(x)
+    return out
+
+
 def validate_openings(
     openings,
     wall_length_in: float,
