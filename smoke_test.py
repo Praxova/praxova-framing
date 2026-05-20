@@ -8,9 +8,10 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.30 RPC surface end-to-end (18 methods — unchanged
-from v0.6.2; v0.6.25 and v0.6.30 were bug-fix cycles, no bridge schema
-changes): ping (with addon_version and method_count assertions), scene
+Covers the full v0.6.50 RPC surface end-to-end (18 methods — unchanged
+from v0.6.2; v0.6.25 through v0.6.50 have been bug-fix / UI-only cycles,
+no bridge schema changes): ping (with addon_version and method_count
+assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
 duplication, edge-to-edge fill, wall framing with optional door/window
 openings (v0.5.1 — bridge parity for the v0.5 UI), Building + Level
@@ -114,9 +115,18 @@ def run(host: str, port: int) -> int:
         # new smoke steps [32]/[33]/[34] exercise the splice path
         # end-to-end. method_count stays 18 — splice is folded into
         # the existing frame_wall / frame_building schema, no new
-        # methods. addon_version 0.6.40 -> 0.6.41.
-        assert r["addon_version"] == "0.6.41", (
-            f"expected addon_version 0.6.41, got {r['addon_version']!r}"
+        # methods. addon_version 0.6.40 -> 0.6.41. v0.6.50: T joints
+        # (joint_type='T_JOINT' on PraxovaJoint, new
+        # wall_a_position_in FloatProperty, T_BACKING_STUDS corner
+        # style). Through-wall cap notched at the joint position;
+        # abutting-wall cap extended OUTBOARD into the notch (IRC
+        # R602.3.2 T-joint lap). Two backing studs on the through
+        # wall flanking the abutting wall's footprint. UI-only
+        # cycle — bridge wire format doesn't yet accept
+        # joint_type='T_JOINT', so no new smoke steps this cycle.
+        # method_count stays 18; addon_version 0.6.41 -> 0.6.50.
+        assert r["addon_version"] == "0.6.50", (
+            f"expected addon_version 0.6.50, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"
