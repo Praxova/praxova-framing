@@ -2370,6 +2370,15 @@ def frame_building(params: dict) -> dict:
                 joint resolution placed under THIS wall (per v0.6's
                 CornerFiller_Joint<NN> object-name convention; only
                 MAIN walls of a THREE_STUD joint produce one).
+              n_backing_studs (v0.6.51): count of T-joint backing
+                studs placed under THIS wall — non-zero only when
+                this wall is the through wall (wall_a) in one or
+                more T joints. Two backing studs per T joint per
+                the T_BACKING_STUDS style (the only T-joint corner
+                style in v0.6.5x). Walls that are the abutting wall
+                (wall_b) in a T joint contribute 0 here — backing
+                studs sit on the through wall's Empty, not the
+                abutting wall's.
               joint_indices_touching: 0-based indices into the
                 Level's joints collection for every joint
                 referencing this wall (in either wall_a or wall_b
@@ -2487,6 +2496,13 @@ def frame_building(params: dict) -> dict:
             1 for child in wall.children
             if child.name.startswith("CornerFiller_Joint")
         )
+        # Object-name-based count per v0.6.50's T-joint backing-stud
+        # naming (TBacker_Joint<NN>_L / _R, parented to the through
+        # wall's Empty). Same .001-suffix tolerance as n_corner_fillers.
+        n_backing_studs = sum(
+            1 for child in wall.children
+            if child.name.startswith("TBacker_Joint")
+        )
 
         # PointerProperty identity comparison, not name comparison —
         # survives a wall rename that happened between joint creation
@@ -2500,6 +2516,7 @@ def frame_building(params: dict) -> dict:
             "wall_name": wall.name,
             "n_studs": n_studs,
             "n_corner_fillers": n_corner_fillers,
+            "n_backing_studs": n_backing_studs,
             "joint_indices_touching": joint_indices_touching,
             # v0.6.41: per-wall splice details from pre-flight. Same
             # shape as frame_wall's splice_summary field — see that
