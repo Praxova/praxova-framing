@@ -922,7 +922,16 @@ class PRAXOVA_PT_building(bpy.types.Panel):
             j = joints[level.praxova_level.joints_active]
             detail = box.column(align=True)
             detail.prop(j, "joint_type")
-            detail.prop(j, "wall_a")
+
+            # v0.6.51: T joints have slot-fixed roles (wall_a = THROUGH,
+            # wall_b = ABUTTING), so the labels can be informative. L
+            # corners deliberately keep the softer "Wall A" / "Wall B"
+            # labels per the v0.6.25 role-resolution change — role is
+            # derived from extending_wall, not slot.
+            if j.joint_type == 'T_JOINT':
+                detail.prop(j, "wall_a", text="Through Wall (A)")
+            else:
+                detail.prop(j, "wall_a")
 
             # v0.6.50: wall_a's "end" only matters for L_CORNER (the
             # joint is AT one end of wall_a). T_JOINT joints connect
@@ -947,7 +956,10 @@ class PRAXOVA_PT_building(bpy.types.Panel):
                     icon='INFO',
                 )
 
-            detail.prop(j, "wall_b")
+            if j.joint_type == 'T_JOINT':
+                detail.prop(j, "wall_b", text="Abutting Wall (B)")
+            else:
+                detail.prop(j, "wall_b")
             detail.prop(j, "wall_b_end")
             detail.prop(j, "corner_style")
 

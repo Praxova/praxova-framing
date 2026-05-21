@@ -113,7 +113,7 @@ Two side-by-side panels under the Praxova category:
 - **Building** (new in v0.6) — three nested sections:
   - **Building**: active Building dropdown + Add Building button + default corner style (for v0.6, three-stud only).
   - **Level**: active Level dropdown + Add Level button + level index / height + a read-only list of walls in this Level + Frame Building button.
-  - **Joints**: UIList of joints + Add/Remove buttons + active joint detail panel (wall_a + end, wall_b + end, corner style, extending wall). Live validation surfaces the same first-failure message Frame Building would report.
+  - **Joints**: UIList of joints + Add/Remove buttons + active joint detail panel. Fields vary by joint_type: L_CORNER shows wall_a/end, wall_b/end, corner_style, extending_wall + a Resolved MAIN readout; T_JOINT shows Through Wall (A), wall_a_position_in (with carpenter-format readout), Abutting Wall (B)/end, corner_style. Live validation surfaces the same first-failure message Frame Building would report.
 
 ### Joints and the three-stud corner
 
@@ -151,9 +151,9 @@ T joint position must satisfy `st_a ≤ position ≤ wall_a_length - wt_b - st_a
 
 After creating two walls under a Level (per the L-joint workflow below), add a joint via the Joints UIList. Change `joint_type` to "T Joint" in the detail panel — the field set switches: `wall_a_position_in` (with carpenter-format `= N' M"` readout) replaces `wall_a_end`, and `extending_wall` + the Resolved MAIN readout disappear. Pick wall_a (the through wall), set the position along wall_a's length, pick wall_b (the abutting wall) and which end of wall_b connects, leave `corner_style` on AUTO (resolves to T_BACKING_STUDS). Click Frame Building. The through wall picks up its two backing studs and a notched cap; the abutting wall picks up its extended cap.
 
-#### Bridge
+#### Bridge (v0.6.51)
 
-T joints are not yet exposed via the MCP bridge — `add_joint` and `list_joints_in_level` only accept `joint_type='L_CORNER'` in v0.6.50. v0.6.51 will extend the wire format and add the corresponding smoke-test coverage.
+`add_joint` accepts `joint_type='T_JOINT'` with a required `wall_a_position_in` field; `list_joints_in_level` round-trips the full T-joint shape including `wall_a_position_in`. The joint_type / corner_style combo rules (`T_JOINT` requires `T_BACKING_STUDS` or `AUTO`; `L_CORNER` requires `THREE_STUD` or `AUTO`) are pre-checked at `add_joint` time — INVALID_PARAMS surfaces before the LLM commits to a frame_building call. Position bounds are checked later at frame_building time via validate_joints (the bridge doesn't read wall_a's length at parse time). `frame_building`'s per-wall summary gains `n_backing_studs` alongside `n_corner_fillers` so callers can verify T-joint geometry placement without a follow-up list_objects query. `frame_wall` / `frame_building` `splice_summary` handles T-through walls correctly — `n_splices` is notch-aware (cap-plate notches don't count as splices) and `splice_xs` filters out notch boundaries.
 
 ### Workflow
 

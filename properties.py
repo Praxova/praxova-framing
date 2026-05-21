@@ -428,17 +428,22 @@ class PraxovaJoint(bpy.types.PropertyGroup):
         name="Wall A",
         type=bpy.types.Object,
         description=(
-            "First wall in the joint. Whether wall_a is MAIN at frame "
-            "time depends on extending_wall resolution (see Resolved "
-            "MAIN below the extending_wall dropdown)."
+            "First wall in the joint. For L_CORNER: role (MAIN vs "
+            "ABUTTING) depends on extending_wall resolution — see the "
+            "Resolved MAIN readout below the extending_wall dropdown. "
+            "For T_JOINT: wall_a is always the THROUGH wall (plates "
+            "continue through the joint position; the abutting wall_b "
+            "butts into wall_a's side at wall_a_position_in)."
         ),
     )
     wall_b: bpy.props.PointerProperty(  # noqa: F821
         name="Wall B",
         type=bpy.types.Object,
         description=(
-            "Second wall in the joint. Whether wall_b is MAIN at "
-            "frame time depends on extending_wall resolution."
+            "Second wall in the joint. For L_CORNER: role (MAIN vs "
+            "ABUTTING) depends on extending_wall resolution. For "
+            "T_JOINT: wall_b is always the ABUTTING wall (its near "
+            "end butts into wall_a's side at wall_a_position_in)."
         ),
     )
     wall_a_end: EnumProperty(  # noqa: F821
@@ -463,8 +468,10 @@ class PraxovaJoint(bpy.types.PropertyGroup):
             "For T_JOINT joints only: wall_a-local x coordinate where "
             "wall_b's near edge connects. wall_b's footprint on wall_a "
             "spans [position, position + wt_b] where wt_b is wall_b's "
-            "wall thickness (3.5\" for 2x4, 5.5\" for 2x6, etc). "
-            "Ignored for L_CORNER joints."
+            "wall thickness (3.5\" for 2x4, 5.5\" for 2x6, etc). Must "
+            "satisfy st_a <= position <= wall_a_length - wt_b - st_a "
+            "so the two backing studs fit (st_a = wall_a's wall "
+            "thickness). Ignored for L_CORNER joints."
         ),
         default=0.0,
         min=0.0,
@@ -541,7 +548,7 @@ class PraxovaBuildingProps(bpy.types.PropertyGroup):
         name="Default corner style",
         items=[
             ('THREE_STUD', "Three-stud", "Three vertical studs forming a corner-post bundle"),
-            # v0.7: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
+            # v0.6.6+: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
         ],
         default='THREE_STUD',
     )
