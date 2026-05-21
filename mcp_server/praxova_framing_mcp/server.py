@@ -188,17 +188,22 @@ def list_joints_in_level(level_name: str) -> dict:
             shares its shape with add_joint's returned `joint`:
 
               {
-                "joint_index":     int,        # 0-based
-                "joint_type":      str,        # "L_CORNER" for v0.6
-                "wall_a_name":     str | None, # None when a UI-
-                                               #   added joint hasn't
-                                               #   had walls picked
-                                               #   yet
-                "wall_b_name":     str | None, # same
-                "wall_a_end":      "START" | "END",
-                "wall_b_end":      "START" | "END",
-                "corner_style":    "AUTO" | "THREE_STUD",
-                "extending_wall":  "AUTO" | "A" | "B",
+                "joint_index":        int,                 # 0-based
+                "joint_type":         "L_CORNER" | "T_JOINT",
+                "wall_a_name":        str | None,          # None when a UI-
+                                                           #   added joint hasn't
+                                                           #   had walls picked
+                                                           #   yet
+                "wall_b_name":        str | None,          # same
+                "wall_a_end":         "START" | "END",
+                "wall_b_end":         "START" | "END",
+                "wall_a_position_in": float,               # always present; 0.0
+                                                           #   for L_CORNER
+                                                           #   (ignored), real
+                                                           #   position for T_JOINT
+                "corner_style":       "AUTO" | "THREE_STUD"
+                                                | "T_BACKING_STUDS",
+                "extending_wall":     "AUTO" | "A" | "B",  # ignored for T_JOINT
               }
 
     Scope is per-Level — v0.6 joints live on the Level (they
@@ -529,11 +534,15 @@ def add_level(
 def add_joint(level_name: str, joint: dict) -> dict:
     """Append a new joint to a Praxova Level's joints collection.
 
-    A joint connects two walls in the same Level at an L corner; the
-    MAIN wall keeps plate continuity through the corner while the
-    ABUTTING wall's plates are shortened by the main wall's wall
-    thickness. frame_building reads these joints and re-frames every
-    wall in the Level with the corner geometry applied.
+    Two joint types ship in v0.6.51. L_CORNER (the historical default):
+    two walls meet at 90° at their ends; the MAIN wall keeps plate
+    continuity through the corner while the ABUTTING wall's plates are
+    shortened by the main wall's wall thickness. T_JOINT (v0.6.51):
+    one wall (the THROUGH wall, wall_a) continues past the joint while
+    the other (the ABUTTING wall, wall_b) butts into wall_a's side at
+    a position along wall_a's length. frame_building reads these joints
+    and re-frames every wall in the Level with the corner geometry
+    applied.
 
     Args:
         level_name: Name of the Praxova Level Empty (created via
@@ -545,29 +554,39 @@ def add_joint(level_name: str, joint: dict) -> dict:
         joint: dict carrying the wire-format joint spec:
 
             {
-              "joint_type":      "L_CORNER",          # OPTIONAL,
-                                                      #   default
-                                                      #   "L_CORNER"
-                                                      #   (only valid
-                                                      #   in v0.6.x)
-              "wall_a_name":     "Wall_01",           # REQUIRED;
-                                                      #   MAIN wall
-              "wall_b_name":     "Wall_02",           # REQUIRED;
-                                                      #   ABUTTING wall
-              "wall_a_end":      "END" | "START",     # REQUIRED
-              "wall_b_end":      "END" | "START",     # REQUIRED
-              "corner_style":    "AUTO" | "THREE_STUD",
-                                                      # OPTIONAL,
-                                                      #   default
-                                                      #   "AUTO"
-              "extending_wall":  "AUTO" | "A" | "B",  # OPTIONAL,
-                                                      #   default
-                                                      #   "AUTO"
-                                                      #   (LONGER wall
-                                                      #   is MAIN per
-                                                      #   residential
-                                                      #   convention;
-                                                      #   ties to A)
+              "joint_type":         "L_CORNER" | "T_JOINT",   # OPTIONAL,
+                                                              #   default "L_CORNER"
+              "wall_a_name":        "Wall_01",                # REQUIRED;
+                                                              #   L: MAIN (default);
+                                                              #   T: THROUGH wall
+              "wall_b_name":        "Wall_02",                # REQUIRED;
+                                                              #   L: ABUTTING;
+                                                              #   T: ABUTTING
+              "wall_a_end":         "END" | "START",          # REQUIRED (schema
+                                                              #   regularity);
+                                                              #   IGNORED for T_JOINT
+                                                              #   (T joints don't bind
+                                                              #   an end of wall_a)
+              "wall_b_end":         "END" | "START",          # REQUIRED for both
+              "wall_a_position_in": 96.0,                     # REQUIRED for T_JOINT
+                                                              #   (wall_a-local x at
+                                                              #   wall_b's near edge);
+                                                              #   OPTIONAL for L_CORNER
+                                                              #   (default 0.0, ignored)
+              "corner_style":       "AUTO" | "THREE_STUD"     # OPTIONAL,
+                                                              #   | "T_BACKING_STUDS",
+                                                              #   default "AUTO"
+                                                              #   (AUTO resolves to
+                                                              #   THREE_STUD for L,
+                                                              #   T_BACKING_STUDS for T)
+              "extending_wall":     "AUTO" | "A" | "B",       # OPTIONAL,
+                                                              #   default "AUTO"
+                                                              #   (LONGER wall is MAIN
+                                                              #   per residential
+                                                              #   convention; ties to A);
+                                                              #   IGNORED for T_JOINT
+                                                              #   (through/abutting is
+                                                              #   slot-fixed)
             }
 
           wall_a_name / wall_b_name must resolve to Praxova-managed
@@ -576,12 +595,25 @@ def add_joint(level_name: str, joint: dict) -> dict:
           the message naming both the bad value AND the Level it
           was checked against so the LLM knows which param to fix.
 
+          joint_type / corner_style compatibility is enforced at
+          add_joint time (NOT deferred to frame_building):
+          joint_type='T_JOINT' with corner_style='THREE_STUD'
+          returns INVALID_PARAMS, as does joint_type='L_CORNER'
+          with corner_style='T_BACKING_STUDS'. AUTO is uncondi-
+          tionally valid for either joint_type (resolves at
+          frame_building time per the bullet above). T-joint
+          position bounds (wall_a_position_in must satisfy
+          st_a <= pos <= length - wt_b - st_a so backing studs
+          fit) are checked at frame_building time via
+          validate_joints, not at add_joint time — the bridge
+          doesn't read wall_a's length at parse time.
+
     Returns:
         level_name: echo
         joint_index: 0-based index of the new joint in the Level's
             joints collection. Pass to remove_joint or use as the
             wire key for round-tripping via list_joints_in_level.
-        joint: full filled spec — all six wire fields above with
+        joint: full filled spec — all wire fields above with
             defaults made explicit, plus joint_index. Identical
             shape to list_joints_in_level entries.
 
@@ -601,6 +633,37 @@ def add_joint(level_name: str, joint: dict) -> dict:
     assignment) rather than invoking bpy.ops.praxova.add_joint, so
     every field is set in one step. The UI op stays unchanged for
     human-driven "click + then fill fields" flows.
+
+    Worked examples:
+
+      L corner — Wall_01's END meets Wall_02's START (default
+      joint_type, AUTO corner_style and extending_wall):
+
+        add_joint(
+            level_name="Level_01",
+            joint={
+                "wall_a_name": "Wall_01",
+                "wall_b_name": "Wall_02",
+                "wall_a_end":  "END",
+                "wall_b_end":  "START",
+            },
+        )
+
+      T joint — Wall_02's START butts into the side of Wall_01 at
+      96" along Wall_01's length (interior partition meets exterior
+      wall, AUTO corner_style resolves to T_BACKING_STUDS):
+
+        add_joint(
+            level_name="Level_01",
+            joint={
+                "joint_type":         "T_JOINT",
+                "wall_a_name":        "Wall_01",        # the through wall
+                "wall_b_name":        "Wall_02",        # the abutting wall
+                "wall_a_end":         "END",            # required, ignored
+                "wall_b_end":         "START",
+                "wall_a_position_in": 96.0,
+            },
+        )
     """
     return _call("add_joint", {
         "level_name": level_name,
@@ -630,9 +693,10 @@ def remove_joint(level_name: str, joint_index: int) -> dict:
         joint_index: echo
         removed: the joint's full wire spec captured BEFORE removal:
             joint_index, joint_type, wall_a_name, wall_b_name,
-            wall_a_end, wall_b_end, corner_style, extending_wall.
-            Same shape add_joint accepts on the way in (minus the
-            joint_index, which is reassigned on re-add).
+            wall_a_end, wall_b_end, wall_a_position_in,
+            corner_style, extending_wall. Same shape add_joint
+            accepts on the way in (minus the joint_index, which is
+            reassigned on re-add).
 
     The Level's `joints_active` index is clamped to the new bounds
     after removal, matching the UI op (max(0, min(joints_active,
@@ -809,16 +873,21 @@ def frame_wall(
               }
 
             pieces is the number of cut pieces (1 means no splice).
-            splice_xs are the butt-joint x-coords in wall-local
-            coordinates, in order from x=0 to wall end (empty when
-            pieces == 1). Cap splice_xs always offset ≥24" from
-            lower_top splice_xs per IRC R602.3.2 — enforced as a
-            HARD constraint via pre-flight: a wall whose stud
-            layout can't satisfy the offset returns INVALID_PARAMS
-            with the specific failing range and offset constraint
-            inline, rather than framing a non-compliant splice.
-            n_splices counts every stack-level instance: bottom
-            splices * bottom_plate_count + lower_top splices *
+            For walls that are wall_a (the through wall) in T joints,
+            cap.pieces may exceed 1 because of cap-plate notches at
+            each T joint position — those are NOT splices. n_splices
+            is the authoritative splice count (it subtracts notch-
+            induced pieces); cap.splice_xs lists only true butt-joint
+            positions. splice_xs are the butt-joint x-coords in wall-
+            local coordinates, in order from x=0 to wall end (empty
+            when n_splices on this plate role is 0). Cap splice_xs
+            always offset >=24" from lower_top splice_xs per IRC
+            R602.3.2 — enforced as a HARD constraint via pre-flight:
+            a wall whose stud layout can't satisfy the offset returns
+            INVALID_PARAMS with the specific failing range and offset
+            constraint inline, rather than framing a non-compliant
+            splice. n_splices counts every stack-level instance:
+            bottom splices * bottom_plate_count + lower_top splices *
             (top_plate_count - 1) + cap splices.
         n_openings: always present (0 when openings omitted)
         openings_summary: always present (empty list when none). One dict
@@ -979,6 +1048,15 @@ def frame_building(level_name: str) -> dict:
                                                        #   (MAIN walls of
                                                        #   THREE_STUD joints
                                                        #   only)
+                "n_backing_studs":         int,        # T-joint backing studs
+                                                       #   placed under this wall
+                                                       #   (non-zero only when
+                                                       #   this wall is the
+                                                       #   THROUGH wall in one
+                                                       #   or more T joints;
+                                                       #   two backing studs
+                                                       #   per T joint per the
+                                                       #   T_BACKING_STUDS style)
                 "joint_indices_touching":  [int, ...] # 0-based indices
                                                        #   into the Level's
                                                        #   joints collection
