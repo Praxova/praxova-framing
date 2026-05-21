@@ -1682,6 +1682,30 @@ def _predict_wall_splice_plans(
     }
 
 
+def _splice_xs_from_pieces(
+    pieces: list[tuple[float, float]],
+) -> list[float]:
+    """Per-plate butt-joint positions — only contiguous piece
+    boundaries count. Pieces straddling a sub-range gap (T-joint
+    cap notch) are skipped: their end-x is a notch boundary, not
+    a splice position.
+
+    math.isclose with abs_tol=1e-6 (sub-micron in inch units) is
+    used rather than == because piece-end coords originate from
+    stud_positions (arithmetic stream: spacing_oc_in * index) while
+    notch boundaries come from position_in + wt_b (independent
+    arithmetic stream); float equality across mixed sources is
+    brittle.
+    """
+    return [
+        pieces[i][1]
+        for i in range(len(pieces) - 1)
+        if math.isclose(
+            pieces[i + 1][0], pieces[i][1], abs_tol=1e-6,
+        )
+    ]
+
+
 def _build_splice_summary(
     splice_plans: dict,
     bottom_plate_count: int,
@@ -1706,22 +1730,18 @@ def _build_splice_summary(
     correctly contributes 0 to n_splices instead of 1+. Mirrors the
     operator-side n_splices fix from v0.6.50 commit 3.
 
-    Known limitation: cap.splice_xs may still include notch
-    boundaries for multi-range CAPs — the [end for start, end in
-    cap[:-1]] expression doesn't distinguish "splice within a
-    sub-range" from "boundary between sub-ranges". n_splices is
-    authoritative (subtracting plate_ranges_count[role] excludes the
-    notch boundaries from the count); the splice_xs list cleanup is
-    a separate concern for a future cleanup pass.
+    splice_xs filters out sub-range boundaries via piece-adjacency
+    check (math.isclose with abs_tol=1e-6) so T-joint cap notches
+    don't surface as false-positive splice positions.
     """
     bot = splice_plans['BOTTOM']
     lt = splice_plans['LOWER_TOP']
     cap = splice_plans['CAP']
     ranges_count = splice_plans['plate_ranges_count']
 
-    bot_splice_xs = [end for start, end in bot[:-1]]
-    lt_splice_xs = [end for start, end in lt[:-1]]
-    cap_splice_xs = [end for start, end in cap[:-1]]
+    bot_splice_xs = _splice_xs_from_pieces(bot)
+    lt_splice_xs = _splice_xs_from_pieces(lt)
+    cap_splice_xs = _splice_xs_from_pieces(cap)
 
     # Per-role splice count = total pieces - number of sub-ranges.
     # Reduces to len(pieces) - 1 for single-range plates (all v0.6.41
