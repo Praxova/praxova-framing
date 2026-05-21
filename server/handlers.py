@@ -1460,11 +1460,33 @@ def _predict_wall_splice_plans(
     None), joint context is empty by definition — a not-yet-existing
     wall isn't referenced by any joint.
 
+    v0.6.51 T-joint awareness: when this wall is the through wall
+    (wall_a) in one or more T joints, the operator-side geometry is
+    mirrored here so the bridge sees the same splice plans frame_wall
+    would produce. Specifically: backing studs (two per T joint
+    flanking wall_b's footprint) become eligible splice anchors;
+    cap-plate notches partition CAP's effective range into sub-ranges
+    that each go through the splice planner independently; OC studs
+    overlapping any backing-stud footprint are filtered out. When
+    this wall is the abutting wall (wall_b) in a T joint, its CAP
+    range extends OUTBOARD past wall_length_in by paired_t — handled
+    naturally by plate_effective_ranges and the splice planner.
+
     Returns:
-        {'BOTTOM': pieces, 'LOWER_TOP': pieces, 'CAP': pieces} where
-        each value is a list of (start_x, end_x) tuples from
-        templates.plan_plate_splice_pieces. Single-piece plates
-        (wall fits in max stock) are a single-element list.
+        {
+            'BOTTOM': pieces, 'LOWER_TOP': pieces, 'CAP': pieces,
+            'plate_ranges_count': {'BOTTOM': int, 'LOWER_TOP': int,
+                                   'CAP': int},
+        }
+        Each pieces value is a list of (start_x, end_x) tuples from
+        templates.plan_plate_splice_pieces. Single-piece plates (wall
+        fits in max stock, no T-joint notches) yield a single-element
+        list. plate_ranges_count carries the number of disjoint
+        sub-ranges per plate role — 1 for every L-corner-only or
+        no-joint wall; >1 for the CAP of a wall_a in T joints (one
+        sub-range per inter-notch span). _build_splice_summary
+        consumes this to compute n_splices correctly when CAP is
+        multi-piece due to notches rather than stock-fit splices.
 
     Raises:
         templates.SpliceError: if any plate's splice can't be placed.
@@ -1474,7 +1496,11 @@ def _predict_wall_splice_plans(
     max_stock_in = templates.max_stock_length_in(nominal)
 
     # Joint context (REBUILD with parent Level) or all-None defaults.
-    joint_context: dict = {'START': None, 'END': None}
+    # mid_joints is always present (empty list when not computed) so
+    # downstream code can read joint_context['mid_joints'] without a
+    # guard. Matches the shape templates.compute_wall_joint_context
+    # returns since v0.6.50.
+    joint_context: dict = {'START': None, 'END': None, 'mid_joints': []}
     paired_t_by_end: dict[str, float] = {'START': 0.0, 'END': 0.0}
     end_stud_override_by_end: dict = {'START': None, 'END': None}
     filler_left_xs: list[float] = []
@@ -1504,18 +1530,51 @@ def _predict_wall_splice_plans(
                 paired_nominal = paired_wall.praxova_wall.wall_nominal
                 wt_other = templates.LUMBER_TYPES[paired_nominal][1]
                 paired_t_by_end[end] = wt_other
-                geom = templates.l_corner_geometry(
-                    st_self=thickness_in,
-                    wt_other=wt_other,
-                    role=ctx['role'],
-                    end=end,
-                    wall_length_in=length_in,
-                )
-                end_stud_override_by_end[end] = (
-                    geom['end_stud_x_override']
-                )
-                if geom['filler_stud_x'] is not None:
-                    filler_left_xs.append(geom['filler_stud_x'])
+
+                if ctx['joint_type'] == 'L_CORNER':
+                    geom = templates.l_corner_geometry(
+                        st_self=thickness_in,
+                        wt_other=wt_other,
+                        role=ctx['role'],
+                        end=end,
+                        wall_length_in=length_in,
+                    )
+                    end_stud_override_by_end[end] = (
+                        geom['end_stud_x_override']
+                    )
+                    if geom['filler_stud_x'] is not None:
+                        filler_left_xs.append(geom['filler_stud_x'])
+                # T_JOINT ABUTTING: no filler stud, no end-stud
+                # override; cap extends outboard via
+                # plate_effective_ranges (joint_type_at_<end>='T_JOINT'
+                # + paired_t_at_<end>=wt_other, both already set in
+                # this branch).
+
+    # T-joint geometry: this wall is the through wall (wall_a) in 0+
+    # T joints. Each T joint produces two backing studs flanking
+    # wall_b's footprint, plus a cap-plate notch at the joint
+    # position. Empty lists when this wall has no mid_joints — the
+    # downstream code paths handle empty inputs naturally.
+    backing_stud_left_xs: list[float] = []
+    backing_stud_intervals: list[tuple[float, float]] = []
+    mid_joints_dicts: list[dict] = []
+    for mj in joint_context['mid_joints']:
+        paired_mj_nominal = mj['paired_wall'].praxova_wall.wall_nominal
+        paired_mj_wt = templates.LUMBER_TYPES[paired_mj_nominal][1]
+        t_geom = templates.t_joint_geometry_for_wall_a(
+            position_in=mj['position_in'],
+            st_a=thickness_in,
+            wt_b=paired_mj_wt,
+        )
+        backing_stud_left_xs.extend(t_geom['backing_stud_xs'])
+        for bs_left_x in t_geom['backing_stud_xs']:
+            backing_stud_intervals.append(
+                (bs_left_x, bs_left_x + thickness_in)
+            )
+        mid_joints_dicts.append({
+            'position_in': mj['position_in'],
+            'paired_wt': paired_mj_wt,
+        })
 
     # OC studs with end-stud overrides applied (mirrors ops_frame.py).
     oc_stud_xs = templates.stud_positions(
@@ -1538,12 +1597,22 @@ def _predict_wall_splice_plans(
         oc_stud_xs = templates.filter_studs_around_openings(
             oc_stud_xs, thickness_in, target_openings, opening_layouts,
         )
+    # v0.6.51: filter OC studs around T-joint backing-stud footprints.
+    # Applied AFTER filter_studs_around_openings so a single OC stud
+    # colliding with both a king bracket and a backing stud is dropped
+    # by whichever filter sees it first (intersection-free filters
+    # compose; idempotent ordering). Mirrors ops_frame.py.
+    if backing_stud_intervals:
+        oc_stud_xs = templates.filter_studs_around_intervals(
+            oc_stud_xs, thickness_in, backing_stud_intervals,
+        )
 
     eligible_stud_centers = templates.collect_full_height_stud_centers(
         oc_stud_left_xs=oc_stud_xs,
         opening_layouts=opening_layouts,
         filler_left_xs=filler_left_xs,
         stud_thickness_in=thickness_in,
+        backing_stud_left_xs=backing_stud_left_xs,
     )
 
     role_at_start = (
@@ -1567,7 +1636,11 @@ def _predict_wall_splice_plans(
                 joint_context['END']['joint_type']
                 if joint_context['END'] else None
             ),
-            mid_joints=None,  # T-joint awareness lands in v0.6.51
+            # CAP only — bottom and lower top continue through T joints
+            # unmodified, per IRC R602.3.2 and the v0.6.50 design.
+            mid_joints=(
+                mid_joints_dicts if role == 'CAP' else None
+            ),
         )
         for role in ('BOTTOM', 'LOWER_TOP', 'CAP')
     }
@@ -1601,6 +1674,11 @@ def _predict_wall_splice_plans(
         'BOTTOM': bot_pieces,
         'LOWER_TOP': lower_top_pieces,
         'CAP': cap_pieces,
+        'plate_ranges_count': {
+            'BOTTOM': len(plate_ranges['BOTTOM']),
+            'LOWER_TOP': len(plate_ranges['LOWER_TOP']),
+            'CAP': len(plate_ranges['CAP']),
+        },
     }
 
 
@@ -1609,7 +1687,7 @@ def _build_splice_summary(
     bottom_plate_count: int,
     top_plate_count: int,
 ) -> dict:
-    """Format splice_plans into the v0.6.41 frame_wall response shape.
+    """Format splice_plans into the frame_wall response shape.
 
     splice_xs are the per-plate butt-joint positions (one per piece
     beyond the first). n_splices counts every stack-level instance:
@@ -1618,19 +1696,45 @@ def _build_splice_summary(
     + cap plate splices (the cap is one plate, the topmost in the
     stack). For default counts (1 bottom plate, 2 top plates) this
     equals bottom + lower_top + cap splice counts.
+
+    v0.6.51: n_splices uses len(pieces) - plate_ranges_count[role]
+    per plate role rather than len(pieces) - 1. For walls without
+    T-joint cap notches, every plate_ranges_count is 1 and the new
+    formula reduces to len(pieces) - 1 — byte-for-byte identical to
+    v0.6.41. For wall_a with T-joint cap notches, a multi-piece CAP
+    arising from notches (no actual splices in the sub-ranges)
+    correctly contributes 0 to n_splices instead of 1+. Mirrors the
+    operator-side n_splices fix from v0.6.50 commit 3.
+
+    Known limitation: cap.splice_xs may still include notch
+    boundaries for multi-range CAPs — the [end for start, end in
+    cap[:-1]] expression doesn't distinguish "splice within a
+    sub-range" from "boundary between sub-ranges". n_splices is
+    authoritative (subtracting plate_ranges_count[role] excludes the
+    notch boundaries from the count); the splice_xs list cleanup is
+    a separate concern for a future cleanup pass.
     """
     bot = splice_plans['BOTTOM']
     lt = splice_plans['LOWER_TOP']
     cap = splice_plans['CAP']
+    ranges_count = splice_plans['plate_ranges_count']
 
     bot_splice_xs = [end for start, end in bot[:-1]]
     lt_splice_xs = [end for start, end in lt[:-1]]
     cap_splice_xs = [end for start, end in cap[:-1]]
 
+    # Per-role splice count = total pieces - number of sub-ranges.
+    # Reduces to len(pieces) - 1 for single-range plates (all v0.6.41
+    # cases), so backward-compatible byte-for-byte on every non-T-
+    # through wall.
+    bot_splices = len(bot) - ranges_count['BOTTOM']
+    lt_splices = len(lt) - ranges_count['LOWER_TOP']
+    cap_splices = len(cap) - ranges_count['CAP']
+
     n_splices = (
-        len(bot_splice_xs) * bottom_plate_count
-        + len(lt_splice_xs) * (top_plate_count - 1)
-        + len(cap_splice_xs)
+        bot_splices * bottom_plate_count
+        + lt_splices * (top_plate_count - 1)
+        + cap_splices
     )
 
     return {
