@@ -276,11 +276,11 @@ def _parse_openings(raw, wall_nominal: str) -> list[dict]:
 # Choices come from PraxovaJoint's EnumProperty items in properties.py.
 # Kept inline here so the bridge enforces the wire-format contract
 # without import-time coupling to bpy/properties; if the UI extends
-# either enum in v0.7+ (T joints, California / ladder corners), these
-# tuples will also need to grow.
-_JOINT_TYPE_CHOICES = ("L_CORNER",)
+# either enum in v0.6.6+ (California / ladder-blocking corner styles),
+# these tuples will also need to grow.
+_JOINT_TYPE_CHOICES = ("L_CORNER", "T_JOINT")
 _JOINT_END_CHOICES = ("START", "END")
-_JOINT_CORNER_STYLE_CHOICES = ("AUTO", "THREE_STUD")
+_JOINT_CORNER_STYLE_CHOICES = ("AUTO", "THREE_STUD", "T_BACKING_STUDS")
 _JOINT_EXTENDING_CHOICES = ("AUTO", "A", "B")
 
 
@@ -325,11 +325,23 @@ def _parse_joint(raw, level: bpy.types.Object) -> dict:
     """Validate one joint wire-format dict against a Level's walls.
 
     Returns a dict with every field default-filled (joint_type,
-    wall_a_end / wall_b_end, corner_style, extending_wall) plus the
-    resolved wall Object references (wall_a, wall_b) AND the original
-    name strings (wall_a_name, wall_b_name) so add_joint can both
-    write the PointerProperty refs onto the new PraxovaJoint and echo
-    the names back in its response without a second lookup.
+    wall_a_end / wall_b_end, corner_style, extending_wall,
+    wall_a_position_in) plus the resolved wall Object references
+    (wall_a, wall_b) AND the original name strings (wall_a_name,
+    wall_b_name) so add_joint can both write the PointerProperty
+    refs onto the new PraxovaJoint and echo the names back in its
+    response without a second lookup.
+
+    wall_a_position_in is REQUIRED when joint_type == "T_JOINT" (the
+    joint's position along wall_a's length) and OPTIONAL with default
+    0.0 when joint_type == "L_CORNER" (the field exists on every
+    PraxovaJoint but is ignored for L corners). joint_type and
+    corner_style are cross-checked against each other — THREE_STUD is
+    only valid with L_CORNER and T_BACKING_STUDS is only valid with
+    T_JOINT; AUTO is unconditionally valid (resolves later via
+    templates.resolve_corner_style). Mirrors templates.validate_joints
+    so the LLM sees consistent error text whether the failure surfaces
+    at add_joint time or at frame_building time.
 
     Mirrors v0.5.1's _parse_openings structurally: required-vs-optional
     per the wire spec, choices enforced via _require / _optional's
@@ -359,10 +371,43 @@ def _parse_joint(raw, level: bpy.types.Object) -> dict:
         raw, "corner_style", str, default="AUTO",
         choices=_JOINT_CORNER_STYLE_CHOICES,
     )
+
+    # joint_type / corner_style compatibility. AUTO is always valid;
+    # explicit values are gated by joint_type. Mirrors
+    # templates.validate_joints so the LLM sees the same message
+    # whether the error surfaces at add_joint or frame_building time.
+    if joint_type == "T_JOINT" and corner_style == "THREE_STUD":
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            "corner_style 'THREE_STUD' is only valid with "
+            "joint_type 'L_CORNER'",
+        )
+    if joint_type == "L_CORNER" and corner_style == "T_BACKING_STUDS":
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            "corner_style 'T_BACKING_STUDS' is only valid with "
+            "joint_type 'T_JOINT'",
+        )
+
     extending_wall = _optional(
         raw, "extending_wall", str, default="AUTO",
         choices=_JOINT_EXTENDING_CHOICES,
     )
+
+    # wall_a_position_in: REQUIRED for T_JOINT (no sensible default —
+    # the position IS the joint), OPTIONAL with 0.0 default for
+    # L_CORNER (the PraxovaJoint always carries the field; L corners
+    # ignore it). isinstance(val, (int, float)) accepts both — JSON
+    # integers shouldn't fail validation for what's stored as a
+    # FloatProperty.
+    if joint_type == "T_JOINT":
+        wall_a_position_in = float(_require(
+            raw, "wall_a_position_in", (int, float),
+        ))
+    else:
+        wall_a_position_in = float(_optional(
+            raw, "wall_a_position_in", (int, float), default=0.0,
+        ))
 
     wall_a = _resolve_wall_in_level(wall_a_name, level, "wall_a_name")
     wall_b = _resolve_wall_in_level(wall_b_name, level, "wall_b_name")
@@ -373,6 +418,7 @@ def _parse_joint(raw, level: bpy.types.Object) -> dict:
         "wall_b_name": wall_b_name,
         "wall_a_end": wall_a_end,
         "wall_b_end": wall_b_end,
+        "wall_a_position_in": wall_a_position_in,
         "corner_style": corner_style,
         "extending_wall": extending_wall,
         "wall_a": wall_a,
@@ -393,6 +439,11 @@ def _joint_to_wire(joint, joint_index: int) -> dict:
     helper handles the rare case where a UI-added joint has unset
     PointerProperty refs (the user added the joint before picking
     walls) by surfacing them as None instead of crashing on .name.
+
+    wall_a_position_in is always emitted (0.0 placeholder for
+    L_CORNER joints, the actual position for T_JOINT joints) — same
+    schema-regularity principle as extending_wall, which is emitted
+    on T_JOINT rows even though it's ignored.
     """
     return {
         "joint_index": joint_index,
@@ -401,6 +452,7 @@ def _joint_to_wire(joint, joint_index: int) -> dict:
         "wall_b_name": joint.wall_b.name if joint.wall_b else None,
         "wall_a_end": joint.wall_a_end,
         "wall_b_end": joint.wall_b_end,
+        "wall_a_position_in": joint.wall_a_position_in,
         "corner_style": joint.corner_style,
         "extending_wall": joint.extending_wall,
     }
@@ -1203,36 +1255,57 @@ def add_joint(params: dict) -> dict:
         level_name (str): name of the Praxova Level Empty the joint
             belongs to (resolved via _resolve_level).
         joint (dict): wire-format spec with these fields:
-              joint_type (str, OPTIONAL, default "L_CORNER"): only
-                "L_CORNER" valid in v0.6.x. v0.7 adds T joints + in-
-                line splice; the param is exposed now for forward-
-                compat.
-              wall_a_name (str, REQUIRED): Object name of the MAIN
-                wall (the wall keeping its plate continuity at the
-                joint end). Must be a Praxova wall parented under
+              joint_type (str, OPTIONAL, default "L_CORNER"):
+                "L_CORNER" (two walls meet at 90° at their ends) or
+                "T_JOINT" (v0.6.51 — one wall butts into the side of
+                a through wall at a position along its length).
+                v0.6.6+ may add IN_LINE_SPLICE.
+              wall_a_name (str, REQUIRED): Object name of the wall
+                in slot A. For L_CORNER: usually the MAIN wall
+                (resolution via `extending_wall`). For T_JOINT:
+                always the through wall (continuous plates past the
+                joint). Must be a Praxova wall parented under
                 `level_name` — cross-Level joints are out of scope.
-              wall_b_name (str, REQUIRED): Object name of the
-                ABUTTING wall (plates shortened by the MAIN wall's
-                wall thickness at the joint end). Same constraints.
+              wall_b_name (str, REQUIRED): Object name of the wall
+                in slot B. For L_CORNER: usually the ABUTTING wall.
+                For T_JOINT: always the abutting wall (butts into
+                wall_a's side; cap extends OUTBOARD by wall_a's
+                wall thickness). Same constraints.
               wall_a_end (str, REQUIRED): "START" (joint at x=0) or
-                "END" (joint at x=wall_length_in) for wall A.
-              wall_b_end (str, REQUIRED): same for wall B.
+                "END" (joint at x=wall_length_in) for wall A. Ignored
+                for T_JOINT (a T joint isn't at an end of wall_a),
+                but the field is still required for schema regularity.
+              wall_b_end (str, REQUIRED): same for wall B (always
+                meaningful — a T joint IS at one end of wall_b).
+              wall_a_position_in (number, REQUIRED when joint_type ==
+                "T_JOINT", OPTIONAL default 0.0 otherwise): wall_a-
+                local x where wall_b's near edge connects. wall_b's
+                footprint on wall_a spans
+                [position, position + wt_b]. Must satisfy
+                st_a <= position <= wall_a_length - wt_b - st_a so
+                the backing studs fit. Ignored for L_CORNER joints.
               corner_style (str, OPTIONAL, default "AUTO"): "AUTO"
-                inherits the Building's default_corner_style at
-                frame_building time; "THREE_STUD" pins this joint.
-                v0.7 adds CALIFORNIA and LADDER_BLOCKING.
+                resolves contextually — THREE_STUD for L_CORNER (or
+                the Building's default_corner_style),
+                T_BACKING_STUDS for T_JOINT. Explicit values must
+                match joint_type — THREE_STUD only with L_CORNER,
+                T_BACKING_STUDS only with T_JOINT (validated at
+                add_joint time; same rule as templates.validate_joints).
+                v0.6.6+ may add CALIFORNIA and LADDER_BLOCKING.
               extending_wall (str, OPTIONAL, default "AUTO"):
-                determines which wall is MAIN at the corner — the
-                wall whose lower plates run full length, gets the
-                interior corner-filler stud, and keeps its end stud
-                flush with the wall end. The other wall is ABUTTING
-                (lower plates shortened by MAIN's wall thickness,
-                end stud moved inboard).
+                L_CORNER ONLY — determines which wall is MAIN at the
+                corner (the wall whose lower plates run full length,
+                gets the interior corner-filler stud, and keeps its
+                end stud flush with the wall end). The other wall is
+                ABUTTING (lower plates shortened by MAIN's wall
+                thickness, end stud moved inboard).
                 "AUTO" picks the LONGER wall as MAIN — matches the
                 residential convention that longer walls form the
                 outside and shorter walls butt in. Equal-length
                 walls tie-break to wall_a.
-                "A" / "B" explicit override.
+                "A" / "B" explicit override. Ignored for T_JOINT
+                (T joints have a fixed through/abutting topology —
+                wall_a is always the through wall, no resolution).
 
     Returns:
         level_name (echo)
@@ -1266,6 +1339,7 @@ def add_joint(params: dict) -> dict:
     item.wall_b = parsed["wall_b"]
     item.wall_a_end = parsed["wall_a_end"]
     item.wall_b_end = parsed["wall_b_end"]
+    item.wall_a_position_in = parsed["wall_a_position_in"]
     item.corner_style = parsed["corner_style"]
     item.extending_wall = parsed["extending_wall"]
 
