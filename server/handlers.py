@@ -2239,13 +2239,19 @@ def frame_wall(params: dict) -> dict:
             )
             for item in target_openings
         ]
-        filtered_stud_xs = templates.filter_studs_around_openings(
-            raw_stud_xs, thickness_in, target_openings, opening_layouts,
-        )
-        n_studs = len(filtered_stud_xs)
     else:
         opening_layouts = []
-        n_studs = len(raw_stud_xs)
+    # v0.6.51: count placed OC studs by Object name prefix
+    # ({wall_name}_Stud_NN convention). Replaces the v0.6.41 pre-
+    # flight derivation via filter_studs_around_openings — that
+    # didn't apply the v0.6.50 backing-stud filter, so n_studs
+    # over-counted on REBUILD walls that are wall_a in T joints.
+    # raw_stud_xs and opening_layouts are still needed below for
+    # the per-opening cripple count, so the derivation stays.
+    n_studs = sum(
+        1 for child in empty.children
+        if child.name.startswith(f"{empty.name}_Stud_")
+    )
     n_plates = top_plate_count + bottom_plate_count
 
     openings_summary: list[dict] = []
@@ -2463,30 +2469,19 @@ def frame_building(params: dict) -> dict:
     joints_list = list(level.praxova_level.joints)
     walls_framed: list[dict] = []
     for wall in walls:
-        wp = wall.praxova_wall
-        thickness_in = templates.LUMBER_TYPES[wp.wall_nominal][0]
-        raw_stud_xs = templates.stud_positions(
-            float(wp.wall_length_in),
-            float(wp.wall_spacing_oc_in),
-            thickness_in,
+        # v0.6.51: Object-name-based count of OC studs placed by the
+        # operator (per the {wall_name}_Stud_NN naming convention),
+        # matching the n_corner_fillers / n_backing_studs pattern
+        # below. Replaces the v0.6.41 pre-flight derivation via
+        # filter_studs_around_openings — that derivation didn't apply
+        # the v0.6.50 backing-stud filter, so n_studs over-counted on
+        # walls that are wall_a in T joints. Object-name counting
+        # matches the actual scene state and auto-tracks any future
+        # operator-side stud filter additions.
+        n_studs = sum(
+            1 for child in wall.children
+            if child.name.startswith(f"{wall.name}_Stud_")
         )
-        openings = list(wp.wall_openings)
-        if openings:
-            opening_layouts = [
-                templates.opening_framing_layout(
-                    item, wp.wall_nominal,
-                    float(wp.wall_height_in),
-                    int(wp.wall_top_plate_count),
-                    int(wp.wall_bottom_plate_count),
-                )
-                for item in openings
-            ]
-            filtered = templates.filter_studs_around_openings(
-                raw_stud_xs, thickness_in, openings, opening_layouts,
-            )
-            n_studs = len(filtered)
-        else:
-            n_studs = len(raw_stud_xs)
 
         # Object-name-based count per v0.6.0's "Three-stud corner
         # naming and ownership" architecture note. Blender may suffix

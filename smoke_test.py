@@ -8,10 +8,11 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.50 RPC surface end-to-end (18 methods — unchanged
-from v0.6.2; v0.6.25 through v0.6.50 have been bug-fix / UI-only cycles,
-no bridge schema changes): ping (with addon_version and method_count
-assertions), scene
+Covers the full v0.6.51 RPC surface end-to-end (18 methods — unchanged
+from v0.6.2; v0.6.25 through v0.6.50 were bug-fix / UI-only cycles
+with no bridge schema changes, and v0.6.51 added T-joint bridge
+surface inside existing handlers, still 18 methods): ping (with
+addon_version and method_count assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
 duplication, edge-to-edge fill, wall framing with optional door/window
 openings (v0.5.1 — bridge parity for the v0.5 UI), Building + Level
@@ -125,8 +126,20 @@ def run(host: str, port: int) -> int:
         # cycle — bridge wire format doesn't yet accept
         # joint_type='T_JOINT', so no new smoke steps this cycle.
         # method_count stays 18; addon_version 0.6.41 -> 0.6.50.
-        assert r["addon_version"] == "0.6.50", (
-            f"expected addon_version 0.6.50, got {r['addon_version']!r}"
+        # v0.6.51: addon_version 0.6.50 -> 0.6.51 for T-joint bridge
+        # parity (T_JOINT in wire format, wall_a_position_in field,
+        # T_BACKING_STUDS corner style, n_backing_studs in
+        # walls_framed, splice planner T-aware including notch-vs-
+        # splice distinction). method_count stays 18 — T-joint
+        # support extends existing handlers, no new RPCs. New smoke
+        # steps [35]-[41] cover the bridge surface end-to-end:
+        # schema, list round-trip, frame_building with backing
+        # studs, splice + T integration, frame_wall REBUILD T-self,
+        # three negatives (THREE_STUD+T_JOINT,
+        # T_BACKING_STUDS+L_CORNER at add_joint time; position-
+        # bounds violation at frame_building time).
+        assert r["addon_version"] == "0.6.51", (
+            f"expected addon_version 0.6.51, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"
@@ -1209,6 +1222,489 @@ def run(host: str, port: int) -> int:
         assert wb["splice_summary"]["n_splices"] == 0, (
             f"wall_b (96\" 2x6 ABUTTING) should have 0 splices, got "
             f"{wb['splice_summary']['n_splices']}"
+        )
+
+        # ==============================================================
+        # v0.6.51 T-joint bridge path coverage ([35]-[41]).
+        # ==============================================================
+        # v0.6.50 introduced T joints in the operator; the bridge wire
+        # format didn't yet accept joint_type='T_JOINT'. v0.6.51 closes
+        # that gap. The seven steps below cover:
+        #
+        #   [35] add_joint with joint_type='T_JOINT' — basic wire-
+        #        format acceptance + response echo.
+        #   [36] list_joints_in_level — round-trip of all fields
+        #        including wall_a_position_in (always emitted, 0.0
+        #        for L_CORNER, real value for T_JOINT).
+        #   [37] frame_building — T-aware splice pre-flight + the
+        #        new n_backing_studs field on walls_framed entries.
+        #        Verifies that wall_a's cap is multi-piece (3) from
+        #        the T-joint notch + a real splice in the longer
+        #        sub-range; that the splice_xs adjacency filter
+        #        excludes the notch boundary (80) but includes the
+        #        real splice (272); and that n_splices uses the new
+        #        len(pieces) - plate_ranges_count[role] formula.
+        #        Wall_b's cap is single-piece even though extended
+        #        outboard to 99.5" — fits in 192" stock.
+        #   [38] frame_wall REBUILD on T_wall_a — verifies the same
+        #        T-awareness on the single-wall endpoint as on the
+        #        orchestrator's walls_framed entry.
+        #   [39] Negative: corner_style='THREE_STUD' with
+        #        joint_type='T_JOINT' → INVALID_PARAMS at add_joint
+        #        time (Commit 1 combo check).
+        #   [40] Negative: corner_style='T_BACKING_STUDS' with
+        #        joint_type='L_CORNER' → INVALID_PARAMS, same
+        #        combo check.
+        #   [41] Negative: wall_a_position_in below the lower bound
+        #        (st_a). add_joint succeeds (bridge doesn't read
+        #        wall_a length); frame_building fails via
+        #        validate_joints with a message identifying
+        #        wall_a_position_in. The bad joint is removed after
+        #        to keep the Level frameable.
+        #
+        # All pinned values for [37] / [38] are computed by hand from
+        # the v0.6.51 algorithm:
+        #
+        #   T_wall_a (288" x 108" 2x4 at 16 OC, no openings) is the
+        #   THROUGH wall in a T joint at position 80.0 with
+        #   wall_b_end='START'. wt_b = 3.5 (2x4 wall thickness),
+        #   st_a = 1.5 (2x4 stud thickness).
+        #
+        #   Backing studs on wall_a (per t_joint_geometry_for_wall_a):
+        #     LEFT  backing left-edge = 80 - 1.5 = 78.5
+        #     RIGHT backing left-edge = 80 + 3.5 = 83.5
+        #     Backing intervals: [78.5, 80.0] and [83.5, 85.0].
+        #
+        #   Raw OC stud left-edges from templates.stud_positions(288,
+        #   16, 1.5): [0, 15.25, 31.25, 47.25, 63.25, 79.25, 95.25,
+        #   111.25, 127.25, 143.25, 159.25, 175.25, 191.25, 207.25,
+        #   223.25, 239.25, 255.25, 271.25, 286.5] — 19 positions.
+        #
+        #   filter_studs_around_intervals against backing intervals:
+        #   only stud at x=79.25 collides (footprint [79.25, 80.75]
+        #   overlaps LEFT [78.5, 80.0] — half-open test passes both
+        #   conditions). Operator places 18 OC stud Objects.
+        #
+        #   n_studs in walls_framed counts placed Objects by name
+        #   prefix ({wall_name}_Stud_NN convention) so it matches
+        #   the actual scene state — n_studs=18. (Pre-v0.6.51 the
+        #   bridge derived n_studs via a pre-flight that only
+        #   applied filter_studs_around_openings, missing the
+        #   v0.6.50 backing-stud filter; that bug surfaced during
+        #   smoke-test commit 6 and was fixed by switching to
+        #   Object-name counting.)
+        #
+        #   Eligible splice anchors (collect_full_height_stud_centers
+        #   with backing_stud_left_xs=[78.5, 83.5]):
+        #     OC centers + backing centers, sorted, in inches:
+        #     0.75, 16, 32, 48, 64, 79.25, 84.25, 96, 112, 128, 144,
+        #     160, 176, 192, 208, 224, 240, 256, 272, 287.25.
+        #
+        #   Plate ranges:
+        #     BOTTOM:    [(0, 288)]              — no end joints.
+        #     LOWER_TOP: [(0, 288)]              — no end joints.
+        #     CAP:       [(0, 80), (83.5, 288)]  — notch at [80,
+        #                                          83.5] (= position,
+        #                                          position + wt_b).
+        #     plate_ranges_count: BOTTOM=1, LOWER_TOP=1, CAP=2.
+        #
+        #   Splice planning (max_stock_in=192" for 2x4):
+        #     BOTTOM (0..288): greedy stops at largest center ≤ 192
+        #       = 192 → pieces [(0, 192), (192, 288)],
+        #       splice_xs = [192.0].
+        #     LOWER_TOP: identical → splice_xs = [192.0].
+        #     CAP, sub-range 1 (0..80): 80 ≤ 192 → [(0, 80)], no
+        #       splice.
+        #     CAP, sub-range 2 (83.5..288): L_eff=204.5 > 192;
+        #       ideal_max=275.5. Centers in (83.5, 275.5]: [84.25,
+        #       96, 112, 128, 144, 160, 176, 192, 208, 224, 240,
+        #       256, 272]. Exclude lower-top splice 192 ± 24
+        #       (filters 176, 192, 208). Max candidate = 272 →
+        #       pieces [(83.5, 272), (272, 288)].
+        #     Combined cap_pieces: [(0, 80), (83.5, 272), (272, 288)]
+        #       — 3 pieces.
+        #
+        #   splice_xs adjacency check (Commit 2 follow-up):
+        #     BOTTOM/LOWER_TOP: pieces adjacent → splice_xs=[192.0].
+        #     CAP: piece[0].end=80 vs piece[1].start=83.5 — NOT
+        #       isclose (3.5" gap) → 80 SKIPPED. piece[1].end=272
+        #       vs piece[2].start=272 — isclose → 272 INCLUDED.
+        #       cap_splice_xs=[272.0], NOT [80.0, 272.0].
+        #
+        #   n_splices = len(pieces) - plate_ranges_count[role], per
+        #   role, then aggregated:
+        #     bot_splices       = 2 - 1 = 1
+        #     lt_splices        = 2 - 1 = 1
+        #     cap_splices       = 3 - 2 = 1  ← the notch boundary
+        #                                      does NOT count
+        #     n_splices = 1 * bottom_plate_count (1)
+        #               + 1 * (top_plate_count - 1) = 1
+        #               + 1 (cap)
+        #               = 3.
+        #
+        #   T_wall_b (96" x 108" 2x4 at 16 OC, no openings, ABUTTING
+        #   at START of a T joint with paired_t = wt_a = 3.5):
+        #     Raw OC studs: [0, 15.25, 31.25, 47.25, 63.25, 79.25,
+        #     94.5] — 7 positions, no filter applies (no backing
+        #     studs on wall_b's own side).
+        #     Plate ranges: BOTTOM/LOWER_TOP [(0, 96)] (T_JOINT
+        #     ABUTTING + non-cap: wall edge, no shortening); CAP
+        #     [(-3.5, 96)] (extended OUTBOARD by paired_t).
+        #     All ranges ≤ 192" → no splices.
+        #     n_splices = 0.
+        #
+        # ==============================================================
+        # Setup: dedicated Building + Level + walls for T-joint tests.
+        # Isolated from the L-corner state built up across [20]-[34].
+        # ==============================================================
+        print(
+            "\n[35]-[41] T-joint bridge path coverage — setup: "
+            "Building + Level + walls"
+        )
+        r = cli.call("add_building", {"name": "TJoint_Test_Building"})
+        tjoint_level = r["level_name"]
+
+        r = cli.call("frame_wall", {
+            "length_in": 288.0,
+            "height_in": 108.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 16.0,
+            "level": tjoint_level,
+        })
+        t_wall_a = r["wall_name"]
+
+        r = cli.call("frame_wall", {
+            "length_in": 96.0,
+            "height_in": 108.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 16.0,
+            "level": tjoint_level,
+        })
+        t_wall_b = r["wall_name"]
+
+        r = cli.call("frame_wall", {
+            "length_in": 96.0,
+            "height_in": 108.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 16.0,
+            "level": tjoint_level,
+        })
+        t_wall_c = r["wall_name"]
+
+        print(
+            f"  -> setup: level={tjoint_level!r}, "
+            f"through={t_wall_a!r}, abutting={t_wall_b!r}, "
+            f"unused={t_wall_c!r}"
+        )
+
+        # --------------------------------------------------------------
+        print(
+            "\n[35] add_joint: T_JOINT through={a} -> abutting={b} "
+            "at pos=80.0".format(a=t_wall_a, b=t_wall_b)
+        )
+        r = cli.call("add_joint", {
+            "level_name": tjoint_level,
+            "joint": {
+                "joint_type": "T_JOINT",
+                "wall_a_name": t_wall_a,
+                "wall_b_name": t_wall_b,
+                "wall_a_end": "END",       # required, ignored for T
+                "wall_b_end": "START",
+                "wall_a_position_in": 80.0,
+            },
+        })
+        print(f"  -> joint_index={r['joint_index']}, joint={r['joint']}")
+        assert r["joint_index"] == 0, (
+            f"first joint should be index 0, got {r['joint_index']}"
+        )
+        assert r["joint"]["joint_type"] == "T_JOINT"
+        assert r["joint"]["wall_a_position_in"] == 80.0, (
+            f"wall_a_position_in should echo 80.0, got "
+            f"{r['joint']['wall_a_position_in']!r}"
+        )
+        assert r["joint"]["corner_style"] == "AUTO", (
+            f"default corner_style should be AUTO, got "
+            f"{r['joint']['corner_style']!r}"
+        )
+        # extending_wall is emitted even though it's ignored for
+        # T_JOINT — schema regularity per Commit 1.
+        assert r["joint"]["extending_wall"] == "AUTO"
+
+        # --------------------------------------------------------------
+        print("\n[36] list_joints_in_level round-trip")
+        r = cli.call("list_joints_in_level", {"level_name": tjoint_level})
+        print(f"  -> n_joints={r['n_joints']}")
+        assert r["n_joints"] == 1
+        j = r["joints"][0]
+        # Round-trip parity: every wire field _parse_joint accepts
+        # comes back from _joint_to_wire with the same value. T-
+        # specific fields (joint_type, wall_a_position_in) must
+        # survive the round-trip in full.
+        assert j["joint_type"] == "T_JOINT", (
+            f"joint_type should round-trip as T_JOINT, got "
+            f"{j['joint_type']!r}"
+        )
+        assert j["wall_a_name"] == t_wall_a
+        assert j["wall_b_name"] == t_wall_b
+        assert j["wall_a_end"] == "END"
+        assert j["wall_b_end"] == "START"
+        assert j["wall_a_position_in"] == 80.0, (
+            f"wall_a_position_in should round-trip 80.0, got "
+            f"{j['wall_a_position_in']!r}"
+        )
+        assert j["corner_style"] == "AUTO"
+        assert j["extending_wall"] == "AUTO"
+
+        # --------------------------------------------------------------
+        print(
+            "\n[37] frame_building — T-aware splice + n_backing_studs"
+        )
+        r = cli.call("frame_building", {"level_name": tjoint_level})
+        print(
+            f"  -> n_walls_framed={r['n_walls_framed']}, "
+            f"n_joints_resolved={r['n_joints_resolved']}"
+        )
+        # Three walls were created at setup, but one (T_wall_c) is
+        # unused — n_walls_framed counts everything in the Level
+        # because frame_building iterates wall.children regardless
+        # of joint participation.
+        assert r["n_walls_framed"] == 3, (
+            f"expected n_walls_framed=3 (a + b + unused c), got "
+            f"{r['n_walls_framed']}"
+        )
+        assert r["n_joints_resolved"] == 1
+        wa = next(
+            e for e in r["walls_framed"] if e["wall_name"] == t_wall_a
+        )
+        wb = next(
+            e for e in r["walls_framed"] if e["wall_name"] == t_wall_b
+        )
+        # ---- T_wall_a (the THROUGH wall) ----
+        assert wa["n_studs"] == 18, (
+            f"wall_a should have 18 OC studs after backing-stud "
+            f"filter (19 raw - 1 at x=79.25 filtered against LEFT "
+            f"backing interval [78.5, 80.0]), got {wa['n_studs']}"
+        )
+        assert wa["n_corner_fillers"] == 0, (
+            f"wall_a has no L corners — n_corner_fillers should be "
+            f"0, got {wa['n_corner_fillers']}"
+        )
+        assert wa["n_backing_studs"] == 2, (
+            f"wall_a is the through wall in one T joint — should "
+            f"have exactly 2 backing studs (LEFT + RIGHT flanking "
+            f"wall_b's footprint), got {wa['n_backing_studs']}"
+        )
+        assert wa["joint_indices_touching"] == [0]
+        ss = wa["splice_summary"]
+        assert ss["n_splices"] == 3, (
+            f"wall_a should have 3 splices (1 bottom + 1 lower-top + "
+            f"1 cap in sub-range 2 at x=272; the 80/83.5 notch is "
+            f"NOT a splice), got {ss['n_splices']}"
+        )
+        assert ss["bottom"]["pieces"] == 2
+        assert ss["bottom"]["splice_xs"] == [192.0], (
+            f"wall_a bottom splice should land at 192 (largest "
+            f"eligible center ≤ ideal_max with no exclusion), got "
+            f"{ss['bottom']['splice_xs']}"
+        )
+        assert ss["lower_top"]["pieces"] == 2
+        assert ss["lower_top"]["splice_xs"] == [192.0]
+        assert ss["cap"]["pieces"] == 3, (
+            f"wall_a cap should be 3 pieces — 1 in sub-range 1 "
+            f"[0, 80] + 2 in sub-range 2 [83.5, 288] split at 272, "
+            f"got {ss['cap']['pieces']}"
+        )
+        # CRITICAL: the notch boundary (80 or 83.5) MUST NOT appear
+        # in splice_xs. The adjacency-aware filter in
+        # _splice_xs_from_pieces (Commit 2 follow-up) excludes it.
+        # A regression that returns [80.0, 272.0] or [83.5, 272.0]
+        # would indicate the adjacency filter broke; a regression
+        # that returns [80.0] alone would indicate the splice
+        # planner saw the cap as a single range.
+        assert ss["cap"]["splice_xs"] == [272.0], (
+            f"wall_a cap splice should be [272.0] — the only TRUE "
+            f"splice (sub-range 2 [83.5, 288] split at 272). "
+            f"Regressions: [80.0, 272.0] = adjacency filter broke; "
+            f"[80.0] = splice planner saw cap as single range. "
+            f"Got {ss['cap']['splice_xs']}"
+        )
+        # ---- T_wall_b (the ABUTTING wall) ----
+        assert wb["n_studs"] == 7, (
+            f"wall_b is 96\" at 16 OC with no openings — should have "
+            f"7 OC studs (no backing-stud filter applies; backing "
+            f"studs sit on wall_a, not wall_b), got {wb['n_studs']}"
+        )
+        assert wb["n_corner_fillers"] == 0
+        assert wb["n_backing_studs"] == 0, (
+            f"wall_b is the abutting wall — backing studs sit on "
+            f"the through wall (wall_a). wall_b's n_backing_studs "
+            f"should be 0, got {wb['n_backing_studs']}"
+        )
+        assert wb["joint_indices_touching"] == [0]
+        assert wb["splice_summary"]["n_splices"] == 0, (
+            f"wall_b (96\" + 3.5\" outboard cap extension = 99.5\" "
+            f"effective cap, well under 192\" max stock) should "
+            f"have 0 splices, got {wb['splice_summary']['n_splices']}"
+        )
+
+        # --------------------------------------------------------------
+        print(
+            "\n[38] frame_wall REBUILD on T_wall_a — single-wall "
+            "splice_summary T-awareness"
+        )
+        # REBUILD mode reads the wall's parent Level for joint
+        # context, so the splice_summary on the single-wall endpoint
+        # must match the walls_framed entry from [37]. Verifies the
+        # frame_wall REBUILD path uses the same _predict_wall_splice_
+        # plans pipeline that frame_building uses.
+        r = cli.call("frame_wall", {"wall_target": t_wall_a})
+        ss = r["splice_summary"]
+        assert ss["n_splices"] == 3, (
+            f"REBUILD splice_summary should match [37]'s wall_a "
+            f"entry (n_splices=3), got {ss['n_splices']}"
+        )
+        assert ss["cap"]["pieces"] == 3
+        assert ss["cap"]["splice_xs"] == [272.0], (
+            f"REBUILD cap.splice_xs should be [272.0] (same as "
+            f"[37]'s walls_framed entry — single source of truth "
+            f"via _predict_wall_splice_plans), got "
+            f"{ss['cap']['splice_xs']}"
+        )
+        assert ss["bottom"]["splice_xs"] == [192.0]
+        assert ss["lower_top"]["splice_xs"] == [192.0]
+
+        # --------------------------------------------------------------
+        print(
+            "\n[39] negative: add_joint T_JOINT + corner_style="
+            "THREE_STUD (combo mismatch)"
+        )
+        try:
+            cli.call("add_joint", {
+                "level_name": tjoint_level,
+                "joint": {
+                    "joint_type": "T_JOINT",
+                    "wall_a_name": t_wall_a,
+                    "wall_b_name": t_wall_c,
+                    "wall_a_end": "END",
+                    "wall_b_end": "START",
+                    "wall_a_position_in": 144.0,
+                    "corner_style": "THREE_STUD",
+                },
+            })
+            raise AssertionError(
+                "expected INVALID_PARAMS for T_JOINT + THREE_STUD "
+                "combo, but add_joint succeeded"
+            )
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert "-32602" in err_text or "INVALID_PARAMS" in err_text, (
+                f"expected INVALID_PARAMS code, got: {err_text!r}"
+            )
+            # Error message verbatim per Commit 1's _parse_joint
+            # combo check — mirrors templates.validate_joints.
+            assert "THREE_STUD" in err_text and "L_CORNER" in err_text, (
+                f"expected error mentioning THREE_STUD and L_CORNER, "
+                f"got: {err_text!r}"
+            )
+        # Joint count must stay at 1 — the rejected add_joint should
+        # NOT have mutated scene state.
+        r = cli.call("list_joints_in_level", {"level_name": tjoint_level})
+        assert r["n_joints"] == 1, (
+            f"failed add_joint should not mutate joint count; "
+            f"expected 1, got {r['n_joints']}"
+        )
+
+        # --------------------------------------------------------------
+        print(
+            "\n[40] negative: add_joint L_CORNER + corner_style="
+            "T_BACKING_STUDS (combo mismatch)"
+        )
+        try:
+            cli.call("add_joint", {
+                "level_name": tjoint_level,
+                "joint": {
+                    "joint_type": "L_CORNER",
+                    "wall_a_name": t_wall_a,
+                    "wall_b_name": t_wall_c,
+                    "wall_a_end": "START",
+                    "wall_b_end": "END",
+                    "corner_style": "T_BACKING_STUDS",
+                },
+            })
+            raise AssertionError(
+                "expected INVALID_PARAMS for L_CORNER + "
+                "T_BACKING_STUDS combo, but add_joint succeeded"
+            )
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert "-32602" in err_text or "INVALID_PARAMS" in err_text
+            assert "T_BACKING_STUDS" in err_text and "T_JOINT" in err_text, (
+                f"expected error mentioning T_BACKING_STUDS and "
+                f"T_JOINT, got: {err_text!r}"
+            )
+        r = cli.call("list_joints_in_level", {"level_name": tjoint_level})
+        assert r["n_joints"] == 1, (
+            f"failed add_joint should not mutate joint count; "
+            f"expected 1, got {r['n_joints']}"
+        )
+
+        # --------------------------------------------------------------
+        print(
+            "\n[41] negative: T_JOINT position below st_a — passes "
+            "add_joint, fails frame_building via validate_joints"
+        )
+        # position=1.0 is below the lower bound st_a=1.5 (2x4 stud
+        # thickness). add_joint SHOULD succeed at the bridge layer
+        # (the bridge doesn't read wall_a's length at parse time —
+        # position bounds need both walls' nominals and wall_a's
+        # length, which lives in validate_joints' pre-flight).
+        # frame_building SHOULD reject with INVALID_PARAMS naming
+        # wall_a_position_in.
+        r = cli.call("add_joint", {
+            "level_name": tjoint_level,
+            "joint": {
+                "joint_type": "T_JOINT",
+                "wall_a_name": t_wall_a,
+                "wall_b_name": t_wall_c,
+                "wall_a_end": "END",
+                "wall_b_end": "START",
+                "wall_a_position_in": 1.0,
+            },
+        })
+        bad_joint_index = r["joint_index"]
+        print(
+            f"  -> add_joint succeeded (joint_index={bad_joint_index}, "
+            f"position=1.0)"
+        )
+        assert bad_joint_index == 1, (
+            f"second joint should be index 1, got {bad_joint_index}"
+        )
+        try:
+            cli.call("frame_building", {"level_name": tjoint_level})
+            raise AssertionError(
+                "expected INVALID_PARAMS for position=1.0 < st_a=1.5, "
+                "but frame_building succeeded"
+            )
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert "-32602" in err_text or "INVALID_PARAMS" in err_text
+            assert "wall_a_position_in" in err_text, (
+                f"expected error mentioning wall_a_position_in, "
+                f"got: {err_text!r}"
+            )
+        # Clean up the bad joint to leave the Level frameable.
+        r = cli.call("remove_joint", {
+            "level_name": tjoint_level,
+            "joint_index": bad_joint_index,
+        })
+        print(f"  -> removed bad joint at index {bad_joint_index}")
+        r = cli.call("list_joints_in_level", {"level_name": tjoint_level})
+        assert r["n_joints"] == 1, (
+            f"after cleanup, only the original T joint should "
+            f"remain; expected 1, got {r['n_joints']}"
         )
 
         print("\nAll checks passed.")

@@ -3,8 +3,8 @@
 Exposes the in-Blender bridge as a set of MCP tools so an LLM client (Claude
 Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
 on-center, fill edge-to-edge, frame a wall with optional door and window
-openings (v0.5.1), organize walls into Buildings and Levels with multi-wall
-re-framing in place (v0.6.1 — joints + frame_building land in v0.6.2), and
+openings, organize walls into Buildings and Levels with multi-wall re-framing
+in place, manage L-corner and T joints between walls (v0.6 / v0.6.51), and
 generate cut lists in a live Blender session.
 
 Configuration (env vars, read at startup):
