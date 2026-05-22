@@ -794,17 +794,18 @@ def resolve_corner_style(joint, building_default: str) -> str:
     """Resolve a joint's corner_style based on joint_type.
 
     Semantics:
-      AUTO + L_CORNER → building_default ('THREE_STUD' in v0.6.x; a
-        future cycle could add CALIFORNIA / LADDER_BLOCKING as
-        alternative L-corner defaults).
-      AUTO + T_JOINT  → 'T_BACKING_STUDS' (unconditional in v0.6.50 —
+      AUTO + L_CORNER → building_default (one of THREE_STUD,
+        CALIFORNIA, or LADDER_BLOCKING per PraxovaBuildingProps's
+        default_corner_style; v0.6.60 widened this from THREE_STUD-only).
+      AUTO + T_JOINT  → 'T_BACKING_STUDS' (unconditional in v0.6.5x —
         only T-joint style available; the Building's
-        default_corner_style stays L-only this cycle, with a sibling
-        default_t_style field deferred until more T-joint styles are
-        added).
-      Explicit values (THREE_STUD / T_BACKING_STUDS) honored verbatim
-        — validate_joints rejects type/style mismatches up front so
-        this function doesn't have to defend against them.
+        default_corner_style stays L-only, with a sibling
+        default_t_style field deferred until a second T-joint style
+        ships).
+      Explicit values (THREE_STUD / CALIFORNIA / LADDER_BLOCKING /
+        T_BACKING_STUDS) honored verbatim — validate_joints rejects
+        type/style mismatches up front so this function doesn't have
+        to defend against them.
     """
     if joint.corner_style != 'AUTO':
         return joint.corner_style

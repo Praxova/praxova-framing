@@ -29,7 +29,6 @@ Not yet shipped:
     - In-line splice joint_type (joining two walls end-to-end as one wall;
       distinct from v0.6.40's plate splicing along a single wall, which
       already ships)
-    - California corner, ladder-blocking corner styles (later sprint)
     - Multi-Level framing in one pass (v0.8+)
     - Direction/rotation parameter for frame_wall (user transforms the
       Empty afterward)
