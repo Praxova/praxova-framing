@@ -1610,7 +1610,6 @@ def _predict_wall_splice_plans(
     eligible_stud_centers = templates.collect_full_height_stud_centers(
         oc_stud_left_xs=oc_stud_xs,
         opening_layouts=opening_layouts,
-        filler_left_xs=filler_left_xs,
         stud_thickness_in=thickness_in,
         backing_stud_left_xs=backing_stud_left_xs,
     )

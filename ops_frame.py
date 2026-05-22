@@ -558,7 +558,6 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         eligible_stud_centers = templates.collect_full_height_stud_centers(
             oc_stud_left_xs=stud_xs_in,
             opening_layouts=opening_layouts,
-            filler_left_xs=filler_left_xs,
             stud_thickness_in=thickness_in,
             backing_stud_left_xs=backing_stud_xs,
         )
