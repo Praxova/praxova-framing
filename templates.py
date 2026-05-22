@@ -1548,7 +1548,12 @@ def t_joint_geometry_for_wall_a(
     }
 
 
-def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
+def validate_joints(
+    joints,
+    walls_in_level,
+    *,
+    building_default_corner_style: str = 'THREE_STUD',
+) -> tuple[bool, str]:
     """Cross-check the joints list against the Level's walls.
 
     Returns (True, "") on success or (False, "Joint N: ...") on the
@@ -1575,15 +1580,31 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
          L-corner joints at wall_a's ends) are intentionally NOT
          checked here in v0.6.50 — they surface later as splice /
          placement errors or visually in the viewport.
-      7. LADDER_BLOCKING (explicit, v0.6.60): the MAIN wall's stud
+      7. LADDER_BLOCKING (v0.6.60, AUTO-aware): the MAIN wall's stud
          cavity must be tall enough for three blocks at 12"/12"/
          midpoint with each block's z-extent = MAIN's wt_self.
          Required: stud_cavity_height >= 24 + 2 * wt_self_MAIN.
          For 2x4 MAIN: cavity >= 31". For 2x6 MAIN: cavity >= 35".
-         AUTO joints whose Building default resolves to
-         LADDER_BLOCKING are NOT pre-checked here — they surface
-         at frame time via l_corner_ladder_blocking_main_geometry's
-         defense-in-depth ValueError.
+         The check fires when the joint's RESOLVED style (via
+         resolve_corner_style against `building_default_corner_style`)
+         is LADDER_BLOCKING — so both explicit `corner_style=
+         'LADDER_BLOCKING'` AND `corner_style='AUTO'` joints whose
+         Building default is LADDER_BLOCKING are caught here.
+
+    Args:
+        joints: iterable of PraxovaJoint items (typically
+            level.praxova_level.joints).
+        walls_in_level: list of Praxova-managed wall Empties that
+            are children of the Level being validated.
+        building_default_corner_style: the Building's
+            default_corner_style ('THREE_STUD', 'CALIFORNIA', or
+            'LADDER_BLOCKING'). Used to resolve `corner_style='AUTO'`
+            joints for check 7. Defaults to 'THREE_STUD' — the v0.6
+            default — so callers that haven't migrated to the
+            v0.6.60 API keep working (they just don't catch
+            AUTO+LADDER_BLOCKING via Building default at validation
+            time; the helper's defense-in-depth ValueError catches
+            it at frame time).
     """
     wall_set = set(walls_in_level)
 
@@ -1633,14 +1654,16 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
                     f"({joint.wall_a.name!r}, length {wall_a_length:g}\")",
                 )
 
-        # LADDER_BLOCKING wall-height pre-flight (7). Only fires for
-        # explicit LADDER_BLOCKING + L_CORNER. AUTO joints that
-        # would resolve to LADDER_BLOCKING via the Building default
-        # are caught at frame time by the helper's defense-in-depth
-        # ValueError. Identifying the MAIN wall requires
-        # resolve_extending_wall (defined above in this module).
+        # LADDER_BLOCKING wall-height pre-flight (7). v0.6.60 AUTO-
+        # aware: resolves corner_style against the Building default
+        # via resolve_corner_style before checking. So both explicit
+        # 'LADDER_BLOCKING' AND 'AUTO' (when Building default is
+        # 'LADDER_BLOCKING') trigger the check. Identifying the MAIN
+        # wall requires resolve_extending_wall (defined above).
         if (joint.joint_type == 'L_CORNER'
-                and joint.corner_style == 'LADDER_BLOCKING'):
+                and resolve_corner_style(
+                    joint, building_default_corner_style,
+                ) == 'LADDER_BLOCKING'):
             main = (
                 joint.wall_a
                 if resolve_extending_wall(
