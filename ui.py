@@ -963,6 +963,40 @@ class PRAXOVA_PT_building(bpy.types.Panel):
             detail.prop(j, "wall_b_end")
             detail.prop(j, "corner_style")
 
+            # v0.6.60: live "Resolves to" readout when corner_style is
+            # AUTO. Mirrors the "Resolved MAIN" readout pattern below.
+            # For L_CORNER joints, the resolved value tracks the
+            # Building's default_corner_style and updates live as the
+            # user changes that default — so the qualifier
+            # "(Building default)" makes the live linkage explicit.
+            # For T_JOINT joints, AUTO unconditionally resolves to
+            # T_BACKING_STUDS in v0.6.5x/0.6.6x (a sibling
+            # default_t_style field is deferred until a second T-joint
+            # style ships), so no qualifier.
+            if j.corner_style == 'AUTO':
+                if j.joint_type == 'L_CORNER':
+                    bd = (
+                        building.praxova_building.default_corner_style
+                        if building else 'THREE_STUD'
+                    )
+                    resolved_style = templates.resolve_corner_style(j, bd)
+                    sub = box.column(align=True)
+                    sub.scale_y = 0.7
+                    sub.label(
+                        text=(
+                            f"  → Resolves to: {resolved_style}  "
+                            f"(Building default)"
+                        ),
+                        icon='INFO',
+                    )
+                else:  # 'T_JOINT'
+                    sub = box.column(align=True)
+                    sub.scale_y = 0.7
+                    sub.label(
+                        text="  → Resolves to: T_BACKING_STUDS",
+                        icon='INFO',
+                    )
+
             # v0.6.50: extending_wall and the resolved-MAIN readout
             # only apply to L_CORNER. T joints have a fixed through/
             # abutting topology — wall_a is the through wall, wall_b
@@ -996,7 +1030,24 @@ class PRAXOVA_PT_building(bpy.types.Panel):
             # they would get on clicking Frame Building. validate_joints
             # already understands T_JOINT (commit 2 added position-
             # bounds and joint_type/corner_style compatibility checks).
-            ok, msg = templates.validate_joints(joints, walls)
+            # v0.6.60: thread the Building's default_corner_style so
+            # the LADDER_BLOCKING wall-height pre-flight can resolve
+            # corner_style='AUTO' joints. Closes the gap where
+            # AUTO+LADDER_BLOCKING via Building default on a too-short
+            # wall was silently accepted by the UI panel and only
+            # surfaced at frame_building time. Defensive fallback to
+            # validate_joints' default kwarg if `building` is None
+            # (shouldn't happen given the early-return guard above,
+            # but keeps the call total in case the panel structure
+            # ever changes).
+            bdcs = (
+                building.praxova_building.default_corner_style
+                if building else 'THREE_STUD'
+            )
+            ok, msg = templates.validate_joints(
+                joints, walls,
+                building_default_corner_style=bdcs,
+            )
             if not ok:
                 box.label(text=msg, icon='ERROR')
 

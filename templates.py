@@ -66,6 +66,15 @@ LENGTHS_BY_TYPE: dict[str, list[int]] = {
 }
 
 
+# v0.6.60: corner-style sets for joint-type compatibility checks.
+# AUTO is intentionally absent — it's resolved upstream by
+# resolve_corner_style before any code touches these sets.
+# Single source of truth: resolve_corner_style, l_corner_geometry
+# (the dispatcher), and validate_joints all reference these.
+L_CORNER_STYLES = frozenset({'THREE_STUD', 'CALIFORNIA', 'LADDER_BLOCKING'})
+T_JOINT_STYLES  = frozenset({'T_BACKING_STUDS'})
+
+
 def lumber_cutlist_label(nominal: str, length_ft: int, orientation: str) -> str:
     """Build the canonical lumber cutlist label, e.g. '2x4x8 V'."""
     suffix = "V" if orientation == 'VERTICAL' else "H"
@@ -794,17 +803,18 @@ def resolve_corner_style(joint, building_default: str) -> str:
     """Resolve a joint's corner_style based on joint_type.
 
     Semantics:
-      AUTO + L_CORNER → building_default ('THREE_STUD' in v0.6.x; a
-        future cycle could add CALIFORNIA / LADDER_BLOCKING as
-        alternative L-corner defaults).
-      AUTO + T_JOINT  → 'T_BACKING_STUDS' (unconditional in v0.6.50 —
+      AUTO + L_CORNER → building_default (one of THREE_STUD,
+        CALIFORNIA, or LADDER_BLOCKING per PraxovaBuildingProps's
+        default_corner_style; v0.6.60 widened this from THREE_STUD-only).
+      AUTO + T_JOINT  → 'T_BACKING_STUDS' (unconditional in v0.6.5x —
         only T-joint style available; the Building's
-        default_corner_style stays L-only this cycle, with a sibling
-        default_t_style field deferred until more T-joint styles are
-        added).
-      Explicit values (THREE_STUD / T_BACKING_STUDS) honored verbatim
-        — validate_joints rejects type/style mismatches up front so
-        this function doesn't have to defend against them.
+        default_corner_style stays L-only, with a sibling
+        default_t_style field deferred until a second T-joint style
+        ships).
+      Explicit values (THREE_STUD / CALIFORNIA / LADDER_BLOCKING /
+        T_BACKING_STUDS) honored verbatim — validate_joints rejects
+        type/style mismatches up front so this function doesn't have
+        to defend against them.
     """
     if joint.corner_style != 'AUTO':
         return joint.corner_style
@@ -1155,87 +1165,334 @@ def compute_wall_joint_context(
     return context
 
 
+def l_corner_three_stud_main_geometry(
+    st_self: float,
+    wt_other: float,
+    end: str,
+    wall_length_in: float,
+) -> dict:
+    """THREE_STUD MAIN-role geometry: one interior filler stud.
+
+    The filler stud is the v0.6 default L-corner detail — a third
+    full-height stud one wt_other inboard from the wall end, with
+    its interior face flush with the paired wall's interior face.
+    Combined with the wall's own end stud and the paired wall's
+    end stud, this gives the canonical three-stud corner post.
+
+    AUTO is resolved upstream by resolve_corner_style; this helper
+    receives 'THREE_STUD' explicitly.
+
+    Args:
+        st_self: this wall's stud thickness
+            (LUMBER_TYPES[nominal][0], 1.5 for 2x4). The filler
+            stud's OWN x-extent.
+        wt_other: the paired wall's wall thickness
+            (LUMBER_TYPES[paired_nominal][1], 3.5 for 2x4).
+        end: 'START' (joint at x=0) or 'END' (joint at wall_length_in).
+        wall_length_in: this wall's length.
+
+    Returns:
+        {'filler_stud_x': float} — left-edge x-coord of the filler.
+    """
+    if end == 'END':
+        filler_x = wall_length_in - wt_other - st_self
+    else:  # 'START'
+        filler_x = wt_other
+    return {'filler_stud_x': filler_x}
+
+
+def l_corner_california_main_geometry(
+    st_self: float,
+    wt_self: float | None,
+    wt_other: float,
+    end: str,
+    wall_length_in: float,
+) -> dict:
+    """CALIFORNIA MAIN-role geometry: one 2x backer laid flat.
+
+    Drop-in replacement for THREE_STUD's filler stud. The backer is
+    2x stock (1.5" narrow face) rotated 90° so its broad face runs
+    along the wall length — wider in X (wt_self), shallower in Y
+    (1.5"). Interior face flush with MAIN's interior face; near-Y
+    face sits at wt_self - 1.5 (deep into the cavity).
+
+    Energy-efficient alternative to THREE_STUD: less wood at the
+    corner, more insulation cavity, same drywall-nailing surface.
+
+    AUTO is resolved upstream by resolve_corner_style; this helper
+    receives 'CALIFORNIA' explicitly. The dispatcher's wt_self
+    kwarg flows here as a required argument.
+
+    Args:
+        st_self: this wall's stud thickness (1.5 for 2x4). Accepted
+            for signature symmetry with the THREE_STUD helper;
+            unused in California's geometry math.
+        wt_self: this wall's wall thickness
+            (LUMBER_TYPES[nominal][1], 3.5 for 2x4). Backer x-extent
+            + y-offset reference. REQUIRED — None raises ValueError.
+        wt_other: the paired wall's wall thickness. Same anchor as
+            THREE_STUD's filler.
+        end: 'START' or 'END'.
+        wall_length_in: this wall's length.
+
+    Returns:
+        {'backer': {left_edge_x, y_offset, x_extent, y_extent}}.
+
+    Raises:
+        ValueError: if wt_self is None.
+    """
+    del st_self  # accepted for signature symmetry; unused
+    if wt_self is None:
+        raise ValueError(
+            "CALIFORNIA corner style requires wt_self (the MAIN "
+            "wall's wall thickness) — the dispatcher passes it via "
+            "the wt_self kwarg on l_corner_geometry."
+        )
+    if end == 'END':
+        left_edge_x = wall_length_in - wt_other - wt_self
+    else:  # 'START'
+        left_edge_x = wt_other
+    return {
+        'backer': {
+            'left_edge_x': left_edge_x,
+            'y_offset':    wt_self - 1.5,
+            'x_extent':    wt_self,
+            'y_extent':    1.5,
+        },
+    }
+
+
+def l_corner_ladder_blocking_main_geometry(
+    st_self: float,
+    wt_self: float | None,
+    wt_other: float,
+    end: str,
+    wall_length_in: float,
+    stud_cavity_bottom_z: float | None,
+    stud_cavity_top_z: float | None,
+) -> dict:
+    """LADDER_BLOCKING MAIN-role geometry: three horizontal blocks.
+
+    No vertical filler stud. Instead, three horizontal 2x blocks
+    stacked at staggered Z heights provide drywall nailing while
+    maximizing insulation cavity. Same X anchor as THREE_STUD's
+    filler. Block long axis along wall depth (Y); broad face
+    vertical so drywall can nail to the upper face.
+
+    Z layout (assuming cavity >= 24 + 2 * wt_self):
+        z_center_bottom = stud_cavity_bottom_z + 12
+        z_center_top    = stud_cavity_top_z    - 12
+        z_center_mid    = (z_center_bottom + z_center_top) / 2
+
+    For 96" 2x4 walls with 1 bot + 2 top plates:
+        cavity_bottom = 1.5, cavity_top = 93
+        z_centers = [13.5, 47.25, 81.0]
+
+    AUTO is resolved upstream by resolve_corner_style; this helper
+    receives 'LADDER_BLOCKING' explicitly. The dispatcher's
+    wt_self / stud_cavity_bottom_z / stud_cavity_top_z kwargs flow
+    here as required arguments.
+
+    Args:
+        st_self: this wall's stud thickness (1.5 for 2x4). Block
+            x-extent (narrow stud face along wall length).
+        wt_self: this wall's wall thickness (3.5 for 2x4). Block
+            y-extent (spans full wall depth) and z-extent (broad
+            face vertical). REQUIRED — None raises ValueError.
+        wt_other: the paired wall's wall thickness. Same anchor as
+            THREE_STUD's filler.
+        end: 'START' or 'END'.
+        wall_length_in: this wall's length.
+        stud_cavity_bottom_z: top of bottom plate stack in wall-
+            local Z. Lowest block center sits 12" above this.
+            REQUIRED — None raises ValueError.
+        stud_cavity_top_z: bottom of lower top plate in wall-local
+            Z. Highest block center sits 12" below this. REQUIRED.
+
+    Returns:
+        {'ladder_blocks': {left_edge_x, z_centers (bottom-to-top),
+                           x_extent, y_extent, z_extent}}.
+
+    Raises:
+        ValueError: if any required kwarg is None, or if the
+            computed block z_centers overlap or escape the cavity
+            (defense-in-depth; validate_joints catches the size
+            mismatch upstream).
+    """
+    if (wt_self is None
+            or stud_cavity_bottom_z is None
+            or stud_cavity_top_z is None):
+        raise ValueError(
+            "LADDER_BLOCKING corner style requires wt_self, "
+            "stud_cavity_bottom_z, and stud_cavity_top_z — the "
+            "dispatcher passes them via the corresponding kwargs "
+            "on l_corner_geometry."
+        )
+    if end == 'END':
+        left_edge_x = wall_length_in - wt_other - st_self
+    else:  # 'START'
+        left_edge_x = wt_other
+    z_center_bottom = stud_cavity_bottom_z + 12.0
+    z_center_top    = stud_cavity_top_z    - 12.0
+    z_center_mid    = (z_center_bottom + z_center_top) / 2.0
+
+    # Defense-in-depth: validate_joints catches the size mismatch
+    # upstream, but a caller who builds a joint without going
+    # through validate_joints would get a confusing geometry
+    # outcome instead of a clear error.
+    if z_center_top - z_center_bottom < 2.0 * wt_self:
+        raise ValueError(
+            f"LADDER_BLOCKING cavity too short for three blocks: "
+            f"z_center_top - z_center_bottom = "
+            f"{z_center_top - z_center_bottom:g}\" < 2 * wt_self = "
+            f"{2.0 * wt_self:g}\". Need stud cavity height "
+            f">={24.0 + 2.0 * wt_self:g}\" for "
+            f"{wt_self:g}\"-tall blocks."
+        )
+    half_h = wt_self / 2.0
+    if (z_center_bottom - half_h < stud_cavity_bottom_z
+            or z_center_top + half_h > stud_cavity_top_z):
+        raise ValueError(
+            f"LADDER_BLOCKING block extends past cavity bounds — "
+            f"cavity [{stud_cavity_bottom_z:g}, "
+            f"{stud_cavity_top_z:g}], blocks span "
+            f"[{z_center_bottom - half_h:g}, "
+            f"{z_center_top + half_h:g}]"
+        )
+
+    return {
+        'ladder_blocks': {
+            'left_edge_x': left_edge_x,
+            'z_centers':   [z_center_bottom, z_center_mid, z_center_top],
+            'x_extent':    st_self,
+            'y_extent':    wt_self,
+            'z_extent':    wt_self,
+        },
+    }
+
+
 def l_corner_geometry(
     st_self: float,
     wt_other: float,
     role: str,
     end: str,
     wall_length_in: float,
+    *,
+    corner_style: str = 'THREE_STUD',
+    wt_self: float | None = None,
+    stud_cavity_bottom_z: float | None = None,
+    stud_cavity_top_z: float | None = None,
 ) -> dict:
     """Per-end stud-related geometry for ONE wall at ONE end of an L joint.
 
+    Dispatcher. ABUTTING-role handling (end stud moves inboard by
+    wt_other to land flush with shortened plates) is identical
+    across all three L-corner styles and lives in the dispatcher
+    body. MAIN-role handling dispatches to a per-style helper:
+
+        THREE_STUD       → l_corner_three_stud_main_geometry
+        CALIFORNIA       → l_corner_california_main_geometry
+        LADDER_BLOCKING  → l_corner_ladder_blocking_main_geometry
+
+    The corner_style kwarg defaults to 'THREE_STUD', so callers
+    that haven't migrated to the v0.6.60 API keep working without
+    change — that's the backward-compatibility hook that lets
+    Commit 2 ship templates-side without breaking the operator.
+    The new kwargs are keyword-only (`*` boundary) so existing
+    positional callers keep working unchanged.
+
+    AUTO is resolved upstream by resolve_corner_style; this
+    function only accepts the three concrete L-corner styles per
+    L_CORNER_STYLES. T-joint styles (T_BACKING_STUDS) are not
+    valid here — the caller dispatched wrong.
+
     Two calls cover a wall with joints at both ends; the operator
-    combines the START and END results when laying out studs. For a
-    wall with no joint at a given end, the caller skips this function
-    and uses v0.5 defaults.
-
-    v0.6.40 narrowed this helper to stud-only: per-end plate offsets
-    moved out to plate_effective_ranges (which returns coordinate
-    ranges directly), and the is_extending parameter went with them.
-    What remains here is the end-stud reposition (ABUTTING walls move
-    inboard by wt_other so they land flush with their shortened
-    plates) and the interior corner filler stud position (MAIN walls
-    only, per THREE_STUD corner style).
-
-    LUMBER_TYPES indices in v0.6.0 mixed stud thickness ([0]) with
-    wall thickness ([1]) at joints — produced 1.5" lap on 2x4 corners
-    when residential framing wants 3.5". This signature is explicit:
-    st_self = this wall's stud thickness (the x-extent of an OC stud
-    along the wall's length axis); wt_other = the paired wall's WALL
-    thickness (the depth from interior to exterior face). For 2x4
-    stock those are 1.5 and 3.5 respectively.
+    combines the START and END results when laying out studs. For
+    a wall with no joint at a given end, the caller skips this
+    function and uses v0.5 defaults.
 
     Args:
         st_self: this wall's stud thickness (LUMBER_TYPES[nominal][0],
-            1.5" for 2x4). Used where the value represents the stud's
-            OWN x-extent — the end stud x override on the END side
-            and the filler stud x on the END side, where the stud's
-            left edge is offset by its own width from the right edge
-            that lands at the corner.
+            1.5 for 2x4). The stud's OWN x-extent.
         wt_other: the paired wall's wall thickness
-            (LUMBER_TYPES[paired_nominal][1], 3.5" for 2x4). Used for
-            "how much the other wall takes up at the corner" —
-            end stud reposition base and filler stud position.
+            (LUMBER_TYPES[paired_nominal][1], 3.5 for 2x4).
         role: 'MAIN' or 'ABUTTING'.
-        end: 'START' (joint at x=0) or 'END' (joint at x=wall_length_in).
-        wall_length_in: this wall's length in inches.
+        end: 'START' or 'END'.
+        wall_length_in: this wall's length.
+        corner_style: 'THREE_STUD' (default), 'CALIFORNIA', or
+            'LADDER_BLOCKING'. Anything else raises ValueError.
+        wt_self: this wall's wall thickness
+            (LUMBER_TYPES[nominal][1]). REQUIRED for CALIFORNIA
+            and LADDER_BLOCKING; ignored for THREE_STUD.
+        stud_cavity_bottom_z: top of the wall's bottom plate stack
+            in wall-local Z (= bottom_plate_count * st_self).
+            REQUIRED for LADDER_BLOCKING.
+        stud_cavity_top_z: bottom of the wall's lower top plate in
+            wall-local Z (= wall_height_in - top_plate_count * st_self).
+            REQUIRED for LADDER_BLOCKING.
 
     Returns:
-        end_stud_x_override (float | None): left-edge x-coord to use for
-            this wall's end stud at the joint end. None means use v0.5
-            default (flush with the wall end). ABUTTING walls move
-            their end stud inward by wt_other; MAIN walls don't change.
-        filler_stud_x (float | None): left-edge x-coord of the interior
-            corner filler stud. Only MAIN walls produce one (per design
-            doc — abutting walls don't). For 'END' the filler sits at
-            (length - wt_other - st_self), so its right edge aligns
-            with the paired wall's interior face. For 'START' at
-            wt_other (mirror), so its left edge aligns with the paired
-            wall's interior face on the START side.
+        Uniform-shape dict — superset of all styles' MAIN-role
+        outputs plus the ABUTTING-role end-stud override:
+            end_stud_x_override (float | None): set only for ABUTTING.
+            filler_stud_x       (float | None): set only for THREE_STUD MAIN.
+            backer              (dict  | None): set only for CALIFORNIA MAIN.
+            ladder_blocks       (dict  | None): set only for LADDER_BLOCKING MAIN.
+
+    Raises:
+        ValueError: if corner_style isn't in L_CORNER_STYLES, or
+            if a per-style helper's required kwarg is None.
     """
-    out = {
+    if corner_style not in L_CORNER_STYLES:
+        raise ValueError(
+            f"l_corner_geometry: corner_style must be one of "
+            f"{sorted(L_CORNER_STYLES)}, got {corner_style!r}"
+        )
+
+    out: dict = {
         'end_stud_x_override': None,
-        'filler_stud_x': None,
+        'filler_stud_x':       None,
+        'backer':              None,
+        'ladder_blocks':       None,
     }
 
-    if role == 'MAIN':
-        # Filler stud one wt_other inboard from the wall end (interior
-        # face aligned with the paired wall's interior face in world
-        # space). The stud has its OWN width (st_self) on the inboard
-        # side, hence the additional -st_self on the END side.
-        if end == 'END':
-            out['filler_stud_x'] = wall_length_in - wt_other - st_self
-        else:  # 'START'
-            out['filler_stud_x'] = wt_other
-    else:  # 'ABUTTING'
-        # End stud repositioned to land flush with the shortened plates.
-        # On END side the stud's own width (st_self) shifts the LEFT
-        # edge inboard from the right edge that aligns with plate end.
+    if role == 'ABUTTING':
+        # End stud repositioned to land flush with the shortened
+        # plates. On END side the stud's own width (st_self) shifts
+        # the LEFT edge inboard from the right edge that aligns
+        # with plate end. Identical across all L-corner styles.
         if end == 'END':
             out['end_stud_x_override'] = wall_length_in - wt_other - st_self
         else:  # 'START'
             out['end_stud_x_override'] = wt_other
+        return out
 
+    # MAIN: dispatch on corner_style.
+    if corner_style == 'THREE_STUD':
+        out.update(l_corner_three_stud_main_geometry(
+            st_self=st_self,
+            wt_other=wt_other,
+            end=end,
+            wall_length_in=wall_length_in,
+        ))
+    elif corner_style == 'CALIFORNIA':
+        out.update(l_corner_california_main_geometry(
+            st_self=st_self,
+            wt_self=wt_self,
+            wt_other=wt_other,
+            end=end,
+            wall_length_in=wall_length_in,
+        ))
+    elif corner_style == 'LADDER_BLOCKING':
+        out.update(l_corner_ladder_blocking_main_geometry(
+            st_self=st_self,
+            wt_self=wt_self,
+            wt_other=wt_other,
+            end=end,
+            wall_length_in=wall_length_in,
+            stud_cavity_bottom_z=stud_cavity_bottom_z,
+            stud_cavity_top_z=stud_cavity_top_z,
+        ))
     return out
 
 
@@ -1291,7 +1548,12 @@ def t_joint_geometry_for_wall_a(
     }
 
 
-def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
+def validate_joints(
+    joints,
+    walls_in_level,
+    *,
+    building_default_corner_style: str = 'THREE_STUD',
+) -> tuple[bool, str]:
     """Cross-check the joints list against the Level's walls.
 
     Returns (True, "") on success or (False, "Joint N: ...") on the
@@ -1305,9 +1567,12 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
          at most one joint per end. T_JOINT joints don't bind wall_a's
          end (the joint is at a position along the wall, not at an
          end), so only wall_b's end is checked for T joints.
-      5. corner_style and joint_type are compatible: THREE_STUD only
-         valid with L_CORNER; T_BACKING_STUDS only valid with T_JOINT.
-         AUTO is always valid.
+      5. corner_style and joint_type are compatible (v0.6.60 uses
+         L_CORNER_STYLES / T_JOINT_STYLES set membership): L-corner
+         styles (THREE_STUD, CALIFORNIA, LADDER_BLOCKING) only valid
+         with L_CORNER; T-joint styles (T_BACKING_STUDS) only valid
+         with T_JOINT. AUTO is always valid (resolved at frame time
+         via resolve_corner_style).
       6. T_JOINT wall_a_position_in is within [st_a, wall_a_length -
          wt_b - st_a] so backing studs and wall_b's footprint fit
          within wall_a's length axis. Other geometry conflicts
@@ -1315,6 +1580,31 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
          L-corner joints at wall_a's ends) are intentionally NOT
          checked here in v0.6.50 — they surface later as splice /
          placement errors or visually in the viewport.
+      7. LADDER_BLOCKING (v0.6.60, AUTO-aware): the MAIN wall's stud
+         cavity must be tall enough for three blocks at 12"/12"/
+         midpoint with each block's z-extent = MAIN's wt_self.
+         Required: stud_cavity_height >= 24 + 2 * wt_self_MAIN.
+         For 2x4 MAIN: cavity >= 31". For 2x6 MAIN: cavity >= 35".
+         The check fires when the joint's RESOLVED style (via
+         resolve_corner_style against `building_default_corner_style`)
+         is LADDER_BLOCKING — so both explicit `corner_style=
+         'LADDER_BLOCKING'` AND `corner_style='AUTO'` joints whose
+         Building default is LADDER_BLOCKING are caught here.
+
+    Args:
+        joints: iterable of PraxovaJoint items (typically
+            level.praxova_level.joints).
+        walls_in_level: list of Praxova-managed wall Empties that
+            are children of the Level being validated.
+        building_default_corner_style: the Building's
+            default_corner_style ('THREE_STUD', 'CALIFORNIA', or
+            'LADDER_BLOCKING'). Used to resolve `corner_style='AUTO'`
+            joints for check 7. Defaults to 'THREE_STUD' — the v0.6
+            default — so callers that haven't migrated to the
+            v0.6.60 API keep working (they just don't catch
+            AUTO+LADDER_BLOCKING via Building default at validation
+            time; the helper's defense-in-depth ValueError catches
+            it at frame time).
     """
     wall_set = set(walls_in_level)
 
@@ -1326,19 +1616,26 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
         if joint.wall_a == joint.wall_b:
             return (False, f"Joint {i}: wall_a and wall_b must be different walls")
 
-        # Compatibility check (5).
-        if joint.joint_type == 'L_CORNER' and joint.corner_style == 'T_BACKING_STUDS':
-            return (
-                False,
-                f"Joint {i}: corner_style 'T_BACKING_STUDS' is only valid "
-                f"with joint_type 'T_JOINT'",
-            )
-        if joint.joint_type == 'T_JOINT' and joint.corner_style == 'THREE_STUD':
-            return (
-                False,
-                f"Joint {i}: corner_style 'THREE_STUD' is only valid "
-                f"with joint_type 'L_CORNER'",
-            )
+        # Compatibility check (5). v0.6.60: set-based, single source
+        # of truth via L_CORNER_STYLES / T_JOINT_STYLES. AUTO is
+        # unconditionally valid (resolved at frame time).
+        if joint.corner_style != 'AUTO':
+            if (joint.joint_type == 'L_CORNER'
+                    and joint.corner_style in T_JOINT_STYLES):
+                return (
+                    False,
+                    f"Joint {i}: corner_style "
+                    f"{joint.corner_style!r} is T-joint-only and "
+                    f"can't be used with L_CORNER",
+                )
+            if (joint.joint_type == 'T_JOINT'
+                    and joint.corner_style in L_CORNER_STYLES):
+                return (
+                    False,
+                    f"Joint {i}: corner_style "
+                    f"{joint.corner_style!r} is L-corner-only and "
+                    f"can't be used with T_JOINT",
+                )
 
         # T_JOINT position bounds (6).
         if joint.joint_type == 'T_JOINT':
@@ -1355,6 +1652,44 @@ def validate_joints(joints, walls_in_level) -> tuple[bool, str]:
                     f"[{min_pos:g}, {max_pos:g}] so backing studs and "
                     f"wall_b's footprint fit within wall_a "
                     f"({joint.wall_a.name!r}, length {wall_a_length:g}\")",
+                )
+
+        # LADDER_BLOCKING wall-height pre-flight (7). v0.6.60 AUTO-
+        # aware: resolves corner_style against the Building default
+        # via resolve_corner_style before checking. So both explicit
+        # 'LADDER_BLOCKING' AND 'AUTO' (when Building default is
+        # 'LADDER_BLOCKING') trigger the check. Identifying the MAIN
+        # wall requires resolve_extending_wall (defined above).
+        if (joint.joint_type == 'L_CORNER'
+                and resolve_corner_style(
+                    joint, building_default_corner_style,
+                ) == 'LADDER_BLOCKING'):
+            main = (
+                joint.wall_a
+                if resolve_extending_wall(
+                    joint, joint.wall_a, joint.wall_b,
+                ) == 'A'
+                else joint.wall_b
+            )
+            mp = main.praxova_wall
+            main_st = LUMBER_TYPES[mp.wall_nominal][0]
+            main_wt = LUMBER_TYPES[mp.wall_nominal][1]
+            stud_cavity_height = (
+                float(mp.wall_height_in)
+                - (int(mp.wall_top_plate_count)
+                   + int(mp.wall_bottom_plate_count))
+                * main_st
+            )
+            min_cavity_height = 24.0 + 2.0 * main_wt
+            if stud_cavity_height < min_cavity_height:
+                return (
+                    False,
+                    f"Joint {i}: LADDER_BLOCKING requires the MAIN "
+                    f"wall ({main.name!r}) to have stud cavity "
+                    f"height >={min_cavity_height:g}\" (24\" between "
+                    f"top and bottom block centers + {main_wt:g}\" "
+                    f"of block stack on each end). Current cavity "
+                    f"is {stud_cavity_height:g}\".",
                 )
 
     used: dict[tuple[str, str], int] = {}
@@ -1562,7 +1897,6 @@ def plan_plate_splice_pieces(
 def collect_full_height_stud_centers(
     oc_stud_left_xs: list[float],
     opening_layouts: list[dict],
-    filler_left_xs: list[float],
     stud_thickness_in: float,
     *,
     backing_stud_left_xs: list[float] | tuple[float, ...] = (),
@@ -1575,12 +1909,24 @@ def collect_full_height_stud_centers(
       - End studs and surviving OC studs (already in oc_stud_left_xs
         after end_stud_override + filter_studs_around_openings)
       - King studs from each opening (full-height by construction)
-      - Interior corner filler studs from MAIN-role L-corner joint ends
       - T-joint backing studs on the through wall (wall_a) — two per
         T joint, flanking wall_b's footprint; both run full height
 
     Excludes jacks (don't reach the top plates) and cripples (don't
     reach both plate stacks).
+
+    v0.6.60: corner-filler / California backer studs on MAIN-role
+    L-corner joints are NO LONGER eligible splice anchors. The
+    filler/backer sits 1.5"-3.5" inboard from the end stud in the
+    same corner cell — redundant with the end stud for splice
+    purposes (they're so close together that any splice landing on
+    the filler could land on the end stud with the same offset
+    behavior). Removing it makes corner_style a pure backing
+    concern: THREE_STUD, CALIFORNIA, and LADDER_BLOCKING all see
+    the same splice anchor set, so swapping styles can't change
+    splice positions. T-joint backing studs remain eligible — they
+    sit at interior wall positions and aren't redundant with
+    anything.
 
     Args:
         oc_stud_left_xs: left-edge x-coords of every regular OC stud
@@ -1588,16 +1934,11 @@ def collect_full_height_stud_centers(
             Same list the operator places as `{wall_name}_Stud_NN`.
         opening_layouts: list of dicts from opening_framing_layout,
             one per opening on this wall.
-        filler_left_xs: left-edge x-coords of corner filler studs from
-            MAIN-role L-corner joint ends. Empty list if the wall has
-            no MAIN-role L-corner joints.
         stud_thickness_in: stud cross-section thickness along wall
             length (LUMBER_TYPES[nominal][0]).
         backing_stud_left_xs: left-edge x-coords of T-joint backing
             studs on this wall (only populated when this wall is
-            wall_a in one or more T joints). Empty by default; commit
-            3 wires the operator and bridge predictor to pass two
-            entries per mid_joint from t_joint_geometry_for_wall_a.
+            wall_a in one or more T joints). Empty by default.
 
     Returns:
         Sorted unique list of stud center x-coords. The caller passes
@@ -1616,9 +1957,6 @@ def collect_full_height_stud_centers(
         # at king_right_x - stud_thickness, center at -half_t from
         # king_right_x.
         centers.add(layout['king_right_x'] - half_t)
-
-    for x in filler_left_xs:
-        centers.add(x + half_t)
 
     for x in backing_stud_left_xs:
         centers.add(x + half_t)

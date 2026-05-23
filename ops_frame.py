@@ -29,7 +29,6 @@ Not yet shipped:
     - In-line splice joint_type (joining two walls end-to-end as one wall;
       distinct from v0.6.40's plate splicing along a single wall, which
       already ships)
-    - California corner, ladder-blocking corner styles (later sprint)
     - Multi-Level framing in one pass (v0.8+)
     - Direction/rotation parameter for frame_wall (user transforms the
       Empty afterward)
@@ -127,14 +126,32 @@ def _get_or_make_mesh(name: str, dims_inches: tuple[float, float, float]):
 # the v0.6.40 plate_effective_range). The split mirrors the conceptual
 # divide: plates are per-plate (both ends combined into a range), and
 # studs are per-end (one filler per joint, one stud override per joint).
+# v0.6.60: backer / ladder_blocks added for the new corner styles.
+# Exactly one of (filler_x, backer, ladder_blocks) is non-None for a
+# MAIN-role joint end (THREE_STUD / CALIFORNIA / LADDER_BLOCKING
+# respectively); all three are None for ABUTTING ends and for ends
+# without joints. Mutual exclusivity is guaranteed by the dispatcher
+# in templates.l_corner_geometry.
 _EMPTY_END_MODS = {
     'end_stud_override': None,
     'filler_x': None,
+    'backer': None,
+    'ladder_blocks': None,
     'joint_index': 0,
 }
 
 
-def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
+def _resolve_joint_context(
+    active,
+    is_existing_wall,
+    length_in,
+    thickness_in,
+    *,
+    height_in: float,
+    top_plate_count: int,
+    bottom_plate_count: int,
+    nominal: str,
+):
     """Read joints on the active wall's parent Level (if any) and turn
     them into per-end modifications + per-plate effective ranges.
 
@@ -144,11 +161,23 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
     no-op mods/ranges for them — and the rest of execute() stays on
     the v0.5 path.
 
+    v0.6.60: signature gains four keyword-only args (height_in,
+    top_plate_count, bottom_plate_count, nominal) so the dispatcher
+    in templates.l_corner_geometry can compute the wt_self and stud-
+    cavity Z bounds it needs for CALIFORNIA and LADDER_BLOCKING.
+    Single call site (frame_wall.execute) — kw-only keeps the call
+    self-documenting at that one site.
+
     Returns:
         joint_context: dict per templates.compute_wall_joint_context
         level_joints: list of joints from the parent Level (or empty)
         mods: dict with 'START' and 'END' entries, each carrying
-            end_stud_override / filler_x / joint_index for that end.
+            end_stud_override / filler_x / backer / ladder_blocks /
+            joint_index for that end. v0.6.60: backer (CALIFORNIA)
+            and ladder_blocks (LADDER_BLOCKING) carry the full geom
+            sub-dicts from the dispatcher; exactly one of (filler_x,
+            backer, ladder_blocks) is non-None per MAIN end, all
+            None for ABUTTING and no-joint ends.
             joint_index is the 1-based index in the Level's joints
             collection (0 if no joint touches that end).
         plate_ranges: dict with 'BOTTOM', 'LOWER_TOP', 'CAP' keys.
@@ -206,12 +235,33 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
         elif j.wall_b == active:
             joint_index_by_end[j.wall_b_end] = j_idx
 
+    # v0.6.60: dispatcher inputs that are constant across both ends
+    # for this wall. wt_self = MAIN wall's wall thickness (used by
+    # CALIFORNIA + LADDER_BLOCKING); stud-cavity Z bounds = top of
+    # bottom plate stack to bottom of lower top plate (LADDER_BLOCKING
+    # only). Computed once outside the per-end loop because they
+    # depend only on this wall's nominal + height + plate counts,
+    # not on the joint at each end.
+    wt_self = templates.LUMBER_TYPES[nominal][1]
+    stud_cavity_bottom_z = bottom_plate_count * thickness_in
+    stud_cavity_top_z = height_in - top_plate_count * thickness_in
+
     # Walk both ends, populating the stud-related mods and capturing
     # paired_t per end for the plate-range computation below.
     paired_t_by_end: dict[str, float] = {'START': 0.0, 'END': 0.0}
     for end in ('START', 'END'):
         ctx = joint_context[end]
         if ctx is None:
+            continue
+        # T joints are handled by separate machinery — l_corner_geometry
+        # is L-corner-only. T_JOINT ABUTTING per-end contexts (this
+        # wall is wall_b butting into wall_a's side) need only the
+        # paired_t to flow into plate_effective_ranges; no stud-side
+        # mods at the joint end.
+        if ctx['joint_type'] != 'L_CORNER':
+            paired_wall = ctx['paired_wall']
+            paired_nominal = paired_wall.praxova_wall.wall_nominal
+            paired_t_by_end[end] = templates.LUMBER_TYPES[paired_nominal][1]
             continue
         # The paired wall's WALL thickness (LUMBER_TYPES[...][1], the
         # depth from interior to exterior face — 3.5" for 2x4) drives
@@ -230,10 +280,16 @@ def _resolve_joint_context(active, is_existing_wall, length_in, thickness_in):
             role=ctx['role'],
             end=end,
             wall_length_in=length_in,
+            corner_style=ctx['corner_style'],
+            wt_self=wt_self,
+            stud_cavity_bottom_z=stud_cavity_bottom_z,
+            stud_cavity_top_z=stud_cavity_top_z,
         )
         mods[end] = {
             'end_stud_override': geom['end_stud_x_override'],
             'filler_x': geom['filler_stud_x'],
+            'backer': geom['backer'],
+            'ladder_blocks': geom['ladder_blocks'],
             'joint_index': joint_index_by_end[end],
         }
 
@@ -445,6 +501,10 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         joint_context, level_joints, mods, plate_ranges = (
             _resolve_joint_context(
                 active, is_existing_wall, length_in, thickness_in,
+                height_in=height_in,
+                top_plate_count=top_plate_count,
+                bottom_plate_count=bottom_plate_count,
+                nominal=nominal,
             )
         )
 
@@ -559,7 +619,6 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
         eligible_stud_centers = templates.collect_full_height_stud_centers(
             oc_stud_left_xs=stud_xs_in,
             opening_layouts=opening_layouts,
-            filler_left_xs=filler_left_xs,
             stud_thickness_in=thickness_in,
             backing_stud_left_xs=backing_stud_xs,
         )
@@ -999,11 +1058,15 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
             )
             children.append(obj)
 
-        # v0.6: corner filler studs for MAIN-role joints. One per
-        # joint, parented under this (the main) wall's Empty. Same mesh
-        # as the regular studs (identical cross-section + length, just a
-        # different role at the corner). ABUTTING walls don't produce a
-        # filler — only MAIN does, per the design's THREE_STUD spec.
+        # v0.6: corner filler studs for MAIN-role THREE_STUD joints.
+        # One per joint, parented under this (the main) wall's Empty.
+        # Same mesh as the regular studs (identical cross-section +
+        # length, just a different role at the corner). ABUTTING walls
+        # don't produce a filler — only MAIN does. v0.6.60: the gate
+        # on filler_x is not None naturally restricts placement to
+        # THREE_STUD joints — CALIFORNIA / LADDER_BLOCKING joints
+        # have filler_x=None and fall through to the per-style
+        # placement loops below.
         for end in ('START', 'END'):
             filler_x_in = mods[end]['filler_x']
             if filler_x_in is None:
@@ -1020,6 +1083,99 @@ class PRAXOVA_OT_frame_wall(bpy.types.Operator):
                 label=stud_label,
             )
             children.append(obj)
+
+        # v0.6.60: California backers for MAIN-role CALIFORNIA joints.
+        # Drop-in replacement for THREE_STUD's filler stud: rotated 2x
+        # stock with broad face along the wall length (X-extent =
+        # wt_self), narrow face into the cavity (Y-extent = 1.5"),
+        # full stud height. One mesh datablock per (nominal, stud
+        # length) — cached by name and shared across joints with
+        # identical dimensions. Backer is cutlist-tagged as a vertical
+        # stud (same SKU as a regular stud — it's the same stock).
+        backer_mesh = None
+        for end in ('START', 'END'):
+            backer = mods[end]['backer']
+            if backer is None:
+                continue
+            if backer_mesh is None:
+                wt_self_in = templates.LUMBER_TYPES[nominal][1]
+                backer_mesh_name = (
+                    f"praxova_mesh_wall_corner_backer_{nominal}_"
+                    f"{_fmt_inches(stud_length_in)}"
+                )
+                backer_mesh = _get_or_make_mesh(
+                    backer_mesh_name,
+                    (wt_self_in, 1.5, stud_length_in),
+                )
+            joint_idx = mods[end]['joint_index']
+            obj = _make_framing_object(
+                context, backer_mesh,
+                f"CornerBacker_Joint{joint_idx:02d}",
+                (
+                    backer['left_edge_x'] * INCH,
+                    backer['y_offset'] * INCH,
+                    z_stud_base_m,
+                ),
+                nominal=nominal,
+                length_in=stud_length_in,
+                stock_in=stud_stock_in,
+                orientation='VERTICAL',
+                label=stud_label,
+            )
+            children.append(obj)
+
+        # v0.6.60: Ladder blocking for MAIN-role LADDER_BLOCKING joints.
+        # Three horizontal blocks at staggered Z heights replace the
+        # vertical filler — maximum insulation cavity, drywall nailing
+        # provided by the blocks' broad upper faces. Block stock is
+        # the same nominal as the MAIN wall, cut to length = wt_self
+        # (3.5" for 2x4 MAIN, 5.5" for 2x6 MAIN). One mesh per nominal,
+        # shared across all blocks at all joints with the same MAIN
+        # nominal. Cutlist tag is HORIZONTAL stock at cut length
+        # wt_self.
+        ladder_mesh = None
+        ladder_label = None
+        ladder_stock_in = None
+        for end in ('START', 'END'):
+            blocks = mods[end]['ladder_blocks']
+            if blocks is None:
+                continue
+            if ladder_mesh is None:
+                wt_self_in = templates.LUMBER_TYPES[nominal][1]
+                ladder_mesh_name = (
+                    f"praxova_mesh_wall_ladder_block_{nominal}_"
+                    f"{_fmt_inches(wt_self_in)}"
+                )
+                ladder_mesh = _get_or_make_mesh(
+                    ladder_mesh_name,
+                    (thickness_in, wt_self_in, wt_self_in),
+                )
+                # Block stock + cutlist label. Cut length = wt_self.
+                ladder_stock_in = templates.select_stock_length_in(
+                    nominal, wt_self_in,
+                )
+                ladder_stock_ft = int(round(ladder_stock_in / 12))
+                ladder_label = templates.lumber_cutlist_label(
+                    nominal, ladder_stock_ft, 'HORIZONTAL',
+                )
+            joint_idx = mods[end]['joint_index']
+            for n, z_center_in in enumerate(blocks['z_centers'], start=1):
+                block_z_base_in = z_center_in - blocks['z_extent'] / 2.0
+                obj = _make_framing_object(
+                    context, ladder_mesh,
+                    f"LadderBlock_Joint{joint_idx:02d}_{n}",
+                    (
+                        blocks['left_edge_x'] * INCH,
+                        0.0,
+                        block_z_base_in * INCH,
+                    ),
+                    nominal=nominal,
+                    length_in=blocks['y_extent'],
+                    stock_in=ladder_stock_in,
+                    orientation='HORIZONTAL',
+                    label=ladder_label,
+                )
+                children.append(obj)
 
         # v0.6.50: T-joint backing studs (this wall is wall_a / the
         # through wall). Two studs per joint flanking wall_b's end-stud
@@ -1465,9 +1621,22 @@ class PRAXOVA_OT_frame_building(bpy.types.Operator):
 
         # Joint validation runs once for the whole list. validate_joints
         # already returns "Joint N: ..." with 1-based indices that match
-        # what the UI shows in the Building tab.
+        # what the UI shows in the Building tab. v0.6.60: thread the
+        # Building's default_corner_style through so validate_joints
+        # can resolve corner_style='AUTO' against it for the
+        # LADDER_BLOCKING wall-height pre-flight. Same walk-up pattern
+        # _resolve_joint_context uses; falls back to 'THREE_STUD' when
+        # the Level has no Building parent (top-level Level —
+        # validate_joints' default kwarg matches).
+        building_default = 'THREE_STUD'
+        parent_bldg = level.parent
+        if (parent_bldg is not None
+                and getattr(parent_bldg, 'praxova_building', None) is not None
+                and parent_bldg.praxova_building.is_building):
+            building_default = parent_bldg.praxova_building.default_corner_style
         ok, msg = templates.validate_joints(
             level.praxova_level.joints, walls,
+            building_default_corner_style=building_default,
         )
         if not ok:
             self.report({'ERROR'}, msg)

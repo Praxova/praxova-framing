@@ -482,10 +482,11 @@ class PraxovaJoint(bpy.types.PropertyGroup):
     corner_style: EnumProperty(  # noqa: F821
         name="Corner style",
         items=[
-            ('AUTO',            "Auto (resolve from joint_type)", "Resolves to THREE_STUD for L_CORNER, T_BACKING_STUDS for T_JOINT"),
-            ('THREE_STUD',      "Three-stud",      "Three vertical studs forming a corner-post bundle (L_CORNER only)"),
-            ('T_BACKING_STUDS', "T backing studs", "Two backing studs on the through wall flanking the abutting wall's end-stud footprint (T_JOINT only)"),
-            # Later sprint: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
+            ('AUTO',             "Auto (resolve from joint_type)", "Resolves to the Building's default L-corner style for L_CORNER, T_BACKING_STUDS for T_JOINT"),
+            ('THREE_STUD',       "Three-stud",       "Three vertical studs forming a corner-post bundle (L_CORNER only)"),
+            ('CALIFORNIA',       "California",       "End stud + one drywall backer rotated 90° flat for energy-efficient framing (L_CORNER only)"),
+            ('LADDER_BLOCKING',  "Ladder blocking",  "End stud + horizontal drywall backing blocks; no vertical filler stud, maximum insulation cavity (L_CORNER only)"),
+            ('T_BACKING_STUDS',  "T backing studs",  "Two backing studs on the through wall flanking the abutting wall's end-stud footprint (T_JOINT only)"),
         ],
         default='AUTO',
     )
@@ -546,9 +547,16 @@ class PraxovaBuildingProps(bpy.types.PropertyGroup):
     )
     default_corner_style: EnumProperty(  # noqa: F821
         name="Default corner style",
+        description=(
+            "L-corner style applied to joints with corner_style='AUTO'. "
+            "T-joint joints with corner_style='AUTO' resolve to "
+            "T_BACKING_STUDS unconditionally (a sibling default_t_style "
+            "field will be added when a second T-joint style ships)."
+        ),
         items=[
-            ('THREE_STUD', "Three-stud", "Three vertical studs forming a corner-post bundle"),
-            # v0.6.6+: ('CALIFORNIA', ...), ('LADDER_BLOCKING', ...)
+            ('THREE_STUD',      "Three-stud",      "Three vertical studs forming a corner-post bundle"),
+            ('CALIFORNIA',      "California",      "End stud + one drywall backer rotated 90° flat for energy-efficient framing"),
+            ('LADDER_BLOCKING', "Ladder blocking", "End stud + horizontal drywall backing blocks; no vertical filler stud, maximum insulation cavity"),
         ],
         default='THREE_STUD',
     )
