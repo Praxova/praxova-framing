@@ -275,12 +275,16 @@ def _parse_openings(raw, wall_nominal: str) -> list[dict]:
 
 # Choices come from PraxovaJoint's EnumProperty items in properties.py.
 # Kept inline here so the bridge enforces the wire-format contract
-# without import-time coupling to bpy/properties; if the UI extends
-# either enum in v0.6.6+ (California / ladder-blocking corner styles),
-# these tuples will also need to grow.
+# without import-time coupling to properties; the joint-type /
+# corner-style compatibility sets (L_CORNER_STYLES, T_JOINT_STYLES)
+# are imported from templates instead — single source of truth for
+# the combo check shared with templates.validate_joints.
 _JOINT_TYPE_CHOICES = ("L_CORNER", "T_JOINT")
 _JOINT_END_CHOICES = ("START", "END")
-_JOINT_CORNER_STYLE_CHOICES = ("AUTO", "THREE_STUD", "T_BACKING_STUDS")
+_JOINT_CORNER_STYLE_CHOICES = (
+    "AUTO", "THREE_STUD", "T_BACKING_STUDS",
+    "CALIFORNIA", "LADDER_BLOCKING",
+)
 _JOINT_EXTENDING_CHOICES = ("AUTO", "A", "B")
 
 
@@ -372,22 +376,28 @@ def _parse_joint(raw, level: bpy.types.Object) -> dict:
         choices=_JOINT_CORNER_STYLE_CHOICES,
     )
 
-    # joint_type / corner_style compatibility. AUTO is always valid;
-    # explicit values are gated by joint_type. Mirrors
-    # templates.validate_joints so the LLM sees the same message
-    # whether the error surfaces at add_joint or frame_building time.
-    if joint_type == "T_JOINT" and corner_style == "THREE_STUD":
-        raise bridge.RPCError(
-            bridge.INVALID_PARAMS,
-            "corner_style 'THREE_STUD' is only valid with "
-            "joint_type 'L_CORNER'",
-        )
-    if joint_type == "L_CORNER" and corner_style == "T_BACKING_STUDS":
-        raise bridge.RPCError(
-            bridge.INVALID_PARAMS,
-            "corner_style 'T_BACKING_STUDS' is only valid with "
-            "joint_type 'T_JOINT'",
-        )
+    # AUTO is unconditionally valid (resolved at frame_building time
+    # via templates.resolve_corner_style). Explicit values are gated
+    # by joint_type via the L_CORNER_STYLES / T_JOINT_STYLES sets —
+    # single source of truth shared with templates.validate_joints, so
+    # the LLM sees the same message body whether the error surfaces at
+    # add_joint or frame_building time. (validate_joints prepends
+    # "Joint {i}:"; here the joint has no index yet.)
+    if corner_style != "AUTO":
+        if (joint_type == "L_CORNER"
+                and corner_style in templates.T_JOINT_STYLES):
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f"corner_style {corner_style!r} is T-joint-only and "
+                f"can't be used with L_CORNER",
+            )
+        if (joint_type == "T_JOINT"
+                and corner_style in templates.L_CORNER_STYLES):
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f"corner_style {corner_style!r} is L-corner-only and "
+                f"can't be used with T_JOINT",
+            )
 
     extending_wall = _optional(
         raw, "extending_wall", str, default="AUTO",
@@ -1097,10 +1107,12 @@ def add_building(params: dict) -> dict:
         location_m ([x, y, z] meters): position the Building Empty in
             world space. Children (the default Level + future walls)
             follow via parent-child transform inheritance.
-        default_corner_style (str): only "THREE_STUD" valid in v0.6;
-            v0.7 will add "CALIFORNIA" and "LADDER_BLOCKING". The
-            param is exposed now for forward-compat — passing
-            "THREE_STUD" (or omitting it) gets you the v0.6 behavior.
+        default_corner_style (str): one of "THREE_STUD" (default),
+            "CALIFORNIA", or "LADDER_BLOCKING". Used as the resolved
+            style for L-corner joints in this Building whose own
+            corner_style is "AUTO" (see templates.resolve_corner_style).
+            Switching defaults after walls are framed has no effect
+            until frame_building runs again.
 
     Returns:
         building_name: name of the new Building Empty
@@ -1119,7 +1131,7 @@ def add_building(params: dict) -> dict:
     location = _location_param(params)
     default_corner_style = _optional(
         params, "default_corner_style", str, default="THREE_STUD",
-        choices=("THREE_STUD",),
+        choices=("THREE_STUD", "CALIFORNIA", "LADDER_BLOCKING"),
     )
 
     scene = bpy.context.scene
@@ -1285,13 +1297,16 @@ def add_joint(params: dict) -> dict:
                 st_a <= position <= wall_a_length - wt_b - st_a so
                 the backing studs fit. Ignored for L_CORNER joints.
               corner_style (str, OPTIONAL, default "AUTO"): "AUTO"
-                resolves contextually — THREE_STUD for L_CORNER (or
-                the Building's default_corner_style),
-                T_BACKING_STUDS for T_JOINT. Explicit values must
-                match joint_type — THREE_STUD only with L_CORNER,
-                T_BACKING_STUDS only with T_JOINT (validated at
-                add_joint time; same rule as templates.validate_joints).
-                v0.6.6+ may add CALIFORNIA and LADDER_BLOCKING.
+                resolves contextually — for L_CORNER, to the parent
+                Building's default_corner_style (one of THREE_STUD /
+                CALIFORNIA / LADDER_BLOCKING); for T_JOINT, to
+                T_BACKING_STUDS. Explicit values must match
+                joint_type — THREE_STUD, CALIFORNIA, and
+                LADDER_BLOCKING are L_CORNER-only; T_BACKING_STUDS
+                is T_JOINT-only. The combo check fires at add_joint
+                time with the same message body as
+                templates.validate_joints (minus the "Joint {i}:"
+                prefix).
               extending_wall (str, OPTIONAL, default "AUTO"):
                 L_CORNER ONLY — determines which wall is MAIN at the
                 corner (the wall whose lower plates run full length,
@@ -2384,6 +2399,24 @@ def frame_building(params: dict) -> dict:
                 (wall_b) in a T joint contribute 0 here — backing
                 studs sit on the through wall's Empty, not the
                 abutting wall's.
+              n_corner_backers (v0.6.61): count of CALIFORNIA-style
+                L-corner backers (CornerBacker_Joint<NN>) placed
+                under THIS wall — non-zero only when this wall is
+                MAIN in one or more L joints whose resolved
+                corner_style is CALIFORNIA (the joint's own style,
+                or the parent Building's default_corner_style when
+                the joint is AUTO). One backer per joint end on the
+                MAIN wall. ABUTTING walls contribute 0 here —
+                CornerBacker Objects sit on the MAIN wall's Empty.
+              n_ladder_blocks (v0.6.61): count of LADDER_BLOCKING-
+                style L-corner blocks (LadderBlock_Joint<NN>_<n>,
+                n=1..3 bottom-up) placed under THIS wall — non-zero
+                only when this wall is MAIN in one or more L joints
+                whose resolved corner_style is LADDER_BLOCKING.
+                THREE blocks per joint end on the MAIN wall, so a
+                wall that is MAIN at both ends of two LADDER_BLOCKING
+                joints reports n_ladder_blocks=6. ABUTTING walls
+                contribute 0.
               joint_indices_touching: 0-based indices into the
                 Level's joints collection for every joint
                 referencing this wall (in either wall_a or wall_b
@@ -2415,8 +2448,22 @@ def frame_building(params: dict) -> dict:
     # Same validator the Building tab's live indicator uses. Surfaces
     # "Joint N: ..." verbatim so an LLM and a human in Blender see
     # identical failure modes for the same input.
+    #
+    # v0.6.61: thread the Building's default_corner_style through so
+    # validate_joints can resolve corner_style='AUTO' against it for
+    # the LADDER_BLOCKING wall-height pre-flight. Same walk-up pattern
+    # ops_frame.frame_building uses (ops_frame.py:~1630); falls back to
+    # 'THREE_STUD' when the Level has no Building parent (top-level
+    # Level — validate_joints' default kwarg matches).
+    building_default = 'THREE_STUD'
+    parent_bldg = level.parent
+    if (parent_bldg is not None
+            and getattr(parent_bldg, 'praxova_building', None) is not None
+            and parent_bldg.praxova_building.is_building):
+        building_default = parent_bldg.praxova_building.default_corner_style
     ok, msg = templates.validate_joints(
         list(level.praxova_level.joints), walls,
+        building_default_corner_style=building_default,
     )
     if not ok:
         raise bridge.RPCError(bridge.INVALID_PARAMS, msg)
@@ -2497,6 +2544,21 @@ def frame_building(params: dict) -> dict:
             1 for child in wall.children
             if child.name.startswith("TBacker_Joint")
         )
+        # Object-name-based count per v0.6.60's CALIFORNIA corner-style
+        # naming (CornerBacker_Joint<NN>, parented to the MAIN wall's
+        # Empty — one per joint end). Same .001-suffix tolerance.
+        n_corner_backers = sum(
+            1 for child in wall.children
+            if child.name.startswith("CornerBacker_Joint")
+        )
+        # Object-name-based count per v0.6.60's LADDER_BLOCKING corner-
+        # style naming (LadderBlock_Joint<NN>_<n>, n=1..3 bottom-up,
+        # parented to the MAIN wall's Empty — three blocks per joint
+        # end). Same .001-suffix tolerance.
+        n_ladder_blocks = sum(
+            1 for child in wall.children
+            if child.name.startswith("LadderBlock_Joint")
+        )
 
         # PointerProperty identity comparison, not name comparison —
         # survives a wall rename that happened between joint creation
@@ -2511,6 +2573,8 @@ def frame_building(params: dict) -> dict:
             "n_studs": n_studs,
             "n_corner_fillers": n_corner_fillers,
             "n_backing_studs": n_backing_studs,
+            "n_corner_backers": n_corner_backers,
+            "n_ladder_blocks": n_ladder_blocks,
             "joint_indices_touching": joint_indices_touching,
             # v0.6.41: per-wall splice details from pre-flight. Same
             # shape as frame_wall's splice_summary field — see that

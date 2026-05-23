@@ -4,7 +4,8 @@ Exposes the in-Blender bridge as a set of MCP tools so an LLM client (Claude
 Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
 on-center, fill edge-to-edge, frame a wall with optional door and window
 openings, organize walls into Buildings and Levels with multi-wall re-framing
-in place, manage L-corner and T joints between walls (v0.6 / v0.6.51), and
+in place, manage L-corner joints in three styles (three-stud, California, or
+ladder-blocking) and T joints between walls (v0.6 / v0.6.51 / v0.6.61), and
 generate cut lists in a live Blender session.
 
 Configuration (env vars, read at startup):
@@ -201,8 +202,11 @@ def list_joints_in_level(level_name: str) -> dict:
                                                            #   for L_CORNER
                                                            #   (ignored), real
                                                            #   position for T_JOINT
-                "corner_style":       "AUTO" | "THREE_STUD"
-                                                | "T_BACKING_STUDS",
+                "corner_style":       "AUTO"
+                                    | "THREE_STUD"
+                                    | "T_BACKING_STUDS"
+                                    | "CALIFORNIA"
+                                    | "LADDER_BLOCKING",
                 "extending_wall":     "AUTO" | "A" | "B",  # ignored for T_JOINT
               }
 
@@ -456,10 +460,14 @@ def add_building(
             inherit this transform.
         default_corner_style: Default corner style used at L joints in
             this Building when the joint's own corner_style is AUTO.
-            Only "THREE_STUD" is valid in v0.6.1 — v0.7 will add
-            CALIFORNIA and LADDER_BLOCKING. The param is exposed now
-            for forward-compat; passing "THREE_STUD" (or omitting it)
-            gets you the v0.6 behavior.
+            One of "THREE_STUD" (the v0.6.0 default — three vertical
+            studs forming a corner-post bundle), "CALIFORNIA" (an end
+            stud plus one drywall backer rotated 90° flat, leaving a
+            partial insulation cavity), or "LADDER_BLOCKING" (an end
+            stud plus three horizontal blocks at staggered heights,
+            maximum insulation cavity). Switching defaults after walls
+            are framed has no geometric effect until frame_building
+            runs again.
 
     Returns:
         building_name: name of the new Building Empty
@@ -573,12 +581,14 @@ def add_joint(level_name: str, joint: dict) -> dict:
                                                               #   wall_b's near edge);
                                                               #   OPTIONAL for L_CORNER
                                                               #   (default 0.0, ignored)
-              "corner_style":       "AUTO" | "THREE_STUD"     # OPTIONAL,
-                                                              #   | "T_BACKING_STUDS",
-                                                              #   default "AUTO"
-                                                              #   (AUTO resolves to
-                                                              #   THREE_STUD for L,
-                                                              #   T_BACKING_STUDS for T)
+              "corner_style":       "AUTO"                    # OPTIONAL, default
+                                  | "THREE_STUD"              #   "AUTO". For L_CORNER,
+                                  | "T_BACKING_STUDS"         #   AUTO resolves to the
+                                  | "CALIFORNIA"              #   parent Building's
+                                  | "LADDER_BLOCKING",        #   default_corner_style;
+                                                              #   for T_JOINT it
+                                                              #   resolves to
+                                                              #   T_BACKING_STUDS.
               "extending_wall":     "AUTO" | "A" | "B",       # OPTIONAL,
                                                               #   default "AUTO"
                                                               #   (LONGER wall is MAIN
@@ -596,17 +606,22 @@ def add_joint(level_name: str, joint: dict) -> dict:
           was checked against so the LLM knows which param to fix.
 
           joint_type / corner_style compatibility is enforced at
-          add_joint time (NOT deferred to frame_building):
-          joint_type='T_JOINT' with corner_style='THREE_STUD'
-          returns INVALID_PARAMS, as does joint_type='L_CORNER'
-          with corner_style='T_BACKING_STUDS'. AUTO is uncondi-
+          add_joint time (NOT deferred to frame_building): the
+          three L-corner styles (THREE_STUD, CALIFORNIA,
+          LADDER_BLOCKING) reject with INVALID_PARAMS if used
+          with joint_type='T_JOINT', and T_BACKING_STUDS rejects
+          if used with joint_type='L_CORNER'. AUTO is uncondi-
           tionally valid for either joint_type (resolves at
-          frame_building time per the bullet above). T-joint
-          position bounds (wall_a_position_in must satisfy
-          st_a <= pos <= length - wt_b - st_a so backing studs
-          fit) are checked at frame_building time via
-          validate_joints, not at add_joint time — the bridge
-          doesn't read wall_a's length at parse time.
+          frame_building time per the bullet above). Error
+          messages mirror templates.validate_joints verbatim
+          (minus the "Joint {i}:" prefix, since the joint has no
+          index at parse time). T-joint position bounds
+          (wall_a_position_in must satisfy st_a <= position <=
+          length - wt_b - st_a so backing studs fit) and the
+          LADDER_BLOCKING wall-height pre-flight (MAIN wall's
+          stud cavity height >= 24 + 2*wt_self) are checked at
+          frame_building time via validate_joints — the bridge
+          doesn't read wall dimensions at parse time.
 
     Returns:
         level_name: echo
@@ -662,6 +677,23 @@ def add_joint(level_name: str, joint: dict) -> dict:
                 "wall_a_end":         "END",            # required, ignored
                 "wall_b_end":         "START",
                 "wall_a_position_in": 96.0,
+            },
+        )
+
+      L corner with explicit corner_style — Wall_01's END meets
+      Wall_02's START, California style overrides the Building's
+      default for this one joint (useful when most corners use
+      three-stud but a south-facing wall needs the larger
+      insulation cavity):
+
+        add_joint(
+            level_name="Level_01",
+            joint={
+                "wall_a_name":  "Wall_01",
+                "wall_b_name":  "Wall_02",
+                "wall_a_end":   "END",
+                "wall_b_end":   "START",
+                "corner_style": "CALIFORNIA",
             },
         )
     """
@@ -1057,6 +1089,31 @@ def frame_building(level_name: str) -> dict:
                                                        #   two backing studs
                                                        #   per T joint per the
                                                        #   T_BACKING_STUDS style)
+                "n_corner_backers":        int,        # v0.6.61 — CALIFORNIA
+                                                       #   corner backers
+                                                       #   (CornerBacker_Joint
+                                                       #   <NN>) placed under
+                                                       #   this wall (non-zero
+                                                       #   only when this wall
+                                                       #   is MAIN in one or
+                                                       #   more L joints whose
+                                                       #   resolved corner_style
+                                                       #   is CALIFORNIA; one
+                                                       #   backer per joint end)
+                "n_ladder_blocks":         int,        # v0.6.61 — LADDER_
+                                                       #   BLOCKING horizontal
+                                                       #   blocks (LadderBlock_
+                                                       #   Joint<NN>_<n>, n=1..3
+                                                       #   bottom-up) placed
+                                                       #   under this wall (non-
+                                                       #   zero only when MAIN
+                                                       #   in one or more
+                                                       #   LADDER_BLOCKING L
+                                                       #   joints; THREE blocks
+                                                       #   per joint end, so
+                                                       #   MAIN at both ends of
+                                                       #   two such joints
+                                                       #   reports 6)
                 "joint_indices_touching":  [int, ...] # 0-based indices
                                                        #   into the Level's
                                                        #   joints collection
