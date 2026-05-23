@@ -8,11 +8,13 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.51 RPC surface end-to-end (18 methods — unchanged
+Covers the full v0.6.60 RPC surface end-to-end (18 methods — unchanged
 from v0.6.2; v0.6.25 through v0.6.50 were bug-fix / UI-only cycles
-with no bridge schema changes, and v0.6.51 added T-joint bridge
-surface inside existing handlers, still 18 methods): ping (with
-addon_version and method_count assertions), scene
+with no bridge schema changes, v0.6.51 added T-joint bridge surface
+inside existing handlers, and v0.6.60 is operator-only (CALIFORNIA +
+LADDER_BLOCKING corner styles) with bridge parity deferred to
+v0.6.61; still 18 methods): ping (with addon_version and method_count
+assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
 duplication, edge-to-edge fill, wall framing with optional door/window
 openings (v0.5.1 — bridge parity for the v0.5 UI), Building + Level
@@ -138,8 +140,20 @@ def run(host: str, port: int) -> int:
         # three negatives (THREE_STUD+T_JOINT,
         # T_BACKING_STUDS+L_CORNER at add_joint time; position-
         # bounds violation at frame_building time).
-        assert r["addon_version"] == "0.6.51", (
-            f"expected addon_version 0.6.51, got {r['addon_version']!r}"
+        # v0.6.60: addon_version 0.6.51 -> 0.6.60 for CALIFORNIA +
+        # LADDER_BLOCKING L-corner styles (operator-only this cycle;
+        # bridge parity is v0.6.61). PraxovaJoint.corner_style and
+        # PraxovaBuildingProps.default_corner_style each gain two
+        # new values; templates.l_corner_geometry becomes a
+        # dispatcher branching on corner_style; new
+        # CornerBacker_Joint<NN> and LadderBlock_Joint<NN>_<n>
+        # placements in frame_wall.execute. validate_joints gains
+        # an AUTO-aware LADDER_BLOCKING wall-height pre-flight via
+        # the new building_default_corner_style kwarg. No new smoke
+        # steps — bridge wire format doesn't accept the new styles
+        # until v0.6.61. method_count stays 18 (no new RPCs).
+        assert r["addon_version"] == "0.6.60", (
+            f"expected addon_version 0.6.60, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"
