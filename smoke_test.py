@@ -8,12 +8,16 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.60 RPC surface end-to-end (18 methods — unchanged
+Covers the full v0.6.61 RPC surface end-to-end (18 methods — unchanged
 from v0.6.2; v0.6.25 through v0.6.50 were bug-fix / UI-only cycles
 with no bridge schema changes, v0.6.51 added T-joint bridge surface
-inside existing handlers, and v0.6.60 is operator-only (CALIFORNIA +
-LADDER_BLOCKING corner styles) with bridge parity deferred to
-v0.6.61; still 18 methods): ping (with addon_version and method_count
+inside existing handlers, v0.6.60 added CALIFORNIA + LADDER_BLOCKING
+L-corner styles operator-side, and v0.6.61 extends the wire format
+to accept them — joint-type / corner-style combo check via set
+membership, AUTO-aware LADDER_BLOCKING wall-height pre-flight via
+Building walk-up, and per-style Object-name counters
+(n_corner_backers, n_ladder_blocks) on walls_framed; still 18
+methods): ping (with addon_version and method_count
 assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
 duplication, edge-to-edge fill, wall framing with optional door/window
@@ -152,8 +156,33 @@ def run(host: str, port: int) -> int:
         # the new building_default_corner_style kwarg. No new smoke
         # steps — bridge wire format doesn't accept the new styles
         # until v0.6.61. method_count stays 18 (no new RPCs).
-        assert r["addon_version"] == "0.6.60", (
-            f"expected addon_version 0.6.60, got {r['addon_version']!r}"
+        # v0.6.61: addon_version 0.6.60 -> 0.6.61 for bridge parity
+        # for v0.6.60's California + ladder-blocking corner styles.
+        # _JOINT_CORNER_STYLE_CHOICES widens to include CALIFORNIA +
+        # LADDER_BLOCKING; add_building's default_corner_style
+        # choices widens the same way; _parse_joint's combo check
+        # refactors from literal pairs to set membership via
+        # templates.L_CORNER_STYLES / T_JOINT_STYLES; frame_building's
+        # validate_joints call threads building_default_corner_style
+        # via Level -> Building walk-up (matching ops_frame.frame_
+        # building's v0.6.60 pattern, fallback to 'THREE_STUD' for
+        # orphan-Level edge case); walls_framed entries gain
+        # n_corner_backers (CornerBacker_Joint<NN>, 1 per joint end
+        # on MAIN of CALIFORNIA) and n_ladder_blocks (LadderBlock_
+        # Joint<NN>_<n>, 3 per joint end on MAIN of LADDER_BLOCKING).
+        # New smoke steps [42]-[49] cover the bridge surface end-to-
+        # end: schema (add_building default + add_joint round-trip
+        # for both new styles + AUTO at L_CORNER), frame_building
+        # Object-count verification across all three L-corner
+        # styles, combo-mismatch negatives (CALIFORNIA+T_JOINT,
+        # LADDER_BLOCKING+T_JOINT at add_joint time), and the
+        # LADDER_BLOCKING wall-height pre-flight via AUTO + Building
+        # default + too-short wall (succeeds at add_joint, fails at
+        # frame_building — mirrors v0.6.51 step [41] structure).
+        # method_count stays 18 — new styles extend existing
+        # handlers, no new RPCs.
+        assert r["addon_version"] == "0.6.61", (
+            f"expected addon_version 0.6.61, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"
@@ -1615,11 +1644,21 @@ def run(host: str, port: int) -> int:
             assert "-32602" in err_text or "INVALID_PARAMS" in err_text, (
                 f"expected INVALID_PARAMS code, got: {err_text!r}"
             )
-            # Error message verbatim per Commit 1's _parse_joint
-            # combo check — mirrors templates.validate_joints.
-            assert "THREE_STUD" in err_text and "L_CORNER" in err_text, (
-                f"expected error mentioning THREE_STUD and L_CORNER, "
-                f"got: {err_text!r}"
+            # Error message format — v0.6.51's literal-pair check
+            # ("only valid with joint_type 'L_CORNER'") was refactored
+            # in v0.6.61 commit 1 to set-membership against
+            # templates.T_JOINT_STYLES / L_CORNER_STYLES, with a
+            # message that mirrors templates.validate_joints
+            # verbatim ("'<STYLE>' is L-corner-only / T-joint-only
+            # and can't be used with <opposite>"), minus the
+            # "Joint {i}:" prefix.
+            assert (
+                "THREE_STUD" in err_text
+                and "L-corner-only" in err_text
+                and "T_JOINT" in err_text
+            ), (
+                f"expected error mentioning THREE_STUD, L-corner-only, "
+                f"T_JOINT, got: {err_text!r}"
             )
         # Joint count must stay at 1 — the rejected add_joint should
         # NOT have mutated scene state.
@@ -1654,9 +1693,14 @@ def run(host: str, port: int) -> int:
             print(f"  -> got expected error: {e}")
             err_text = str(e)
             assert "-32602" in err_text or "INVALID_PARAMS" in err_text
-            assert "T_BACKING_STUDS" in err_text and "T_JOINT" in err_text, (
-                f"expected error mentioning T_BACKING_STUDS and "
-                f"T_JOINT, got: {err_text!r}"
+            # Same v0.6.61 message-format reasoning as step [39].
+            assert (
+                "T_BACKING_STUDS" in err_text
+                and "T-joint-only" in err_text
+                and "L_CORNER" in err_text
+            ), (
+                f"expected error mentioning T_BACKING_STUDS, "
+                f"T-joint-only, L_CORNER, got: {err_text!r}"
             )
         r = cli.call("list_joints_in_level", {"level_name": tjoint_level})
         assert r["n_joints"] == 1, (
@@ -1719,6 +1763,456 @@ def run(host: str, port: int) -> int:
         assert r["n_joints"] == 1, (
             f"after cleanup, only the original T joint should "
             f"remain; expected 1, got {r['n_joints']}"
+        )
+
+        # ==============================================================
+        # v0.6.61 BRIDGE PARITY FOR v0.6.60 — California + ladder-
+        # blocking L-corner styles.
+        #
+        # v0.6.60 introduced two new L-corner corner_style values on the
+        # operator side; the bridge wire format rejected them until
+        # v0.6.61 widened the choice tuples on add_joint
+        # (_JOINT_CORNER_STYLE_CHOICES) and add_building
+        # (default_corner_style choices=), refactored the joint-type/
+        # corner-style combo check to set membership against
+        # templates.L_CORNER_STYLES / T_JOINT_STYLES, and threaded the
+        # parent Building's default_corner_style through to
+        # validate_joints for AUTO-aware LADDER_BLOCKING wall-height
+        # pre-flight. The eight steps below cover:
+        #
+        # [42] add_building with default_corner_style="LADDER_BLOCKING"
+        #      (the main test Building) + CALIFORNIA probe (covers both
+        #      new wire-format values for default_corner_style) +
+        #      six walls under the main Building.
+        # [43] add_joint with corner_style="CALIFORNIA" + list_joints_
+        #      in_level round-trip — wire-format acceptance for
+        #      CALIFORNIA on PraxovaJoint.corner_style + round-trip
+        #      parity.
+        # [44] add_joint with corner_style="LADDER_BLOCKING" + list_
+        #      joints_in_level round-trip — same as [43] for the
+        #      other new style.
+        # [45] add_joint with corner_style="AUTO" (L_CORNER) under
+        #      the LADDER_BLOCKING-defaulted Building + list_joints_
+        #      in_level round-trip — AUTO must survive the round-
+        #      trip as AUTO (resolution at frame_building time, not
+        #      at add_joint time).
+        # [46] frame_building with all three joints — Object-name-
+        #      prefix counters verify per-style placement:
+        #      n_corner_backers=1 on the CALIFORNIA MAIN wall;
+        #      n_ladder_blocks=3 on the LADDER_BLOCKING MAIN wall;
+        #      n_ladder_blocks=3 on the AUTO MAIN wall (AUTO
+        #      resolved to Building default = LADDER_BLOCKING, so
+        #      the Object placement equals the explicit case).
+        #      Abutting walls verify counters are 0 (per-style
+        #      backing pieces sit on MAIN, not ABUTTING).
+        # [47] add_joint with corner_style="CALIFORNIA" +
+        #      joint_type="T_JOINT" — combo mismatch rejected at
+        #      add_joint time. Error mirrors templates.validate_
+        #      joints format ("'CALIFORNIA' is L-corner-only ...").
+        # [48] add_joint with corner_style="LADDER_BLOCKING" +
+        #      joint_type="T_JOINT" — same combo check for the
+        #      other L-only style.
+        # [49] LADDER_BLOCKING wall-height pre-flight via AUTO +
+        #      Building default + too-short wall. add_joint
+        #      succeeds (bridge doesn't read wall dimensions at
+        #      parse time); frame_building fails via validate_
+        #      joints' AUTO-aware kwarg threading. Mirrors v0.6.51
+        #      step [41] in structure (succeeds-then-fails with
+        #      cleanup).
+        #
+        # Setup: dedicated Building + Level + six walls for the
+        # corner-style tests. Isolated from prior state.
+        # ==============================================================
+        print(
+            "\n[42]-[49] California / ladder-blocking bridge path "
+            "coverage — setup: Building + Level + walls"
+        )
+
+        # CALIFORNIA wire-format probe — verify add_building accepts
+        # CALIFORNIA as default_corner_style (not used further; just
+        # closes the wire-format gate coverage gap that the main
+        # test's LADDER_BLOCKING Building wouldn't catch).
+        r = cli.call("add_building", {
+            "name": "CornerStyle_California_Probe",
+            "default_corner_style": "CALIFORNIA",
+        })
+        assert r["default_corner_style"] == "CALIFORNIA", (
+            f"add_building should echo CALIFORNIA default_corner_"
+            f"style, got {r['default_corner_style']!r}"
+        )
+
+        # Main test Building — LADDER_BLOCKING default so AUTO L
+        # joints under it resolve to LADDER_BLOCKING at frame
+        # time. Exercises the AUTO + Building default + wall-
+        # height pre-flight path in [49].
+        r = cli.call("add_building", {
+            "name": "CornerStyle_Test_Building",
+            "default_corner_style": "LADDER_BLOCKING",
+        })
+        cs_level = r["level_name"]
+        assert r["default_corner_style"] == "LADDER_BLOCKING", (
+            f"main Building default should be LADDER_BLOCKING, "
+            f"got {r['default_corner_style']!r}"
+        )
+
+        # Six walls under the main Building, all 108"H 2x4 at 16 OC
+        # (cavity = 108 - 4.5 = 103.5", well above the 31"
+        # LADDER_BLOCKING minimum). Three (192", 192", 192") are
+        # main; three (96", 96", 96") are abutting. Length pattern
+        # mirrors a square-ish floorplan but joints are isolated.
+        wall_specs = [
+            ("CA_main", 192.0),   # CALIFORNIA main
+            ("CA_abut", 96.0),    # CALIFORNIA abutting
+            ("LB_main", 192.0),   # LADDER_BLOCKING main
+            ("LB_abut", 96.0),    # LADDER_BLOCKING abutting
+            ("AUTO_main", 192.0), # AUTO (resolves to LB) main
+            ("AUTO_abut", 96.0),  # AUTO (resolves to LB) abutting
+        ]
+        cs_walls = {}
+        for tag, length in wall_specs:
+            r = cli.call("frame_wall", {
+                "length_in": length,
+                "height_in": 108.0,
+                "nominal": "2x4",
+                "spacing_oc_in": 16.0,
+                "level": cs_level,
+            })
+            cs_walls[tag] = r["wall_name"]
+
+        print(
+            f"  -> setup: level={cs_level!r}, "
+            f"walls={list(cs_walls.values())!r}"
+        )
+
+        # --------------------------------------------------------------
+        print(
+            "\n[42] add_joint CALIFORNIA + list round-trip "
+            "(wire-format acceptance for PraxovaJoint.corner_style)"
+        )
+        r = cli.call("add_joint", {
+            "level_name": cs_level,
+            "joint": {
+                "wall_a_name": cs_walls["CA_main"],
+                "wall_b_name": cs_walls["CA_abut"],
+                "wall_a_end":  "END",
+                "wall_b_end":  "START",
+                "corner_style": "CALIFORNIA",
+            },
+        })
+        ca_joint_index = r["joint_index"]
+        assert ca_joint_index == 0
+        assert r["joint"]["corner_style"] == "CALIFORNIA", (
+            f"CALIFORNIA must round-trip on add_joint response, "
+            f"got {r['joint']['corner_style']!r}"
+        )
+        # List round-trip — wire field survives the
+        # PraxovaJoint.corner_style EnumProperty write.
+        r = cli.call(
+            "list_joints_in_level", {"level_name": cs_level},
+        )
+        assert r["joints"][0]["corner_style"] == "CALIFORNIA", (
+            f"CALIFORNIA must round-trip through list_joints_in_"
+            f"level, got {r['joints'][0]['corner_style']!r}"
+        )
+
+        # --------------------------------------------------------------
+        print("\n[43] add_joint LADDER_BLOCKING + list round-trip")
+        r = cli.call("add_joint", {
+            "level_name": cs_level,
+            "joint": {
+                "wall_a_name": cs_walls["LB_main"],
+                "wall_b_name": cs_walls["LB_abut"],
+                "wall_a_end":  "END",
+                "wall_b_end":  "START",
+                "corner_style": "LADDER_BLOCKING",
+            },
+        })
+        lb_joint_index = r["joint_index"]
+        assert lb_joint_index == 1
+        assert r["joint"]["corner_style"] == "LADDER_BLOCKING"
+        r = cli.call(
+            "list_joints_in_level", {"level_name": cs_level},
+        )
+        assert r["joints"][1]["corner_style"] == "LADDER_BLOCKING"
+
+        # --------------------------------------------------------------
+        print(
+            "\n[44] add_joint AUTO L_CORNER + list round-trip — "
+            "AUTO must NOT resolve at parse time"
+        )
+        # AUTO is unconditionally valid; resolution to LADDER_
+        # BLOCKING happens at frame_building time via templates.
+        # resolve_corner_style. A regression where the bridge
+        # "helpfully" resolved AUTO at parse time would surface
+        # here.
+        r = cli.call("add_joint", {
+            "level_name": cs_level,
+            "joint": {
+                "wall_a_name": cs_walls["AUTO_main"],
+                "wall_b_name": cs_walls["AUTO_abut"],
+                "wall_a_end":  "END",
+                "wall_b_end":  "START",
+                # corner_style omitted -> defaults to AUTO
+            },
+        })
+        auto_joint_index = r["joint_index"]
+        assert auto_joint_index == 2
+        assert r["joint"]["corner_style"] == "AUTO", (
+            f"AUTO must survive add_joint as AUTO (resolution at "
+            f"frame_building time, not parse time), got "
+            f"{r['joint']['corner_style']!r}"
+        )
+        r = cli.call(
+            "list_joints_in_level", {"level_name": cs_level},
+        )
+        assert r["joints"][2]["corner_style"] == "AUTO", (
+            f"AUTO must round-trip through list_joints_in_level as "
+            f"AUTO, got {r['joints'][2]['corner_style']!r}"
+        )
+
+        # --------------------------------------------------------------
+        print(
+            "\n[45] frame_building — per-style Object-count "
+            "verification (n_corner_backers, n_ladder_blocks); "
+            "AUTO + Building default resolves correctly"
+        )
+        r = cli.call("frame_building", {"level_name": cs_level})
+        assert r["n_walls_framed"] == 6
+        assert r["n_joints_resolved"] == 3
+        # Look up each wall's walls_framed entry by name.
+        by_name = {e["wall_name"]: e for e in r["walls_framed"]}
+        # CALIFORNIA MAIN — one CornerBacker_Joint<NN> Object
+        # parented under wall, no fillers, no blocks.
+        ca_main = by_name[cs_walls["CA_main"]]
+        assert ca_main["n_corner_fillers"] == 0
+        assert ca_main["n_corner_backers"] == 1, (
+            f"CA_main should have 1 CornerBacker (one per joint "
+            f"end, MAIN at one CALIFORNIA joint), got "
+            f"{ca_main['n_corner_backers']}"
+        )
+        assert ca_main["n_ladder_blocks"] == 0
+        assert ca_main["n_backing_studs"] == 0
+        # LADDER_BLOCKING MAIN — three LadderBlock_Joint<NN>_<n>
+        # Objects, no other corner pieces.
+        lb_main = by_name[cs_walls["LB_main"]]
+        assert lb_main["n_corner_fillers"] == 0
+        assert lb_main["n_corner_backers"] == 0
+        assert lb_main["n_ladder_blocks"] == 3, (
+            f"LB_main should have 3 LadderBlocks (three per joint "
+            f"end, MAIN at one LADDER_BLOCKING joint), got "
+            f"{lb_main['n_ladder_blocks']}"
+        )
+        assert lb_main["n_backing_studs"] == 0
+        # AUTO MAIN — AUTO resolves to Building default
+        # (LADDER_BLOCKING), so Object placement = explicit
+        # LADDER_BLOCKING case. This is the key bridge/operator
+        # convergence assertion: bridge-driven and UI-driven
+        # frame_building on the same scene produce identical
+        # Object counts.
+        auto_main = by_name[cs_walls["AUTO_main"]]
+        assert auto_main["n_corner_fillers"] == 0
+        assert auto_main["n_corner_backers"] == 0
+        assert auto_main["n_ladder_blocks"] == 3, (
+            f"AUTO_main: AUTO under LADDER_BLOCKING-defaulted "
+            f"Building should resolve to LADDER_BLOCKING and "
+            f"produce 3 LadderBlocks, got "
+            f"{auto_main['n_ladder_blocks']}"
+        )
+        # Abutting walls — corner pieces sit on MAIN, not
+        # ABUTTING. All counters should be 0.
+        for tag in ("CA_abut", "LB_abut", "AUTO_abut"):
+            abut = by_name[cs_walls[tag]]
+            assert abut["n_corner_fillers"] == 0
+            assert abut["n_corner_backers"] == 0, (
+                f"{tag} should have 0 CornerBackers (backers sit "
+                f"on MAIN), got {abut['n_corner_backers']}"
+            )
+            assert abut["n_ladder_blocks"] == 0, (
+                f"{tag} should have 0 LadderBlocks (blocks sit on "
+                f"MAIN), got {abut['n_ladder_blocks']}"
+            )
+
+        # --------------------------------------------------------------
+        print(
+            "\n[46] negative: add_joint CALIFORNIA + T_JOINT "
+            "(combo mismatch — CALIFORNIA is L-corner-only)"
+        )
+        try:
+            cli.call("add_joint", {
+                "level_name": cs_level,
+                "joint": {
+                    "joint_type":         "T_JOINT",
+                    "wall_a_name":        cs_walls["CA_main"],
+                    "wall_b_name":        cs_walls["AUTO_abut"],
+                    "wall_a_end":         "START",
+                    "wall_b_end":         "END",
+                    "wall_a_position_in": 96.0,
+                    "corner_style":       "CALIFORNIA",
+                },
+            })
+            raise AssertionError(
+                "expected INVALID_PARAMS for CALIFORNIA + T_JOINT, "
+                "but add_joint succeeded"
+            )
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert (
+                "-32602" in err_text or "INVALID_PARAMS" in err_text
+            )
+            # Mirrors templates.validate_joints v0.6.60 format
+            # (minus the "Joint {i}:" prefix per Commit 1).
+            assert (
+                "CALIFORNIA" in err_text
+                and "L-corner-only" in err_text
+                and "T_JOINT" in err_text
+            ), (
+                f"expected error mentioning CALIFORNIA, L-corner-"
+                f"only, T_JOINT — got: {err_text!r}"
+            )
+        # Joint count unchanged — failed add_joint must not mutate
+        # scene state.
+        r = cli.call(
+            "list_joints_in_level", {"level_name": cs_level},
+        )
+        assert r["n_joints"] == 3
+
+        # --------------------------------------------------------------
+        print(
+            "\n[47] negative: add_joint LADDER_BLOCKING + T_JOINT "
+            "(combo mismatch — LADDER_BLOCKING is L-corner-only)"
+        )
+        try:
+            cli.call("add_joint", {
+                "level_name": cs_level,
+                "joint": {
+                    "joint_type":         "T_JOINT",
+                    "wall_a_name":        cs_walls["LB_main"],
+                    "wall_b_name":        cs_walls["AUTO_abut"],
+                    "wall_a_end":         "START",
+                    "wall_b_end":         "END",
+                    "wall_a_position_in": 96.0,
+                    "corner_style":       "LADDER_BLOCKING",
+                },
+            })
+            raise AssertionError(
+                "expected INVALID_PARAMS for LADDER_BLOCKING + "
+                "T_JOINT, but add_joint succeeded"
+            )
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert (
+                "-32602" in err_text or "INVALID_PARAMS" in err_text
+            )
+            assert (
+                "LADDER_BLOCKING" in err_text
+                and "L-corner-only" in err_text
+                and "T_JOINT" in err_text
+            ), (
+                f"expected error mentioning LADDER_BLOCKING, "
+                f"L-corner-only, T_JOINT — got: {err_text!r}"
+            )
+        r = cli.call(
+            "list_joints_in_level", {"level_name": cs_level},
+        )
+        assert r["n_joints"] == 3
+
+        # --------------------------------------------------------------
+        print(
+            "\n[48] AUTO + LADDER_BLOCKING Building default + "
+            "too-short wall — succeeds at add_joint, fails at "
+            "frame_building via AUTO-aware wall-height pre-flight"
+        )
+        # 30" wall: cavity = 30 - 4.5 = 25.5", below the 31"
+        # minimum (24 + 2 * 3.5 for 2x4). add_joint SHOULD succeed
+        # — the bridge doesn't read wall dimensions at parse time
+        # (same architecture as v0.6.51 step [41]). frame_building
+        # SHOULD reject via validate_joints, exercising the AUTO-
+        # aware kwarg threading from Commit 1: AUTO under a
+        # LADDER_BLOCKING-defaulted Building resolves to LADDER_
+        # BLOCKING, which triggers the wall-height pre-flight.
+        # Without the kwarg threading, this would slip through on
+        # the bridge side while the operator caught it — exactly
+        # the gap v0.6.61 closes.
+        r = cli.call("frame_wall", {
+            "length_in": 192.0,
+            "height_in": 30.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 16.0,
+            "level": cs_level,
+        })
+        short_main = r["wall_name"]
+        r = cli.call("frame_wall", {
+            "length_in": 96.0,
+            "height_in": 30.0,
+            "nominal": "2x4",
+            "spacing_oc_in": 16.0,
+            "level": cs_level,
+        })
+        short_abut = r["wall_name"]
+        r = cli.call("add_joint", {
+            "level_name": cs_level,
+            "joint": {
+                "wall_a_name": short_main,
+                "wall_b_name": short_abut,
+                "wall_a_end":  "END",
+                "wall_b_end":  "START",
+                # corner_style omitted -> AUTO, will resolve to
+                # LADDER_BLOCKING via Building default at frame_
+                # building time.
+            },
+        })
+        bad_joint_index = r["joint_index"]
+        assert bad_joint_index == 3, (
+            f"fourth joint should be index 3, got {bad_joint_index}"
+        )
+        print(
+            f"  -> add_joint succeeded (joint_index="
+            f"{bad_joint_index}, AUTO under LADDER_BLOCKING "
+            f"Building default; cavity 25.5\" < 31\" required)"
+        )
+        try:
+            cli.call("frame_building", {"level_name": cs_level})
+            raise AssertionError(
+                "expected INVALID_PARAMS for LADDER_BLOCKING "
+                "wall-height pre-flight (cavity 25.5\" < 31\"), "
+                "but frame_building succeeded"
+            )
+        except RuntimeError as e:
+            print(f"  -> got expected error: {e}")
+            err_text = str(e)
+            assert (
+                "-32602" in err_text or "INVALID_PARAMS" in err_text
+            )
+            # Error from templates.validate_joints' LADDER_
+            # BLOCKING wall-height pre-flight. Should name the
+            # MAIN wall and ideally include cavity / required
+            # numbers — assertion is permissive on exact wording
+            # but pins LADDER_BLOCKING + wall name.
+            assert (
+                "LADDER_BLOCKING" in err_text
+                and short_main in err_text
+            ), (
+                f"expected error mentioning LADDER_BLOCKING and "
+                f"the offending MAIN wall name {short_main!r}, "
+                f"got: {err_text!r}"
+            )
+        # Cleanup — remove the bad joint so the Level is left
+        # frameable. (The two short walls stay in the scene but
+        # aren't referenced by any joint, same disposition as
+        # v0.6.51's unused t_wall_c.)
+        r = cli.call("remove_joint", {
+            "level_name":  cs_level,
+            "joint_index": bad_joint_index,
+        })
+        print(f"  -> removed bad joint at index {bad_joint_index}")
+        r = cli.call(
+            "list_joints_in_level", {"level_name": cs_level},
+        )
+        assert r["n_joints"] == 3, (
+            f"after cleanup, three valid joints should remain; "
+            f"expected 3, got {r['n_joints']}"
         )
 
         print("\nAll checks passed.")
