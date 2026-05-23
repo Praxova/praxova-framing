@@ -2399,6 +2399,24 @@ def frame_building(params: dict) -> dict:
                 (wall_b) in a T joint contribute 0 here — backing
                 studs sit on the through wall's Empty, not the
                 abutting wall's.
+              n_corner_backers (v0.6.61): count of CALIFORNIA-style
+                L-corner backers (CornerBacker_Joint<NN>) placed
+                under THIS wall — non-zero only when this wall is
+                MAIN in one or more L joints whose resolved
+                corner_style is CALIFORNIA (the joint's own style,
+                or the parent Building's default_corner_style when
+                the joint is AUTO). One backer per joint end on the
+                MAIN wall. ABUTTING walls contribute 0 here —
+                CornerBacker Objects sit on the MAIN wall's Empty.
+              n_ladder_blocks (v0.6.61): count of LADDER_BLOCKING-
+                style L-corner blocks (LadderBlock_Joint<NN>_<n>,
+                n=1..3 bottom-up) placed under THIS wall — non-zero
+                only when this wall is MAIN in one or more L joints
+                whose resolved corner_style is LADDER_BLOCKING.
+                THREE blocks per joint end on the MAIN wall, so a
+                wall that is MAIN at both ends of two LADDER_BLOCKING
+                joints reports n_ladder_blocks=6. ABUTTING walls
+                contribute 0.
               joint_indices_touching: 0-based indices into the
                 Level's joints collection for every joint
                 referencing this wall (in either wall_a or wall_b
@@ -2526,6 +2544,21 @@ def frame_building(params: dict) -> dict:
             1 for child in wall.children
             if child.name.startswith("TBacker_Joint")
         )
+        # Object-name-based count per v0.6.60's CALIFORNIA corner-style
+        # naming (CornerBacker_Joint<NN>, parented to the MAIN wall's
+        # Empty — one per joint end). Same .001-suffix tolerance.
+        n_corner_backers = sum(
+            1 for child in wall.children
+            if child.name.startswith("CornerBacker_Joint")
+        )
+        # Object-name-based count per v0.6.60's LADDER_BLOCKING corner-
+        # style naming (LadderBlock_Joint<NN>_<n>, n=1..3 bottom-up,
+        # parented to the MAIN wall's Empty — three blocks per joint
+        # end). Same .001-suffix tolerance.
+        n_ladder_blocks = sum(
+            1 for child in wall.children
+            if child.name.startswith("LadderBlock_Joint")
+        )
 
         # PointerProperty identity comparison, not name comparison —
         # survives a wall rename that happened between joint creation
@@ -2540,6 +2573,8 @@ def frame_building(params: dict) -> dict:
             "n_studs": n_studs,
             "n_corner_fillers": n_corner_fillers,
             "n_backing_studs": n_backing_studs,
+            "n_corner_backers": n_corner_backers,
+            "n_ladder_blocks": n_ladder_blocks,
             "joint_indices_touching": joint_indices_touching,
             # v0.6.41: per-wall splice details from pre-flight. Same
             # shape as frame_wall's splice_summary field — see that
