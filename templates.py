@@ -1,8 +1,10 @@
 """Lumber, sheet-good, and panel dimension data and mesh construction."""
 
+import math
 import re
 
 import bpy
+from mathutils import Vector
 
 
 # Conversion factor: meters per inch. Blender stores all lengths in meters
@@ -1967,3 +1969,834 @@ def collect_full_height_stud_centers(
 # Backward-compatibility aliases for v0.1 callers.
 make_lumber_mesh = make_box_mesh
 cutlist_label = lumber_cutlist_label
+
+
+# ===========================================================================
+# Truss helpers (v0.7)
+# ===========================================================================
+#
+# Pure geometry for site-built Fink trusses (v0.7.0) — the only truss type
+# in v0.7.0; v0.7.50 adds KING_POST / QUEEN_POST / SCISSOR / ATTIC /
+# MONO_PITCH.
+#
+# Six helpers, all consumed by the v0.7 frame_roof operator (Commit 3) and
+# its UI live preview / validation indicator (Commit 4):
+#
+#   resolve_pitch_ratio              — pitch enum → rise/run float.
+#   compute_bearing_wall_geometry    — read-only world-space geometry for
+#                                      one bearing wall (the only helper
+#                                      here that touches bpy data).
+#   compute_truss_layout             — span / pitch / peak / truss
+#                                      positions + world-space frame.
+#   truss_member_lengths_and_angles  — per-member cut length + cut angles
+#                                      in the truss-local frame. The math
+#                                      is canonical from
+#                                      docs/v0.7_design.md § "Truss
+#                                      Geometry — Detail" and § "Cut
+#                                      angle convention".
+#   compute_truss_placements         — per-truss world location + Z
+#                                      rotation, ready for Empty creation.
+#   validate_roof                    — 12-check pre-flight mirroring
+#                                      validate_joints's "Roof: ..."
+#                                      first-failure pattern.
+#
+# All centerline math runs in inches. Cut angles are non-negative
+# magnitudes from a square (perpendicular) cut, matching how a carpenter
+# would dial in a miter saw. Member geometry is computed centerline-to-
+# centerline; the small physical interference at joints (e.g. between a
+# heel block's top corners and a sloped top chord's bottom face) is
+# below cut-list resolution and handled visually by the mesh build.
+
+# Tolerance constants for validate_roof. Parallel within 0.5° matches
+# the practical limit of viewport-rotated walls; length/height/alignment
+# within 0.125" matches v0.6's wall-pairing tolerance convention.
+_PARALLEL_TOLERANCE_DEG: float = 0.5
+_LENGTH_TOLERANCE_IN: float = 0.125
+
+
+def resolve_pitch_ratio(roof_props) -> float:
+    """Resolve PraxovaRoofProps.pitch (+ pitch_rise_in for CUSTOM) to rise/run.
+
+    The pitch EnumProperty stores keys like 'P_6_12' (= 6/12 pitch).
+    'CUSTOM' falls through to the pitch_rise_in float field (run is
+    fixed at 12.0). Mirrors resolve_corner_style's pattern of single-
+    source-of-truth resolution at frame time.
+
+    Args:
+        roof_props: a PraxovaRoofProps PropertyGroup instance.
+
+    Returns:
+        Rise/run as a float (e.g., 0.5 for 6/12, 0.75 for 9/12).
+
+    Raises:
+        ValueError: unrecognized pitch enum key. v0.7.0 ships 9 fixed
+            pitches (3/12 through 12/12, missing 11/12 by design —
+            never built in practice) plus CUSTOM; v0.7+ additions are
+            additive on the enum and would fall through here cleanly.
+    """
+    pitch = roof_props.pitch
+    if pitch == 'CUSTOM':
+        return float(roof_props.pitch_rise_in) / 12.0
+    if pitch.startswith('P_') and pitch.endswith('_12'):
+        try:
+            rise = int(pitch[2:-3])
+            return rise / 12.0
+        except ValueError:
+            pass
+    raise ValueError(
+        f"resolve_pitch_ratio: unrecognized pitch enum value {pitch!r}"
+    )
+
+
+def compute_bearing_wall_geometry(wall_obj) -> dict:
+    """Read-only world-space geometry for ONE bearing wall.
+
+    The single v0.7.0 helper in templates.py that touches bpy data —
+    specifically wall_obj.matrix_world and wall_obj.praxova_wall fields
+    (length, height, nominal). Reads only; returns plain dict +
+    3-tuples for downstream pure consumers.
+
+    Args:
+        wall_obj: a Praxova-managed wall Empty (with
+            wall_obj.praxova_wall.is_wall == True).
+
+    Returns:
+        Dict with:
+            length_in, height_in, thickness_in, nominal — scalar
+                inputs from the wall's PraxovaWallProps + the
+                LUMBER_TYPES[nominal][1] wall-thickness lookup.
+            world_centerline_start, world_centerline_end — 3-tuples
+                of floats in world coords. The wall's local-frame
+                centerline runs from (0, thickness/2, height/2) to
+                (length, thickness/2, height/2); each endpoint is
+                transformed by matrix_world.
+            world_x_axis, world_y_axis, world_z_axis — 3-tuples of
+                floats, the wall's local axes as world-space unit
+                vectors (derived from the upper-left 3x3 of
+                matrix_world).
+    """
+    wp = wall_obj.praxova_wall
+    length_in = float(wp.wall_length_in)
+    height_in = float(wp.wall_height_in)
+    nominal = wp.wall_nominal
+    thickness_in = LUMBER_TYPES[nominal][1]
+
+    mw = wall_obj.matrix_world
+    mw_3x3 = mw.to_3x3()
+
+    # Centerline endpoints — local (0, t/2, h/2) and (L, t/2, h/2)
+    # transformed to world.
+    cl_start = mw @ Vector((0.0, thickness_in / 2.0, height_in / 2.0))
+    cl_end = mw @ Vector((length_in, thickness_in / 2.0, height_in / 2.0))
+
+    # World-space basis vectors. The 3x3 rotation part maps the local
+    # unit axes to world coords; mw_3x3 @ Vector((1, 0, 0)) is the
+    # local X axis expressed in world coords.
+    wx = mw_3x3 @ Vector((1.0, 0.0, 0.0))
+    wy = mw_3x3 @ Vector((0.0, 1.0, 0.0))
+    wz = mw_3x3 @ Vector((0.0, 0.0, 1.0))
+
+    return {
+        'length_in': length_in,
+        'height_in': height_in,
+        'thickness_in': thickness_in,
+        'nominal': nominal,
+        'world_centerline_start': (cl_start.x, cl_start.y, cl_start.z),
+        'world_centerline_end': (cl_end.x, cl_end.y, cl_end.z),
+        'world_x_axis': (wx.x, wx.y, wx.z),
+        'world_y_axis': (wy.x, wy.y, wy.z),
+        'world_z_axis': (wz.x, wz.y, wz.z),
+    }
+
+
+def _bearing_wall_exterior_face_center(
+    wall_obj,
+    geom_self: dict,
+    paired_centerline_midpoint: Vector,
+) -> tuple[float, Vector]:
+    """Pick the exterior face of a bearing wall + return its center.
+
+    "Exterior" = the face whose center is FARTHER from the paired
+    wall's centerline midpoint. Pure geometry — no user input.
+
+    Returns (exterior_y_local, exterior_face_center_world). The y_local
+    value is 0.0 for the front face or thickness_in for the back face;
+    the caller may use it to derive the truss world_origin without
+    re-running the distance test.
+    """
+    mw = wall_obj.matrix_world
+    length_in = geom_self['length_in']
+    height_in = geom_self['height_in']
+    thickness_in = geom_self['thickness_in']
+    front_center = mw @ Vector((length_in / 2.0, 0.0, height_in / 2.0))
+    back_center = mw @ Vector(
+        (length_in / 2.0, thickness_in, height_in / 2.0),
+    )
+    d_front = (front_center - paired_centerline_midpoint).length
+    d_back = (back_center - paired_centerline_midpoint).length
+    if d_front > d_back:
+        return (0.0, front_center)
+    return (thickness_in, back_center)
+
+
+def compute_truss_layout(roof_props) -> dict:
+    """Roof-level truss layout — span, pitch, peak, count, positions, frame.
+
+    Pure (calls compute_bearing_wall_geometry which is read-only).
+    Derives all truss-placement values from the bearing walls'
+    geometry + the roof_props design parameters. Single source of
+    truth for downstream operators; truss positioning, member math,
+    and validation all consume this dict.
+
+    Span derivation: each bearing wall's exterior face is the face
+    whose center is farther from the paired wall's centerline; the
+    span is the distance between the two exterior face centers. v0.7.0
+    validates that the walls are parallel translates so this distance
+    equals the perpendicular distance.
+
+    Truss positioning along the bearing wall length axis mirrors
+    templates.stud_positions: end trusses flush with the bearing wall
+    ends, intermediate trusses at OC spacing measured from x=0, final
+    bay tight when bearing_wall_length isn't a multiple of OC. Truss
+    "thickness" along the ridge axis = top_chord_nominal's
+    stud-thickness dimension (1.5" for 2x stock), since the truss is
+    a planar one-stud-wide assembly.
+
+    Args:
+        roof_props: a PraxovaRoofProps PropertyGroup instance with
+            bearing_wall_a / bearing_wall_b set.
+
+    Returns:
+        Dict with:
+            span_in:                float, exterior-face-to-exterior-
+                                    face perpendicular distance.
+            pitch_ratio:            float, from resolve_pitch_ratio.
+            pitch_angle_deg:        float, degrees(atan(pitch_ratio)).
+            peak_height_in:         float, (span/2) * pitch_ratio +
+                                    heel_height_in.
+            truss_count:            int, number of trusses placed.
+            truss_positions_in:     list[float], left-edge x positions
+                                    along bearing_wall_a's length axis
+                                    (mirrors stud_positions semantics).
+            ridge_axis_direction:   3-tuple unit vector, bearing wall
+                                    A's world +X axis (truss-Y in the
+                                    world frame).
+            span_axis_direction:    3-tuple unit vector from wall_a
+                                    exterior face toward wall_b
+                                    exterior face (truss-X in world).
+            world_origin:           3-tuple, world-space point that
+                                    becomes truss-local (0, 0, 0) for
+                                    the first truss — at wall_a's
+                                    exterior face, length x=0, cap
+                                    plate top z = wall_height_in.
+    """
+    pitch_ratio = resolve_pitch_ratio(roof_props)
+    pitch_angle_deg = math.degrees(math.atan(pitch_ratio))
+
+    geom_a = compute_bearing_wall_geometry(roof_props.bearing_wall_a)
+    geom_b = compute_bearing_wall_geometry(roof_props.bearing_wall_b)
+
+    # Centerline midpoints — used for exterior-face determination on
+    # the OTHER wall.
+    a_cl_mid = (
+        Vector(geom_a['world_centerline_start'])
+        + Vector(geom_a['world_centerline_end'])
+    ) / 2.0
+    b_cl_mid = (
+        Vector(geom_b['world_centerline_start'])
+        + Vector(geom_b['world_centerline_end'])
+    ) / 2.0
+
+    a_ext_y_local, a_exterior_face_center = (
+        _bearing_wall_exterior_face_center(
+            roof_props.bearing_wall_a, geom_a, b_cl_mid,
+        )
+    )
+    _, b_exterior_face_center = _bearing_wall_exterior_face_center(
+        roof_props.bearing_wall_b, geom_b, a_cl_mid,
+    )
+
+    # Span: distance between exterior face centers. For parallel
+    # translates (enforced by validate_roof), this equals the
+    # perpendicular distance between the two exterior face planes.
+    span_vec = b_exterior_face_center - a_exterior_face_center
+    span_in = span_vec.length
+
+    # Span axis: unit vector from A exterior toward B exterior. Defensive
+    # fallback to world +Y if span is degenerate (validate_roof catches
+    # this case before compute_truss_layout runs).
+    if span_in > 1e-9:
+        span_axis_direction = span_vec.normalized()
+    else:
+        span_axis_direction = Vector((0.0, 1.0, 0.0))
+
+    # Ridge axis: wall A's world +X axis (re-normalized for safety —
+    # the matrix_world rotation should already preserve unit length
+    # but cheap defense against scaled wall Empties).
+    ridge_axis_direction = Vector(geom_a['world_x_axis']).normalized()
+
+    # Peak height above cap plate, including heel.
+    peak_height_in = (
+        (span_in / 2.0) * pitch_ratio
+        + float(roof_props.heel_height_in)
+    )
+
+    # Truss positions along bearing wall length axis. Truss thickness
+    # = top_chord_nominal's stud-thickness dimension (LUMBER_TYPES[0]),
+    # 1.5" for 2x stock. Mirrors stud_positions exactly.
+    truss_thickness_in = LUMBER_TYPES[roof_props.top_chord_nominal][0]
+    truss_positions_in = stud_positions(
+        geom_a['length_in'],
+        float(roof_props.oc_spacing_in),
+        truss_thickness_in,
+    )
+    truss_count = len(truss_positions_in)
+
+    # World origin: wall A's exterior face, length x=0, cap plate top
+    # elevation (= wall_height_in in wall-local Z, since the v0.6 wall
+    # convention puts the wall base at z=0 and the cap plate top at
+    # z=wall_height_in).
+    mw_a = roof_props.bearing_wall_a.matrix_world
+    world_origin = mw_a @ Vector(
+        (0.0, a_ext_y_local, geom_a['height_in']),
+    )
+
+    return {
+        'span_in': span_in,
+        'pitch_ratio': pitch_ratio,
+        'pitch_angle_deg': pitch_angle_deg,
+        'peak_height_in': peak_height_in,
+        'truss_count': truss_count,
+        'truss_positions_in': truss_positions_in,
+        'ridge_axis_direction': (
+            ridge_axis_direction.x,
+            ridge_axis_direction.y,
+            ridge_axis_direction.z,
+        ),
+        'span_axis_direction': (
+            span_axis_direction.x,
+            span_axis_direction.y,
+            span_axis_direction.z,
+        ),
+        'world_origin': (world_origin.x, world_origin.y, world_origin.z),
+    }
+
+
+def _normalize_tuple(vec: tuple) -> tuple:
+    """Pure-tuple 3-vector normalization. Returns (0, 0, 0) for near-zero."""
+    mag = math.sqrt(vec[0] ** 2 + vec[1] ** 2 + vec[2] ** 2)
+    if mag < 1e-9:
+        return (0.0, 0.0, 0.0)
+    return (vec[0] / mag, vec[1] / mag, vec[2] / mag)
+
+
+def truss_member_lengths_and_angles(roof_props, truss_layout) -> dict:
+    """Per-member geometry for ONE truss design — Fink-only in v0.7.0.
+
+    Math per docs/v0.7_design.md § "Truss Geometry — Detail" and
+    § "Cut angle convention". All centerline math in inches in the
+    truss-local frame (X = span, 0..S; Y = ridge axis / member
+    thickness; Z = up, 0 at cap plate top). Cut angles are non-
+    negative magnitudes from a square cut (a carpenter dials this in
+    on the miter saw).
+
+    Unified cut-angle formula:
+
+        cut_angle = 90° - angle_between(member_axis, joining_chord_axis)
+
+    Reproduces every Fink special case:
+      - vertical web at horizontal chord → 90° - 90° = 0° (square)
+      - vertical web at chord pitched θ → 90° - (90° - θ) = θ
+      - diagonal web (φ_diag from horizontal) at horizontal chord
+        → 90° - φ_diag
+      - diagonal web at top chord (both up-right) → 90° - (φ_diag - θ)
+      - plumb cut on a chord pitched θ → θ
+
+    Geometry (with S = span_in, p = pitch_ratio, θ = pitch_angle_deg,
+    h = heel_height_in, e = eave_overhang_in,
+    peak_height = (S/2) * p + h, φ_diag = atan(peak_height / (S/6))):
+
+        bottom_chord:  length S, square cuts both ends.
+        top_chord_l:   length (S/2 + e) / cos(θ), plumb cuts both ends
+                       (cut_angle = θ at each end).
+        top_chord_r:   mirror of top_chord_l about x = S/2.
+        web_1 (L vert):  from (S/3, 0, 0) to (S/3, 0, h + (S/3)*p);
+                         square at bottom, θ at top.
+        web_2 (L diag):  from (S/3, 0, 0) to (S/2, 0, peak_height);
+                         length sqrt((S/6)² + peak_height²); cuts
+                         90 - φ_diag at bottom, 90 - (φ_diag - θ) at
+                         top.
+        web_3 (R diag):  mirror of web_2.
+        web_4 (R vert):  mirror of web_1.
+        heel_block_l:    only when h > 0; (0, 0, 0) to (0, 0, h); both
+                         cuts square; nominal = top_chord_nominal.
+        heel_block_r:    same at x = S.
+
+    Heel block keys are present in the return dict regardless; their
+    value is None when h == 0 so the operator can iterate uniformly.
+
+    Args:
+        roof_props: PraxovaRoofProps with truss_type / heel_height_in
+            / eave_overhang_in / *_nominal / etc.
+        truss_layout: dict from compute_truss_layout.
+
+    Returns:
+        Dict with nine keys (bottom_chord, top_chord_l, top_chord_r,
+        web_1, web_2, web_3, web_4, heel_block_l, heel_block_r), each
+        a sub-dict with: length_in, cut_angle_start_deg,
+        cut_angle_end_deg, orientation, nominal, object_name_suffix,
+        truss_local_origin (3-tuple), truss_local_axis_direction
+        (3-tuple unit vector). heel_block_* values are None when
+        heel_height_in == 0.
+
+    Raises:
+        ValueError: roof_props.truss_type isn't 'FINK' (v0.7.50 will
+            add KING_POST / QUEEN_POST / SCISSOR / ATTIC / MONO_PITCH).
+        ValueError: any computed cut angle exceeds 89.9° (degenerate
+            geometry — validate_roof should have caught this case
+            before this helper runs).
+    """
+    if roof_props.truss_type != 'FINK':
+        raise ValueError(
+            f"truss_member_lengths_and_angles: unsupported truss_type "
+            f"{roof_props.truss_type!r} (v0.7.0 ships FINK only; "
+            f"v0.7.50 adds KING_POST / QUEEN_POST / SCISSOR / ATTIC "
+            f"/ MONO_PITCH)"
+        )
+
+    S = float(truss_layout['span_in'])
+    pitch_ratio = float(truss_layout['pitch_ratio'])
+    theta = float(truss_layout['pitch_angle_deg'])
+    h = float(roof_props.heel_height_in)
+    e = float(roof_props.eave_overhang_in)
+    peak_height = float(truss_layout['peak_height_in'])
+    phi_diag = math.degrees(math.atan(peak_height / (S / 6.0)))
+
+    top_nom = roof_props.top_chord_nominal
+    bot_nom = roof_props.bottom_chord_nominal
+    web_nom = roof_props.web_nominal
+
+    def _check_cut_angle(angle_deg: float, label: str) -> float:
+        # Defense-in-depth — validate_roof's geometry checks should
+        # catch the cases that would surface here.
+        if angle_deg < 0.0 or angle_deg > 89.9:
+            raise ValueError(
+                f"truss_member_lengths_and_angles: degenerate cut "
+                f"angle {angle_deg:g}° for {label} (must be in "
+                f"[0, 89.9]; validate_roof should have caught this)"
+            )
+        return angle_deg
+
+    # Bottom chord: (0, 0, 0) → (S, 0, 0).
+    bottom_chord = {
+        'length_in': S,
+        'cut_angle_start_deg': 0.0,
+        'cut_angle_end_deg': 0.0,
+        'orientation': 'HORIZONTAL',
+        'nominal': bot_nom,
+        'object_name_suffix': 'BottomChord',
+        'truss_local_origin': (0.0, 0.0, 0.0),
+        'truss_local_axis_direction': (1.0, 0.0, 0.0),
+    }
+
+    # Top chord left: eave (-e, 0, h - e*p) → peak (S/2, 0, peak_height).
+    top_chord_len = (S / 2.0 + e) / math.cos(math.radians(theta))
+    tc_l_origin = (-e, 0.0, h - e * pitch_ratio)
+    tc_l_axis = _normalize_tuple((
+        S / 2.0 - tc_l_origin[0],
+        0.0,
+        peak_height - tc_l_origin[2],
+    ))
+    top_chord_l = {
+        'length_in': top_chord_len,
+        'cut_angle_start_deg': _check_cut_angle(theta, 'top_chord_l start'),
+        'cut_angle_end_deg': _check_cut_angle(theta, 'top_chord_l end'),
+        'orientation': 'ANGLED',
+        'nominal': top_nom,
+        'object_name_suffix': 'TopChord_L',
+        'truss_local_origin': tc_l_origin,
+        'truss_local_axis_direction': tc_l_axis,
+    }
+
+    # Top chord right: mirror about x = S/2. Origin at right eave
+    # (S + e, 0, h - e*p); end at peak (S/2, 0, peak_height).
+    tc_r_origin = (S + e, 0.0, h - e * pitch_ratio)
+    tc_r_axis = _normalize_tuple((
+        S / 2.0 - tc_r_origin[0],
+        0.0,
+        peak_height - tc_r_origin[2],
+    ))
+    top_chord_r = {
+        'length_in': top_chord_len,
+        'cut_angle_start_deg': _check_cut_angle(theta, 'top_chord_r start'),
+        'cut_angle_end_deg': _check_cut_angle(theta, 'top_chord_r end'),
+        'orientation': 'ANGLED',
+        'nominal': top_nom,
+        'object_name_suffix': 'TopChord_R',
+        'truss_local_origin': tc_r_origin,
+        'truss_local_axis_direction': tc_r_axis,
+    }
+
+    # Web 1 — left vertical: (S/3, 0, 0) → (S/3, 0, h + (S/3)*p).
+    web1_len = h + (S / 3.0) * pitch_ratio
+    web_1 = {
+        'length_in': web1_len,
+        'cut_angle_start_deg': 0.0,
+        'cut_angle_end_deg': _check_cut_angle(theta, 'web_1 end'),
+        'orientation': 'VERTICAL',
+        'nominal': web_nom,
+        'object_name_suffix': 'Web_1',
+        'truss_local_origin': (S / 3.0, 0.0, 0.0),
+        'truss_local_axis_direction': (0.0, 0.0, 1.0),
+    }
+
+    # Web 2 — left diagonal: (S/3, 0, 0) → (S/2, 0, peak_height).
+    web2_len = math.sqrt((S / 6.0) ** 2 + peak_height ** 2)
+    web2_start_angle = _check_cut_angle(90.0 - phi_diag, 'web_2 start')
+    web2_end_angle = _check_cut_angle(
+        90.0 - (phi_diag - theta), 'web_2 end',
+    )
+    web2_axis = _normalize_tuple((S / 6.0, 0.0, peak_height))
+    web_2 = {
+        'length_in': web2_len,
+        'cut_angle_start_deg': web2_start_angle,
+        'cut_angle_end_deg': web2_end_angle,
+        'orientation': 'ANGLED',
+        'nominal': web_nom,
+        'object_name_suffix': 'Web_2',
+        'truss_local_origin': (S / 3.0, 0.0, 0.0),
+        'truss_local_axis_direction': web2_axis,
+    }
+
+    # Web 3 — right diagonal: mirror of web_2.
+    # (2S/3, 0, 0) → (S/2, 0, peak_height). Same cut length, same
+    # cut-angle magnitudes; axis goes up-left.
+    web3_axis = _normalize_tuple((-S / 6.0, 0.0, peak_height))
+    web_3 = {
+        'length_in': web2_len,
+        'cut_angle_start_deg': web2_start_angle,
+        'cut_angle_end_deg': web2_end_angle,
+        'orientation': 'ANGLED',
+        'nominal': web_nom,
+        'object_name_suffix': 'Web_3',
+        'truss_local_origin': (2.0 * S / 3.0, 0.0, 0.0),
+        'truss_local_axis_direction': web3_axis,
+    }
+
+    # Web 4 — right vertical: mirror of web_1.
+    web_4 = {
+        'length_in': web1_len,
+        'cut_angle_start_deg': 0.0,
+        'cut_angle_end_deg': _check_cut_angle(theta, 'web_4 end'),
+        'orientation': 'VERTICAL',
+        'nominal': web_nom,
+        'object_name_suffix': 'Web_4',
+        'truss_local_origin': (2.0 * S / 3.0, 0.0, 0.0),
+        'truss_local_axis_direction': (0.0, 0.0, 1.0),
+    }
+
+    # Heel blocks (only when h > 0). Same nominal as the top chord.
+    if h > 0.0:
+        heel_block_l = {
+            'length_in': h,
+            'cut_angle_start_deg': 0.0,
+            'cut_angle_end_deg': 0.0,
+            'orientation': 'VERTICAL',
+            'nominal': top_nom,
+            'object_name_suffix': 'HeelBlock_L',
+            'truss_local_origin': (0.0, 0.0, 0.0),
+            'truss_local_axis_direction': (0.0, 0.0, 1.0),
+        }
+        heel_block_r = {
+            'length_in': h,
+            'cut_angle_start_deg': 0.0,
+            'cut_angle_end_deg': 0.0,
+            'orientation': 'VERTICAL',
+            'nominal': top_nom,
+            'object_name_suffix': 'HeelBlock_R',
+            'truss_local_origin': (S, 0.0, 0.0),
+            'truss_local_axis_direction': (0.0, 0.0, 1.0),
+        }
+    else:
+        heel_block_l = None
+        heel_block_r = None
+
+    return {
+        'bottom_chord': bottom_chord,
+        'top_chord_l': top_chord_l,
+        'top_chord_r': top_chord_r,
+        'web_1': web_1,
+        'web_2': web_2,
+        'web_3': web_3,
+        'web_4': web_4,
+        'heel_block_l': heel_block_l,
+        'heel_block_r': heel_block_r,
+    }
+
+
+def compute_truss_placements(roof_props, truss_layout) -> list[dict]:
+    """Per-truss world placement — N placement dicts, one per truss.
+
+    Pure (consumes truss_layout). For each truss position along the
+    bearing wall length axis, computes the world location and Z-
+    rotation. The truss is planar and stands upright — X and Y
+    rotations are zero; the Z rotation aligns truss-local X with the
+    span axis.
+
+    Args:
+        roof_props: PraxovaRoofProps (accepted for symmetry; not used
+            directly — placement geometry lives entirely in
+            truss_layout).
+        truss_layout: dict from compute_truss_layout.
+
+    Returns:
+        List of N dicts (N = truss_layout['truss_count']), each with:
+            truss_index:           int, 1-based (for Truss_NN naming).
+            world_location:        3-tuple in INCHES. Operator
+                                   converts via templates.INCH when
+                                   writing to the Object's .location.
+            world_rotation_euler:  3-tuple (rx, ry, rz) in RADIANS.
+                                   rx = ry = 0; rz from atan2 of the
+                                   span axis in the world XY plane.
+    """
+    del roof_props  # accepted for signature symmetry; unused
+
+    span_axis = truss_layout['span_axis_direction']
+    ridge_axis = truss_layout['ridge_axis_direction']
+    origin = truss_layout['world_origin']
+
+    # Z-rotation: angle of the span axis in the world XY plane.
+    # Truss-local +X should map to the span axis under this rotation.
+    z_rot = math.atan2(span_axis[1], span_axis[0])
+
+    placements: list[dict] = []
+    for i, pos in enumerate(
+        truss_layout['truss_positions_in'], start=1,
+    ):
+        world_location = (
+            origin[0] + pos * ridge_axis[0],
+            origin[1] + pos * ridge_axis[1],
+            origin[2] + pos * ridge_axis[2],
+        )
+        placements.append({
+            'truss_index': i,
+            'world_location': world_location,
+            'world_rotation_euler': (0.0, 0.0, z_rot),
+        })
+
+    return placements
+
+
+def validate_roof(roof_props, level_obj) -> tuple[bool, str]:
+    """Cross-check Roof design parameters and bearing-wall pair.
+
+    Mirrors validate_joints's "first failure with verbatim message"
+    pattern. Returns (True, "") on success or (False, "Roof: <cause>")
+    on the first failed check. The Roof: prefix lets the UI's live
+    validation indicator and the operator's pre-flight share the same
+    message format.
+
+    Checks in order:
+
+      1. bearing_wall_a / bearing_wall_b both set (no None).
+      2. Both walls are children of level_obj with is_wall=True.
+      3. wall_a != wall_b.
+      4. Walls parallel — Z rotations differ by 0 or 180° within
+         _PARALLEL_TOLERANCE_DEG (0.5°).
+      5. Equal length within _LENGTH_TOLERANCE_IN (0.125").
+      6. Equal height within _LENGTH_TOLERANCE_IN.
+      7. Aligned — perpendicular distance from each end of wall_a's
+         X-axis to wall_b's X-axis line equal within
+         _LENGTH_TOLERANCE_IN (catches stagger).
+      8. Computed span > 0 and <= MAX_STOCK_LENGTH_IN — bottom-chord
+         single-piece constraint for v0.7.0; multi-piece bottom chord
+         deferred to v0.7.50.
+      9. Computed span >= 2 * (eave_overhang_in + 6.0) — sanity bound.
+     10. pitch enum resolves cleanly (resolve_pitch_ratio succeeds);
+         when pitch == CUSTOM, pitch_rise_in in [1.0, 24.0].
+     11. eave_overhang_in >= 0 (FloatProperty min enforces this; the
+         re-check is defense-in-depth).
+     12. heel_height_in >= 0 (same).
+
+    Args:
+        roof_props: PraxovaRoofProps PropertyGroup instance.
+        level_obj: the active Level Empty whose children should
+            contain both bearing walls.
+
+    Returns:
+        (True, "") if every check passes; (False, "Roof: ...") at
+        first failure. Error messages include offending values inline
+        so the user can diagnose without consulting docs.
+    """
+    # 1. Both walls set.
+    if (roof_props.bearing_wall_a is None
+            or roof_props.bearing_wall_b is None):
+        return (
+            False,
+            "Roof: bearing_wall_a and bearing_wall_b must both be set",
+        )
+
+    a = roof_props.bearing_wall_a
+    b = roof_props.bearing_wall_b
+
+    # 2. Both walls children of level_obj with is_wall.
+    level_walls = {
+        c for c in level_obj.children
+        if getattr(c, 'praxova_wall', None) is not None
+        and c.praxova_wall.is_wall
+    }
+    if a not in level_walls or b not in level_walls:
+        return (
+            False,
+            f"Roof: both bearing walls must be Praxova walls under "
+            f"this Level (got {a.name!r}, {b.name!r})",
+        )
+
+    # 3. Distinct.
+    if a == b:
+        return (
+            False,
+            "Roof: bearing_wall_a and bearing_wall_b must be different walls",
+        )
+
+    # 4. Parallel — Z rotation difference within tolerance of 0 or 180°.
+    z_rot_a = math.degrees(a.matrix_world.to_euler().z)
+    z_rot_b = math.degrees(b.matrix_world.to_euler().z)
+    raw_diff = abs(z_rot_a - z_rot_b)
+    # Normalize into [0, 180].
+    while raw_diff > 360.0:
+        raw_diff -= 360.0
+    if raw_diff > 180.0:
+        raw_diff = 360.0 - raw_diff
+    # Now raw_diff is in [0, 180]. Parallel means close to 0 OR 180.
+    parallel_diff = min(raw_diff, abs(180.0 - raw_diff))
+    if parallel_diff > _PARALLEL_TOLERANCE_DEG:
+        return (
+            False,
+            f"Roof: bearing walls are not parallel (Z rotations "
+            f"{z_rot_a:.2f}° vs {z_rot_b:.2f}°, "
+            f"differ by {parallel_diff:.2f}° from 0/180°; "
+            f"tolerance {_PARALLEL_TOLERANCE_DEG:g}°)",
+        )
+
+    # 5. Equal length.
+    len_a = float(a.praxova_wall.wall_length_in)
+    len_b = float(b.praxova_wall.wall_length_in)
+    if abs(len_a - len_b) > _LENGTH_TOLERANCE_IN:
+        return (
+            False,
+            f"Roof: bearing walls have different lengths "
+            f"({len_a:.2f}\" vs {len_b:.2f}\"; tolerance "
+            f"{_LENGTH_TOLERANCE_IN:g}\")",
+        )
+
+    # 6. Equal height.
+    h_a = float(a.praxova_wall.wall_height_in)
+    h_b = float(b.praxova_wall.wall_height_in)
+    if abs(h_a - h_b) > _LENGTH_TOLERANCE_IN:
+        return (
+            False,
+            f"Roof: bearing walls have different heights "
+            f"({h_a:.2f}\" vs {h_b:.2f}\"; tolerance "
+            f"{_LENGTH_TOLERANCE_IN:g}\")",
+        )
+
+    # 7. Alignment — perpendicular distance from each end of A's
+    # X-axis to B's X-axis line. For parallel translates, both
+    # distances are equal; differing distances mean wall ends are
+    # staggered along the span axis (one wall sticking past the
+    # other).
+    geom_a = compute_bearing_wall_geometry(a)
+    geom_b = compute_bearing_wall_geometry(b)
+    A_start = Vector(geom_a['world_centerline_start'])
+    A_end = Vector(geom_a['world_centerline_end'])
+    B_start = Vector(geom_b['world_centerline_start'])
+    B_dir = Vector(geom_b['world_x_axis']).normalized()
+
+    def _perp_dist(p: Vector, line_origin: Vector, line_dir: Vector) -> float:
+        v = p - line_origin
+        proj = v.dot(line_dir)
+        return (v - proj * line_dir).length
+
+    d_start = _perp_dist(A_start, B_start, B_dir)
+    d_end = _perp_dist(A_end, B_start, B_dir)
+    if abs(d_start - d_end) > _LENGTH_TOLERANCE_IN:
+        return (
+            False,
+            f"Roof: bearing walls are not aligned translates — "
+            f"perpendicular distances from wall_a's ends to wall_b's "
+            f"X-axis differ ({d_start:.2f}\" vs {d_end:.2f}\"; "
+            f"tolerance {_LENGTH_TOLERANCE_IN:g}\")",
+        )
+
+    # 8. Computed span > 0 and <= MAX_STOCK_LENGTH_IN. Re-derive span
+    # here directly to keep validate_roof independent of
+    # compute_truss_layout (the operator calls them in sequence; the
+    # UI's live indicator may call only validate_roof).
+    a_cl_mid = (A_start + A_end) / 2.0
+    b_cl_mid = (
+        B_start + Vector(geom_b['world_centerline_end'])
+    ) / 2.0
+    _, a_ext_center = _bearing_wall_exterior_face_center(
+        a, geom_a, b_cl_mid,
+    )
+    _, b_ext_center = _bearing_wall_exterior_face_center(
+        b, geom_b, a_cl_mid,
+    )
+    span_in = (b_ext_center - a_ext_center).length
+    if span_in <= 0.0:
+        return (
+            False,
+            f"Roof: computed span is non-positive ({span_in:.2f}\")",
+        )
+    if span_in > MAX_STOCK_LENGTH_IN:
+        return (
+            False,
+            f"Roof: span {span_in:.2f}\" exceeds the "
+            f"{MAX_STOCK_LENGTH_IN:g}\" single-piece bottom-chord "
+            f"limit (multi-piece bottom chord deferred to v0.7.50)",
+        )
+
+    # 9. Span sanity bound — must accommodate the eave overhang on
+    # both sides with at least 6" of middle span left over for sane
+    # truss geometry.
+    e = float(roof_props.eave_overhang_in)
+    min_span = 2.0 * (e + 6.0)
+    if span_in < min_span:
+        return (
+            False,
+            f"Roof: span {span_in:.2f}\" is too small for eave "
+            f"overhang {e:.2f}\" (need >= {min_span:.2f}\" = "
+            f"2 * (overhang + 6\"))",
+        )
+
+    # 10. Pitch valid.
+    try:
+        resolve_pitch_ratio(roof_props)
+    except ValueError as ex:
+        return (False, f"Roof: invalid pitch — {ex}")
+    if roof_props.pitch == 'CUSTOM':
+        rise = float(roof_props.pitch_rise_in)
+        if rise < 1.0 or rise > 24.0:
+            return (
+                False,
+                f"Roof: CUSTOM pitch_rise_in {rise:.2f}\" out of "
+                f"range [1.0, 24.0]",
+            )
+
+    # 11. eave_overhang_in >= 0.
+    if e < 0.0:
+        return (
+            False,
+            f"Roof: eave_overhang_in must be >= 0 (got {e:.2f}\")",
+        )
+
+    # 12. heel_height_in >= 0.
+    h_heel = float(roof_props.heel_height_in)
+    if h_heel < 0.0:
+        return (
+            False,
+            f"Roof: heel_height_in must be >= 0 (got {h_heel:.2f}\")",
+        )
+
+    return (True, "")
