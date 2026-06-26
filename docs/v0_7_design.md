@@ -142,10 +142,10 @@ class PraxovaTrussProps(bpy.types.PropertyGroup):
     # v0.7.50 adds per-truss variation fields
 ```
 
-### Extension to `praxova_lumber` PropertyGroup
+### Extension to `PraxovaLumberProps` PropertyGroup
 
 ```python
-class PraxovaLumberTag(bpy.types.PropertyGroup):
+class PraxovaLumberProps(bpy.types.PropertyGroup):
     # ... existing fields unchanged ...
     
     # NEW in v0.7.0
@@ -180,19 +180,22 @@ center verticals) are VERTICAL.
 
 ### Registration Order
 
-`PraxovaLumberTag` (existing, extended) and `PraxovaWallOpening` first (no
-dependencies). `PraxovaWallProps`, then v0.6 building containers, then the new
-v0.7 PropertyGroups:
+Order matters: PropertyGroups must register before any PropertyGroup that
+references them (via `CollectionProperty` or `PointerProperty`).
+`PraxovaWallOpening` registers before `PraxovaWallProps` (referenced as
+`CollectionProperty(type=PraxovaWallOpening)`); `PraxovaJoint` registers
+before `PraxovaLevelProps`. The two new v0.7 PropertyGroups slot in between
+`PraxovaBuildingProps` and `PraxovaSceneProps`:
 
 ```
-PraxovaLumberTag          (existing, extended with cut angles + ANGLED)
+PraxovaLumberProps        (existing, extended with cut angles + ANGLED)
 PraxovaWallOpening        (existing)
-PraxovaWallProps          (existing v0.6)
+PraxovaWallProps          (existing v0.6; uses PraxovaWallOpening)
 PraxovaJoint              (existing v0.6)
-PraxovaLevelProps         (existing v0.6)
+PraxovaLevelProps         (existing v0.6; uses PraxovaJoint)
 PraxovaBuildingProps      (existing v0.6)
-PraxovaTrussProps         (NEW)
-PraxovaRoofProps          (NEW; uses PointerProperty(Object) for bearing walls — built-in)
+PraxovaTrussProps         (NEW; marker only)
+PraxovaRoofProps          (NEW; uses PointerProperty(Object) — built-in)
 PraxovaSceneProps         (existing)
 ```
 
@@ -813,7 +816,8 @@ Files: `properties.py`, `__init__.py`
 - Attach as PointerProperty on Object type:
   `bpy.types.Object.praxova_roof = PointerProperty(...)`,
   `bpy.types.Object.praxova_truss = PointerProperty(...)`
-- Extend `PraxovaLumberTag` with `cut_angle_start_deg` and `cut_angle_end_deg`
+- Extend `PraxovaLumberProps` with `cut_angle_start_deg` and
+  `cut_angle_end_deg`
 - Extend the `orientation` EnumProperty with `'ANGLED'`
 - Update class registration order in `__init__.py`
 

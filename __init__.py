@@ -100,6 +100,10 @@ def register():
         properties.PraxovaJoint,
         properties.PraxovaLevelProps,
         properties.PraxovaBuildingProps,
+        # v0.7: Roof container with bearing-wall PointerProperty pair; Truss
+        # marker hook for v0.7.0, prep for per-truss variation in v0.7.50.
+        properties.PraxovaTrussProps,
+        properties.PraxovaRoofProps,
         properties.PraxovaSceneProps,
         # Operators.
         ops_add.PRAXOVA_OT_add_lumber,
@@ -180,6 +184,17 @@ def register():
     bpy.types.Object.praxova_building = bpy.props.PointerProperty(
         type=properties.PraxovaBuildingProps,
     )
+    # v0.7: Roof container and Truss marker pointers, mirroring v0.6's
+    # praxova_wall / praxova_level / praxova_building pattern. Every Object
+    # carries these pointers; the is_roof / is_truss discriminators
+    # distinguish Praxova-managed Roof / Truss Empties from arbitrary
+    # scene Objects.
+    bpy.types.Object.praxova_truss = bpy.props.PointerProperty(
+        type=properties.PraxovaTrussProps,
+    )
+    bpy.types.Object.praxova_roof = bpy.props.PointerProperty(
+        type=properties.PraxovaRoofProps,
+    )
     bpy.types.Scene.praxova_framing = bpy.props.PointerProperty(
         type=properties.PraxovaSceneProps,
     )
@@ -200,6 +215,8 @@ def unregister():
     del bpy.types.Object.praxova_wall
     del bpy.types.Object.praxova_level
     del bpy.types.Object.praxova_building
+    del bpy.types.Object.praxova_truss
+    del bpy.types.Object.praxova_roof
     del bpy.types.Scene.praxova_framing
 
     for cls in reversed(_registered_classes):

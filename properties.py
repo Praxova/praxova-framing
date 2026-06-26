@@ -201,8 +201,39 @@ class PraxovaLumberProps(bpy.types.PropertyGroup):
         items=[
             ('VERTICAL',   "Vertical",   "Long axis along Z (stud / standing sheet)"),
             ('HORIZONTAL', "Horizontal", "Long axis along X (plate / flat sheet)"),
+            ('ANGLED',     "Angled",     "Long axis along an arbitrary slope (truss top chord, web)"),
         ],
         default='VERTICAL',
+    )
+    cut_angle_start_deg: FloatProperty(  # noqa: F821
+        name="Start Cut Angle (deg)",
+        description=(
+            "Cut angle at the 'start' end of the member (the x=0 end in "
+            "the member's local frame), in degrees from a square cut. "
+            "0.0 = square (perpendicular to the long axis). Magnitude "
+            "only — the geometric orientation of the cut is determined "
+            "by the member's role in its parent assembly. Used for "
+            "truss top chords (plumb cuts at pitch angle), webs (web-"
+            "to-chord cuts), and any future angle-cut piece. Defaults "
+            "to 0.0 so existing v0.6.x lumber pieces stay square-cut "
+            "without any migration."
+        ),
+        default=0.0,
+        min=0.0,
+        max=89.9,
+        precision=3,
+    )
+    cut_angle_end_deg: FloatProperty(  # noqa: F821
+        name="End Cut Angle (deg)",
+        description=(
+            "Cut angle at the 'end' end of the member (the x=length_in "
+            "end in the member's local frame), in degrees from a square "
+            "cut. See cut_angle_start_deg for full semantics."
+        ),
+        default=0.0,
+        min=0.0,
+        max=89.9,
+        precision=3,
     )
     cutlist_label: StringProperty(  # noqa: F821
         name="Cut List Label",
@@ -559,6 +590,181 @@ class PraxovaBuildingProps(bpy.types.PropertyGroup):
             ('LADDER_BLOCKING', "Ladder blocking", "End stud + horizontal drywall backing blocks; no vertical filler stud, maximum insulation cavity"),
         ],
         default='THREE_STUD',
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-truss props (v0.7)
+# ---------------------------------------------------------------------------
+
+class PraxovaTrussProps(bpy.types.PropertyGroup):
+    """Per-truss marker, attached to every Object as PointerProperty.
+
+    `is_truss == True` identifies a truss Empty (created by frame_roof,
+    one per generated truss as a child of the Roof Empty). v0.7.0 carries
+    only the marker — all truss design parameters live on the parent
+    Roof's PraxovaRoofProps. v0.7.50 adds per-truss variation fields
+    here for scissor / attic / room-in-attic styles where individual
+    trusses in the same Roof can differ.
+
+    The early-stage marker hook avoids a data-model migration in
+    v0.7.50: the PropertyGroup is already attached to Object, so adding
+    per-truss fields then is a pure additive change.
+    """
+
+    is_truss: BoolProperty(  # noqa: F821
+        name="Is Praxova Truss",
+        description="Marks this Object as a Praxova-managed truss Empty",
+        default=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Roof props (v0.7)
+# ---------------------------------------------------------------------------
+
+class PraxovaRoofProps(bpy.types.PropertyGroup):
+    """Roof design parameters, attached to every Object as PointerProperty.
+
+    `is_roof == True` identifies a Roof Empty (created by add_roof, parented
+    under a Level). Carries the full Fink truss design spec for v0.7.0:
+    bearing walls (PointerProperty pair driving span), pitch (enum + custom
+    rise), eave overhang, heel height, member nominals, and OC spacing.
+
+    The Roof Empty's world position is decorative — frame_roof computes
+    each truss's world placement from the bearing walls' world transforms,
+    not from the Roof Empty's position. Moving the Roof Empty in the
+    viewport has no geometric effect; moving a bearing wall does.
+
+    Single source of truth for the truss layout: all six v0.7.0
+    templates.py helpers (resolve_pitch_ratio, compute_bearing_wall_geometry,
+    compute_truss_layout, truss_member_lengths_and_angles,
+    compute_truss_placements, validate_roof) read directly off a
+    PraxovaRoofProps instance and the parent Level's children.
+
+    v0.7.50 extends truss_type to add KING_POST / QUEEN_POST / SCISSOR /
+    ATTIC / MONO_PITCH; v0.7.60 may add rake_overhang_in and gable-end
+    truss flags; v0.7.70 may convert truss_type to a richer structure for
+    Gambrel composite roofs. Keep the field set minimal in v0.7.0 to keep
+    those extensions clean.
+    """
+
+    is_roof: BoolProperty(  # noqa: F821
+        name="Is Praxova Roof",
+        description="Marks this Object as a Praxova-managed Roof Empty",
+        default=False,
+    )
+
+    # --- Truss type ---
+    truss_type: EnumProperty(  # noqa: F821
+        name="Truss Type",
+        description="Truss geometry family (v0.7.0 supports Fink only)",
+        items=[
+            ('FINK', "Fink", "Standard W-web Fink truss (TPI/SBCA simple-symmetric)"),
+        ],
+        default='FINK',
+    )
+
+    # --- Bearing walls (drive span and orientation) ---
+    bearing_wall_a: PointerProperty(  # noqa: F821
+        name="Bearing Wall A",
+        description="One of the two parallel walls the trusses bear on",
+        type=bpy.types.Object,
+    )
+    bearing_wall_b: PointerProperty(  # noqa: F821
+        name="Bearing Wall B",
+        description="The other bearing wall (parallel to A, same length and height)",
+        type=bpy.types.Object,
+    )
+
+    # --- Pitch ---
+    pitch: EnumProperty(  # noqa: F821
+        name="Pitch",
+        description="Roof pitch expressed as rise/run (run fixed at 12)",
+        items=[
+            ('P_3_12',  "3/12",   "3\" rise per 12\" run (low slope)"),
+            ('P_4_12',  "4/12",   ""),
+            ('P_5_12',  "5/12",   ""),
+            ('P_6_12',  "6/12",   "Common residential pitch"),
+            ('P_7_12',  "7/12",   ""),
+            ('P_8_12',  "8/12",   ""),
+            ('P_9_12',  "9/12",   ""),
+            ('P_10_12', "10/12",  ""),
+            ('P_12_12', "12/12",  "45° / steep gable"),
+            ('CUSTOM',  "Custom", "Use pitch_rise_in (run fixed at 12)"),
+        ],
+        default='P_6_12',
+    )
+    pitch_rise_in: FloatProperty(  # noqa: F821
+        name="Custom Pitch Rise (in)",
+        description=(
+            "Rise in inches per 12-inch run. Used only when pitch == "
+            "'CUSTOM'. Carpenter-format: a 6/12 pitch is 6.0 here."
+        ),
+        default=6.0,
+        min=1.0,
+        max=24.0,
+        precision=2,
+    )
+
+    # --- Eave detail ---
+    eave_overhang_in: FloatProperty(  # noqa: F821
+        name="Eave Overhang (in)",
+        description=(
+            "Horizontal projection of the top chord past the bearing "
+            "wall's exterior face. 0 = Monopoly-style flush eave. "
+            "Rake overhang (on the gable sides) deferred to v0.7.60."
+        ),
+        default=12.0,
+        min=0.0,
+        max=48.0,
+        precision=2,
+    )
+    heel_height_in: FloatProperty(  # noqa: F821
+        name="Heel Height (in)",
+        description=(
+            "Vertical height of the heel block at each bearing point. "
+            "0 = standard heel (top chord meets bottom chord directly). "
+            ">0 = energy heel for R-49+ insulation over the wall — "
+            "typical values 12\" to 16\"."
+        ),
+        default=0.0,
+        min=0.0,
+        max=24.0,
+        precision=2,
+    )
+
+    # --- Member nominals ---
+    top_chord_nominal: EnumProperty(  # noqa: F821
+        name="Top Chord Nominal",
+        description="Dimensional lumber size for the top chords",
+        items=_LUMBER_TYPE_ITEMS,
+        default='2x6',
+    )
+    bottom_chord_nominal: EnumProperty(  # noqa: F821
+        name="Bottom Chord Nominal",
+        description="Dimensional lumber size for the bottom chord",
+        items=_LUMBER_TYPE_ITEMS,
+        default='2x6',
+    )
+    web_nominal: EnumProperty(  # noqa: F821
+        name="Web Nominal",
+        description="Dimensional lumber size for the web members",
+        items=_LUMBER_TYPE_ITEMS,
+        default='2x4',
+    )
+
+    # --- Spacing ---
+    oc_spacing_in: EnumProperty(  # noqa: F821
+        name="Truss OC Spacing",
+        description="On-center spacing between adjacent trusses",
+        items=[
+            ('12',   "12\"",   "12 inches"),
+            ('16',   "16\"",   "16 inches"),
+            ('19.2', "19.2\"", "19.2 inches (engineered-lumber spacing)"),
+            ('24',   "24\"",   "24 inches (typical for trusses)"),
+        ],
+        default='24',
     )
 
 
