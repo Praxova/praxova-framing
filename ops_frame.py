@@ -35,6 +35,8 @@ Not yet shipped:
     - Headers other than (2) 2x + 1/2" plywood spacer
 """
 
+import math
+
 import bpy
 
 from . import templates
@@ -1672,5 +1674,397 @@ class PRAXOVA_OT_frame_building(bpy.types.Operator):
             f"Framed {framed_count} wall"
             f"{'s' if framed_count != 1 else ''} "
             f"with {n_joints} joint{'s' if n_joints != 1 else ''}",
+        )
+        return {'FINISHED'}
+
+
+# ===========================================================================
+# Truss orchestration (v0.7)
+# ===========================================================================
+#
+# Two operators: add_roof creates a Roof Empty under a Level (max one per
+# Level in v0.7.0); frame_roof generates N trusses as children of that
+# Roof from the Roof's design parameters and its bearing walls' world
+# transforms.
+#
+# v0.7.0 geometry model: stick-accurate, not carpentry-accurate. Each
+# member is a centerline-centered, square-ended box built via
+# templates.make_truss_member_mesh. Cut-angle metadata is still tagged
+# on every member (cut_angle_start_deg / cut_angle_end_deg from the
+# templates helpers) so it flows into the cut list and the future
+# mitered-mesh pass without further data-path changes.
+
+_ROOF_NAME_PATTERN  = re.compile(r'^Roof_(\d+)$')
+_TRUSS_NAME_PATTERN = re.compile(r'^Truss_(\d+)$')
+
+
+# Fixed member build order. Heel blocks are last and may be None
+# (templates.truss_member_lengths_and_angles returns None for the
+# heel block entries when heel_height_in == 0).
+_TRUSS_MEMBER_ORDER = (
+    'bottom_chord',
+    'top_chord_l', 'top_chord_r',
+    'web_1', 'web_2', 'web_3', 'web_4',
+    'heel_block_l', 'heel_block_r',
+)
+
+
+def _delete_object_tree(obj):
+    """Recursively delete an object and all its descendants.
+
+    Depth-first: children (and their children) are removed before the
+    object itself, so no descendant is left parentless in the scene.
+    Mesh datablocks are intentionally NOT deleted here — truss member
+    meshes are shared across trusses and looked up by name on the next
+    frame_roof (mirrors how frame_wall leaves plate/stud meshes for
+    reuse). Zero-user meshes are reclaimed by Blender's normal purge.
+    """
+    for child in list(obj.children):
+        _delete_object_tree(child)
+    bpy.data.objects.remove(obj, do_unlink=True)
+
+
+def _format_pitch(roof_props) -> str:
+    """Human-readable pitch for INFO reports, e.g. '6/12' or '7.5/12'."""
+    if roof_props.pitch == 'CUSTOM':
+        # `:g` trims a trailing zero so 7.5 stays 7.5 but 6.0 reads as 6.
+        return f"{roof_props.pitch_rise_in:g}/12"
+    # Enum keys look like 'P_6_12' -> '6/12'.
+    return roof_props.pitch.removeprefix('P_').replace('_', '/')
+
+
+def _make_truss_empty(
+    context, *, name, parent, parent_inverse, world_location, world_rotation,
+):
+    """Create a Truss Empty placed at a world transform under `parent`.
+
+    `world_location` is in inches (converted to meters here);
+    `world_rotation` is an (rx, ry, rz) tuple in radians (used as-is).
+
+    Placement uses the matrix_parent_inverse idiom so the Empty lands at
+    the intended WORLD transform regardless of where the Roof (parent)
+    sits: with matrix_parent_inverse = parent.matrix_world.inverted()
+    and the basis set to the world transform, the child's matrix_world
+    resolves to exactly that world transform. The truss layout from
+    compute_truss_placements is world-space (it's derived from the
+    bearing walls' world transforms), so this is the correct convention
+    for the Truss Empty. Its member children, by contrast, are placed in
+    truss-LOCAL space with an identity parent inverse (see
+    _make_truss_member_object).
+    """
+    empty = bpy.data.objects.new(name, None)
+    empty.empty_display_type = 'PLAIN_AXES'
+    empty.empty_display_size = 0.4
+    context.collection.objects.link(empty)
+    empty.parent = parent
+    empty.matrix_parent_inverse = parent_inverse
+    empty.location = tuple(c * templates.INCH for c in world_location)
+    empty.rotation_euler = tuple(world_rotation)
+    empty.praxova_truss.is_truss = True
+    return empty
+
+
+def _make_truss_member_object(
+    context, mesh, name, location_m, rotation_euler, *,
+    nominal, length_in, stock_in, orientation,
+    cut_angle_start_deg, cut_angle_end_deg, label,
+):
+    """Create one tagged, rotated truss-member object (unlinked from any
+    parent; caller sets .parent).
+
+    location_m is in METERS and truss-LOCAL (relative to the Truss
+    Empty); rotation_euler is (rx, ry, rz) radians, truss-local. The
+    caller parents this to the Truss Empty with an identity
+    matrix_parent_inverse so these local values compose with the Truss
+    Empty's world transform.
+    """
+    obj = bpy.data.objects.new(name, mesh)
+    obj.location = location_m
+    obj.rotation_euler = rotation_euler
+
+    tag = obj.praxova_lumber
+    tag.is_lumber = True
+    tag.category = 'LUMBER'
+    tag.nominal_size = nominal
+    tag.length_in = float(length_in)
+    tag.stock_length_in = float(stock_in)
+    tag.orientation = orientation
+    tag.cut_angle_start_deg = float(cut_angle_start_deg)
+    tag.cut_angle_end_deg = float(cut_angle_end_deg)
+    tag.cutlist_label = label
+
+    context.collection.objects.link(obj)
+    return obj
+
+
+def _build_truss_members(context, truss_empty, member_specs):
+    """Build every member of one truss as a child of `truss_empty`.
+
+    member_specs is the dict from templates.truss_member_lengths_and_angles.
+    Each non-None spec is realized as a centerline-centered box (via
+    templates.make_truss_member_mesh), placed at the member's
+    truss_local_origin and rotated about the truss-local Y axis so its
+    long axis follows truss_local_axis_direction. Members are parented to
+    the Truss Empty with an identity matrix_parent_inverse (the default
+    from bpy.data.objects.new), so their truss-local transforms compose
+    with the Truss Empty's world transform.
+    """
+    INCH = templates.INCH
+    for key in _TRUSS_MEMBER_ORDER:
+        spec = member_specs.get(key)
+        if spec is None:
+            continue
+
+        nominal = spec['nominal']
+        thickness_in, width_in = templates.LUMBER_TYPES[nominal]
+        length_in = spec['length_in']
+
+        # Stock selection (truss members are cut from the smallest stock
+        # that fits, like studs). Surface a too-long member as an error
+        # rather than letting select_stock_length_in's ValueError escape.
+        try:
+            stock_in = templates.select_stock_length_in(nominal, length_in)
+        except ValueError as e:
+            raise ValueError(
+                f"{spec['object_name_suffix']}: {e}"
+            ) from e
+        stock_ft = int(round(stock_in / 12.0))
+
+        label = templates.lumber_cutlist_label(
+            nominal, stock_ft, spec['orientation'],
+        )
+
+        mesh_name = (
+            f"praxova_mesh_truss_member_{nominal}_{_fmt_inches(length_in)}"
+        )
+        mesh = bpy.data.meshes.get(mesh_name)
+        if mesh is None:
+            mesh = templates.make_truss_member_mesh(
+                mesh_name, length_in, width_in, thickness_in,
+            )
+
+        # Rotation about truss-local Y so local +X aligns with the
+        # member axis (dx, 0, dz). For a rotation R_y(beta),
+        # R_y(beta) * (1,0,0) = (cos beta, 0, -sin beta); matching
+        # (dx, 0, dz) gives beta = atan2(-dz, dx).
+        dx, _dy, dz = spec['truss_local_axis_direction']
+        beta = math.atan2(-dz, dx)
+
+        origin_m = tuple(c * INCH for c in spec['truss_local_origin'])
+
+        obj = _make_truss_member_object(
+            context, mesh,
+            f"{truss_empty.name}_{spec['object_name_suffix']}",
+            origin_m,
+            (0.0, beta, 0.0),
+            nominal=nominal,
+            length_in=length_in,
+            stock_in=stock_in,
+            orientation=spec['orientation'],
+            cut_angle_start_deg=spec['cut_angle_start_deg'],
+            cut_angle_end_deg=spec['cut_angle_end_deg'],
+            label=label,
+        )
+        obj.parent = truss_empty
+        # Leave obj.matrix_parent_inverse at identity (default): the
+        # member transform is truss-local and must compose with the
+        # Truss Empty's world transform.
+
+
+class PRAXOVA_OT_add_roof(bpy.types.Operator):
+    """Create a Roof Empty under the scene's active Level.
+
+    The Roof Empty hosts no geometry of its own — it's a container for
+    the trusses that frame_roof generates as its children. Its world
+    position is decorative: frame_roof computes each truss's placement
+    from the bearing walls' world transforms, not from the Roof Empty's
+    position.
+
+    v0.7.0 allows exactly one Roof per Level; add_roof refuses if the
+    active Level already has a Roof child. The new Roof's PraxovaRoofProps
+    start at their PropertyGroup defaults (Fink, 6/12, 12" eave, 0 heel,
+    2x6 chords, 2x4 webs, 24" OC); the bearing-wall pointers start unset
+    and are picked in the Roof Framing tab.
+
+    Visual glyph: Roof uses CONE display (distinct from Building's CUBE,
+    Level's SINGLE_ARROW, walls' PLAIN_AXES, and the trusses' PLAIN_AXES).
+    """
+
+    bl_idname = "praxova.add_roof"
+    bl_label = "Add Roof"
+    bl_description = (
+        "Create a Roof container under the active Level. One Roof per "
+        "Level; configure it in the Roof Framing tab, then Frame Roof."
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sp = context.scene.praxova_framing
+        return (
+            sp.active_level is not None
+            and getattr(sp.active_level, 'praxova_level', None) is not None
+            and sp.active_level.praxova_level.is_level
+        )
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        level = sp.active_level
+
+        if level is None or not level.praxova_level.is_level:
+            self.report(
+                {'ERROR'},
+                "No active Level. Use the Building tab to select one.",
+            )
+            return {'CANCELLED'}
+
+        existing_roof = next(
+            (c for c in level.children
+             if getattr(c, 'praxova_roof', None) is not None
+             and c.praxova_roof.is_roof),
+            None,
+        )
+        if existing_roof is not None:
+            self.report(
+                {'ERROR'},
+                f"Active Level already has a Roof ({existing_roof.name}). "
+                "v0.7.0 supports one Roof per Level.",
+            )
+            return {'CANCELLED'}
+
+        roof_name = _next_indexed_name(
+            {child.name for child in level.children},
+            _ROOF_NAME_PATTERN,
+            "Roof",
+        )
+        roof = bpy.data.objects.new(roof_name, None)
+        roof.empty_display_type = 'CONE'
+        roof.empty_display_size = 0.75
+        roof.location = (0.0, 0.0, 0.0)
+        context.collection.objects.link(roof)
+        roof.parent = level
+        roof.praxova_roof.is_roof = True
+
+        _set_active_only(context, roof)
+        self.report({'INFO'}, f"Created {roof_name} under {level.name}")
+        return {'FINISHED'}
+
+
+class PRAXOVA_OT_frame_roof(bpy.types.Operator):
+    """Generate the trusses for the active Level's Roof.
+
+    Delete-and-regenerate: every existing Truss child of the Roof is
+    removed, then N trusses are built from the Roof's current design
+    parameters and the bearing walls' world geometry. No per-truss edit
+    semantics in v0.7.0 — mirrors how frame_building re-runs every wall.
+
+    All trusses in a Roof share one design, so geometry is computed once
+    (compute_truss_layout / truss_member_lengths_and_angles /
+    compute_truss_placements) and reused for every truss. Members are
+    centerline-centered, square-ended boxes (mitered joinery deferred);
+    cut-angle metadata is still tagged for the cut list and the future
+    miter pass.
+    """
+
+    bl_idname = "praxova.frame_roof"
+    bl_label = "Frame Roof"
+    bl_description = (
+        "Generate (or regenerate) the trusses for the active Level's "
+        "Roof from its design parameters and bearing walls"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sp = context.scene.praxova_framing
+        return (
+            sp.active_level is not None
+            and getattr(sp.active_level, 'praxova_level', None) is not None
+            and sp.active_level.praxova_level.is_level
+        )
+
+    def execute(self, context):
+        sp = context.scene.praxova_framing
+        level = sp.active_level
+
+        if level is None or not level.praxova_level.is_level:
+            self.report(
+                {'ERROR'},
+                "No active Level. Use the Building tab to select one.",
+            )
+            return {'CANCELLED'}
+
+        roof = next(
+            (c for c in level.children
+             if getattr(c, 'praxova_roof', None) is not None
+             and c.praxova_roof.is_roof),
+            None,
+        )
+        if roof is None:
+            self.report(
+                {'ERROR'},
+                "Active Level has no Roof. Use the Roof Framing tab to add one.",
+            )
+            return {'CANCELLED'}
+
+        rp = roof.praxova_roof
+
+        valid, msg = templates.validate_roof(rp, level)
+        if not valid:
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+
+        # Compute the per-roof geometry once — every truss in this Roof
+        # shares the same design. ValueError from helpers (e.g.
+        # unsupported truss_type, degenerate cut angle that validate_roof
+        # would have caught) surface as clean operator errors.
+        try:
+            layout = templates.compute_truss_layout(rp)
+            member_specs = templates.truss_member_lengths_and_angles(
+                rp, layout,
+            )
+            placements = templates.compute_truss_placements(rp, layout)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        # Delete existing trusses before building. Mesh datablocks
+        # stay in bpy.data.meshes for reuse on the next Frame Roof
+        # (mirrors frame_wall's mesh-reuse pattern).
+        for child in list(roof.children):
+            if (getattr(child, 'praxova_truss', None) is not None
+                    and child.praxova_truss.is_truss):
+                _delete_object_tree(child)
+
+        # Re-establish view-layer matrices after the tree edit so
+        # roof.matrix_world.inverted() reflects the current state.
+        context.view_layer.update()
+        roof_inv = roof.matrix_world.inverted()
+
+        # Build each truss. ValueError from stock selection inside
+        # _build_truss_members surfaces as a clean operator error; the
+        # partially-built roof is left in place (next successful Frame
+        # Roof deletes and rebuilds cleanly).
+        try:
+            for placement in placements:
+                truss_name = f"Truss_{placement['truss_index']:02d}"
+                truss_empty = _make_truss_empty(
+                    context,
+                    name=truss_name,
+                    parent=roof,
+                    parent_inverse=roof_inv,
+                    world_location=placement['world_location'],
+                    world_rotation=placement['world_rotation_euler'],
+                )
+                _build_truss_members(context, truss_empty, member_specs)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        _set_active_only(context, roof)
+        self.report(
+            {'INFO'},
+            f"Framed {len(placements)} {rp.truss_type} trusses "
+            f"(span {layout['span_in']:.1f}\", pitch {_format_pitch(rp)})",
         )
         return {'FINISHED'}

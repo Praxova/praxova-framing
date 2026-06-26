@@ -123,6 +123,9 @@ def register():
         ops_frame.PRAXOVA_OT_add_joint,
         ops_frame.PRAXOVA_OT_remove_joint,
         ops_frame.PRAXOVA_OT_frame_building,
+        # v0.7: Roof container + truss framing orchestrator.
+        ops_frame.PRAXOVA_OT_add_roof,
+        ops_frame.PRAXOVA_OT_frame_roof,
         ops_cutlist.PRAXOVA_OT_generate_cutlist,
         ops_units.PRAXOVA_OT_set_imperial_units,
         # v0.3: MCP bridge operators.

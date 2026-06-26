@@ -78,8 +78,12 @@ T_JOINT_STYLES  = frozenset({'T_BACKING_STUDS'})
 
 
 def lumber_cutlist_label(nominal: str, length_ft: int, orientation: str) -> str:
-    """Build the canonical lumber cutlist label, e.g. '2x4x8 V'."""
-    suffix = "V" if orientation == 'VERTICAL' else "H"
+    """Build the canonical lumber cutlist label, e.g. '2x4x8 V'.
+
+    v0.7.0: orientation 'ANGLED' (truss top chords / diagonal webs)
+    emits an 'A' suffix; 'VERTICAL' -> 'V', 'HORIZONTAL' -> 'H'.
+    """
+    suffix = {'VERTICAL': "V", 'ANGLED': "A"}.get(orientation, "H")
     return f"{nominal}x{length_ft} {suffix}"
 
 
@@ -248,6 +252,67 @@ def make_box_mesh(
         (1, 2, 6, 5),  # +X right
         (2, 3, 7, 6),  # +Y back
         (3, 0, 4, 7),  # -X left
+    ]
+
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    return mesh
+
+
+def make_truss_member_mesh(
+    name: str,
+    length_in: float,
+    width_in: float,
+    thickness_in: float,
+) -> bpy.types.Mesh:
+    """Build a truss-member box mesh centered on its centerline.
+
+    Unlike make_box_mesh (min corner at origin), this centers the
+    cross-section on the member's long axis so the centerline runs
+    along local +X from the origin: X spans 0..length, Y (member
+    thickness, through the truss plane / ridge direction) is centered
+    on -t/2..+t/2, Z (member width, in the truss plane) is centered on
+    -w/2..+w/2.
+
+    This convention lets frame_roof place a member by putting the box's
+    origin at the member's centerline start point (truss_local_origin)
+    and rotating about the truss-local Y axis so local +X aligns with
+    truss_local_axis_direction. Because the rotation is about Y, the
+    member thickness stays along the ridge direction at every pitch,
+    and the member width stays in the truss plane perpendicular to the
+    member axis — the structurally correct orientation for a chord or
+    web.
+
+    v0.7.0 builds square-ended prisms (ends perpendicular to the long
+    axis); the recorded cut_angle metadata drives a later mitered-mesh
+    pass, not this primitive.
+
+    Args:
+        name: Name for the new mesh datablock.
+        length_in: Centerline length along local X, in inches.
+        width_in: Member width (in-plane face dimension), in inches.
+        thickness_in: Member thickness (through-plane), in inches.
+
+    Returns:
+        A new bpy.types.Mesh datablock owned by bpy.data.meshes.
+    """
+    L = length_in * INCH
+    ht = (thickness_in * INCH) / 2.0   # half thickness, along Y
+    hw = (width_in * INCH) / 2.0       # half width, along Z
+
+    verts = [
+        (0.0, -ht, -hw), (L, -ht, -hw), (L, ht, -hw), (0.0, ht, -hw),  # 0..3: -Z
+        (0.0, -ht,  hw), (L, -ht,  hw), (L, ht,  hw), (0.0, ht,  hw),  # 4..7: +Z
+    ]
+    # Same winding as make_box_mesh: CCW viewed from outside, normals out.
+    faces = [
+        (0, 3, 2, 1),  # -Z
+        (4, 5, 6, 7),  # +Z
+        (0, 1, 5, 4),  # -Y
+        (1, 2, 6, 5),  # +X
+        (2, 3, 7, 6),  # +Y
+        (3, 0, 4, 7),  # -X
     ]
 
     mesh = bpy.data.meshes.new(name)

@@ -492,57 +492,84 @@ they don't, the operator reports an error.
 def execute(self, context):
     sp = context.scene.praxova_framing
     level = sp.active_level
-    
+
     # 1. Pre-validation: Level set
-    if not level or not level.praxova_level.is_level:
-        self.report({'ERROR'}, "No active Level. Use Building tab to select one.")
+    if level is None or not level.praxova_level.is_level:
+        self.report({'ERROR'}, "No active Level. Use the Building tab to select one.")
         return {'CANCELLED'}
-    
-    # 2. Find the Roof under this Level
-    roof = next((c for c in level.children 
-                 if c.praxova_roof.is_roof), None)
-    if not roof:
-        self.report({'ERROR'}, "Active Level has no Roof. Use Roof Framing tab to add one.")
+
+    # 2. Find the Roof under this Level (one per Level in v0.7.0)
+    roof = next(
+        (c for c in level.children
+         if getattr(c, 'praxova_roof', None) is not None
+         and c.praxova_roof.is_roof),
+        None,
+    )
+    if roof is None:
+        self.report({'ERROR'}, "Active Level has no Roof. Use the Roof Framing tab to add one.")
         return {'CANCELLED'}
-    
+
     rp = roof.praxova_roof
-    
-    # 3. Validate Roof
+
+    # 3. Validate Roof (bearing walls set / parallel / same height /
+    #    span within single-piece bottom-chord limit / pitch sane)
     valid, msg = templates.validate_roof(rp, level)
     if not valid:
         self.report({'ERROR'}, msg)
         return {'CANCELLED'}
-    
-    # 4. Compute truss geometry once (all trusses share design)
-    truss_layout = templates.compute_truss_layout(rp)
-    member_specs = templates.truss_member_lengths_and_angles(rp, truss_layout)
-    
-    # 5. Delete existing Truss children of this Roof
+
+    # 4. Compute geometry once (all trusses in a Roof share the design).
+    #    The Commit-1 helpers return plain dicts and may raise ValueError
+    #    on degenerate geometry or an unknown truss_type.
+    try:
+        layout = templates.compute_truss_layout(rp)
+        member_specs = templates.truss_member_lengths_and_angles(rp, layout)
+        placements = templates.compute_truss_placements(rp, layout)
+    except ValueError as e:
+        self.report({'ERROR'}, str(e))
+        return {'CANCELLED'}
+
+    # 5. Delete existing Truss children of this Roof (delete-and-
+    #    regenerate; no per-truss edit semantics in v0.7.0).
     for child in list(roof.children):
-        if child.praxova_truss.is_truss:
-            _delete_object_and_children(child)
-    
-    # 6. Compute truss world placements
-    placements = templates.compute_truss_placements(rp, truss_layout)
-    
-    # 7. Create each truss
-    for i, placement in enumerate(placements, start=1):
-        truss_empty = _create_truss_empty(
-            name=f"Truss_{i:02d}",
+        if (getattr(child, 'praxova_truss', None) is not None
+                and child.praxova_truss.is_truss):
+            _delete_object_tree(child)
+
+    # 6. Roof world transform must be current before we read it for the
+    #    matrix_parent_inverse placement idiom.
+    context.view_layer.update()
+    roof_inv = roof.matrix_world.inverted()
+
+    # 7. Create each truss Empty + build its members.
+    for placement in placements:
+        truss_empty = _make_truss_empty(
+            context,
+            name=f"Truss_{placement['truss_index']:02d}",
             parent=roof,
-            world_location=placement.location,
-            world_rotation=placement.rotation,
+            parent_inverse=roof_inv,
+            world_location=placement['world_location'],     # inches
+            world_rotation=placement['world_rotation_euler'], # radians
         )
-        _build_truss_children(truss_empty, member_specs)
-    
-    # 8. Report
+        _build_truss_members(context, truss_empty, member_specs)
+
+    # 8. Report + select the Roof.
+    _set_active_only(context, roof)
     self.report(
         {'INFO'},
-        f"Framed {len(placements)} {rp.truss_type} trusses "
-        f"(span {truss_layout.span_in:.1f}\", pitch {_format_pitch(rp)})",
+        f"Framed {len(placements)} {rp.truss_type} truss"
+        f"{'es' if len(placements) != 1 else ''} "
+        f"(span {layout['span_in']:.1f}\", pitch {_format_pitch(rp)})",
     )
     return {'FINISHED'}
 ```
+
+Key dict keys (from Commit 1): `layout['span_in']`,
+`placement['truss_index']`, `placement['world_location']` (inches, 3-tuple),
+`placement['world_rotation_euler']` (radians, 3-tuple), and each member spec
+carries `'length_in'`, `'cut_angle_start_deg'`, `'cut_angle_end_deg'`,
+`'orientation'`, `'nominal'`, `'object_name_suffix'`, `'truss_local_origin'`
+(inches, 3-tuple), `'truss_local_axis_direction'` (unit 3-tuple).
 
 ## New Helpers in `templates.py`
 
