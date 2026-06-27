@@ -8,18 +8,22 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.7.0 RPC surface end-to-end (18 methods — unchanged
-from v0.6.2; v0.6.25 through v0.6.50 were bug-fix / UI-only cycles
-with no bridge schema changes, v0.6.51 added T-joint bridge surface
-inside existing handlers, v0.6.60 added CALIFORNIA + LADDER_BLOCKING
-L-corner styles operator-side, v0.6.61 extended the wire format to
-accept them — joint-type / corner-style combo check via set
-membership, AUTO-aware LADDER_BLOCKING wall-height pre-flight via
-Building walk-up, and per-style Object-name counters
-(n_corner_backers, n_ladder_blocks) on walls_framed; and v0.7.0
-adds site-built Fink trusses operator/UI/cut-list side without any
-new bridge surface — truss bridge parity lands in v0.7.1; still 18
-methods): ping (with addon_version and method_count
+Covers the in-progress v0.7.1 RPC surface end-to-end (19 methods —
+v0.6.2 was the prior count of 18 and stayed there through v0.7.0;
+v0.6.25 through v0.6.50 were bug-fix / UI-only cycles with no bridge
+schema changes, v0.6.51 added T-joint bridge surface inside existing
+handlers, v0.6.60 added CALIFORNIA + LADDER_BLOCKING L-corner styles
+operator-side, v0.6.61 extended the wire format to accept them —
+joint-type / corner-style combo check via set membership, AUTO-aware
+LADDER_BLOCKING wall-height pre-flight via Building walk-up, and per-
+style Object-name counters (n_corner_backers, n_ladder_blocks) on
+walls_framed; v0.7.0 added site-built Fink trusses operator/UI/cut-
+list side without any new bridge surface, and v0.7.1 adds that bridge
+surface as the new frame_roof method — one CREATE/REBUILD handler
+mirroring frame_wall's single-method shape, so 18 -> 19 methods —
+note the addon_version assertion stays at "0.7.0" through Commit 3
+and bumps to "0.7.1" in Commit 4 atomically with the add-on package
+bump): ping (with addon_version and method_count
 assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
 duplication, edge-to-edge fill, wall framing with optional door/window
@@ -189,11 +193,29 @@ def run(host: str, port: int) -> int:
         # suffix and cut-angle annotations). Operator/UI/cut-list
         # cycle — method_count stays 18, truss bridge parity (and
         # truss smoke coverage) lands in v0.7.1.
+        # v0.7.1 Commit 1: method_count 18 -> 19 for the new frame_roof
+        # handler (a single CREATE/REBUILD method mirroring frame_wall).
+        # The addon_version assertion stays pinned at 0.7.0 until the
+        # cycle's Commit 4 bumps the add-on's __init__.py / manifest
+        # together with this assertion — the bridge reports addon_
+        # version from the add-on package's __version__ (not from the
+        # mcp_server package), so this pin must move atomically with
+        # the add-on bump or the smoke test will fail mid-cycle.
+        # v0.7.1 Commit 3 adds the truss smoke steps below ([49]-[58]):
+        # frame_roof CREATE (full config + carpenter-string pitch
+        # mapping), three REBUILD omit-preserves reconfigures (heel,
+        # then eave, then CUSTOM pitch — each changing one field at a
+        # time, created=False, prior fields preserved), the validate_
+        # roof negatives (non-wall bearing wall, unset bearing walls —
+        # with CREATE rollback verified by a follow-up CREATE
+        # succeeding on the same Level), and the A-suffix / cut-angle
+        # annotations in generate_cutlist now that trusses are
+        # reachable via the bridge.
         assert r["addon_version"] == "0.7.0", (
             f"expected addon_version 0.7.0, got {r['addon_version']!r}"
         )
-        assert r["method_count"] == 18, (
-            f"expected 18 methods, got {r['method_count']}"
+        assert r["method_count"] == 19, (
+            f"expected 19 methods, got {r['method_count']}"
         )
 
         print("\n[2] get_scene_info")
@@ -2221,6 +2243,372 @@ def run(host: str, port: int) -> int:
         assert r["n_joints"] == 3, (
             f"after cleanup, three valid joints should remain; "
             f"expected 3, got {r['n_joints']}"
+        )
+
+        # ==================================================================
+        # v0.7.1: roof / truss bridge surface ([49]-[58])
+        # ==================================================================
+        # frame_roof is one method covering both CREATE (Level has no Roof
+        # yet) and REBUILD (omit-preserves reconfigure-and-reframe) — same
+        # single-method shape as frame_wall.
+        #
+        # Setup: a dedicated Building + Level + two PARALLEL bearing walls
+        # (the prior v0.6 rectangle uses L-corner joints so the walls are
+        # perpendicular — useless for roof bearing). Two 16' walls offset
+        # 12' apart in Y: at 24" OC the bearing length gives 9 trusses
+        # (192" / 24" + 1, end-flush), and 12' is the perpendicular span
+        # carried by the bottom chord.
+        #
+        # [49]-[51]: setup
+        # [52]: CREATE happy path (6/12, 12" eave, 0 heel)
+        # [53]: REBUILD heel=16 only — verifies omit-preserves keeps pitch
+        # [54]: REBUILD eave=0 only — cumulative preserve (heel from [53])
+        # [55]: REBUILD pitch=CUSTOM rise=7.5 — enum round-trip
+        # [56]: generate_cutlist — truss 'A' suffix + cut-angle annotation
+        # [57]: negative — non-wall bearing wall (INVALID_PARAMS)
+        # [58]: negative — unset bearing walls + atomicity (the failed
+        #       CREATE must leave no stranded Roof, proved by a follow-up
+        #       CREATE on the same Level returning created=True)
+
+        print("\n[49] add_building (fresh) for v0.7.1 roof flow")
+        r = cli.call("add_building", {})
+        roof_building_name = r["building_name"]
+        roof_level_name = r["level_name"]
+        print(
+            f"  -> building={roof_building_name}, "
+            f"level={roof_level_name}"
+        )
+
+        print(
+            f"\n[50] frame_wall bearing wall A "
+            f"(16' at origin) under {roof_level_name}"
+        )
+        # 16' = 192" bearing length. At 24" truss OC -> 9 trusses
+        # (192/24 = 8 bays + 1 end-flush stud = 9). The wall's own
+        # stud spacing is irrelevant to the roof — only length /
+        # height / parallelism matter for the bearing-wall pair.
+        r = cli.call("frame_wall", {
+            "level": roof_level_name,
+            "length_in": 192.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+        })
+        bearing_a_name = r["wall_name"]
+        print(f"  -> bearing_a={bearing_a_name}")
+
+        print(
+            "\n[51] frame_wall bearing wall B "
+            "(16' parallel, offset 12' in +Y)"
+        )
+        # Parallel to A (no rotation), same length/height. Offset
+        # 12' = 3.6576 m in +Y so the perpendicular span between
+        # the walls' centerlines is 12'. The reported span_in is
+        # exterior-face to exterior-face, which is the centerline
+        # offset plus a wall-thickness contribution, so it lands
+        # close to (but not exactly) 144" — assert with a tolerance
+        # band, NOT a pinned equality.
+        r = cli.call("frame_wall", {
+            "level": roof_level_name,
+            "length_in": 192.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+            "location_m": [0.0, 3.6576, 0.0],
+        })
+        bearing_b_name = r["wall_name"]
+        print(f"  -> bearing_b={bearing_b_name}")
+
+        print(
+            f"\n[52] frame_roof CREATE under {roof_level_name} "
+            f"(6/12, 12\" eave, 0 heel)"
+        )
+        r = cli.call("frame_roof", {
+            "level_name": roof_level_name,
+            "bearing_wall_a_name": bearing_a_name,
+            "bearing_wall_b_name": bearing_b_name,
+            "pitch": "6/12",
+            "eave_overhang_in": 12.0,
+            "heel_height_in": 0.0,
+        })
+        print(
+            f"  -> roof={r['roof_name']}, created={r['created']}, "
+            f"truss_count={r['truss_count']}, "
+            f"span_in={r['span_in']:.1f}"
+        )
+        assert r["created"] is True, (
+            f"first frame_roof should CREATE, "
+            f"got created={r['created']}"
+        )
+        assert r["truss_count"] == 9, (
+            f"192\" bearing wall at 24\" OC -> 9 trusses, "
+            f"got {r['truss_count']}"
+        )
+        assert r["pitch"] == "6/12", (
+            f"expected pitch '6/12', got {r['pitch']!r}"
+        )
+        assert r["config"]["pitch"] == "6/12", (
+            f"config.pitch should be '6/12', "
+            f"got {r['config']['pitch']!r}"
+        )
+        assert r["config"]["bearing_wall_a_name"] == bearing_a_name, (
+            f"config.bearing_wall_a_name should echo "
+            f"{bearing_a_name!r}, got "
+            f"{r['config']['bearing_wall_a_name']!r}"
+        )
+        assert r["config"]["bearing_wall_b_name"] == bearing_b_name, (
+            f"config.bearing_wall_b_name should echo "
+            f"{bearing_b_name!r}, got "
+            f"{r['config']['bearing_wall_b_name']!r}"
+        )
+        assert len(r["trusses_framed"]) == r["truss_count"], (
+            f"trusses_framed length {len(r['trusses_framed'])} != "
+            f"truss_count {r['truss_count']}"
+        )
+        # Uniform Fink geometry: every entry identical, no heel.
+        for t in r["trusses_framed"]:
+            assert t["n_top_chords"] == 2, (
+                f"Fink top chords = 2, got {t['n_top_chords']}"
+            )
+            assert t["n_bottom_chords"] == 1, (
+                f"bottom chord = 1, got {t['n_bottom_chords']}"
+            )
+            assert t["n_webs"] == 4, (
+                f"Fink webs = 4, got {t['n_webs']}"
+            )
+            assert t["n_heel_blocks"] == 0, (
+                f"0 heel (heel_height 0), "
+                f"got {t['n_heel_blocks']}"
+            )
+            assert t["n_members"] == 7, (
+                f"7 members (no heel), got {t['n_members']}"
+            )
+        # span sanity: face-to-face ~144" + wall thickness, so a band
+        # rather than an exact pin. validate_roof rejects degenerate
+        # spans, so a value in this range proves the geometry is sane.
+        assert 140.0 < r["span_in"] < 152.0, (
+            f"span_in should be ~144\" face-to-face, "
+            f"got {r['span_in']}"
+        )
+
+        print(
+            f"\n[53] frame_roof REBUILD {roof_level_name} "
+            f"(heel_height_in=16 only — omit-preserves)"
+        )
+        # Raw JSON-RPC call sends ONLY heel_height_in — the
+        # FastMCP-tool always-sends-scalars caveat does not apply
+        # here. Pitch / eave / nominals / bearing walls must
+        # preserve from step [52].
+        r = cli.call("frame_roof", {
+            "level_name": roof_level_name,
+            "heel_height_in": 16.0,
+        })
+        print(
+            f"  -> created={r['created']}, "
+            f"heel={r['config']['heel_height_in']}, "
+            f"pitch={r['config']['pitch']}"
+        )
+        assert r["created"] is False, (
+            f"second frame_roof should REBUILD, "
+            f"got created={r['created']}"
+        )
+        assert r["config"]["heel_height_in"] == 16.0, (
+            f"heel should be 16.0, "
+            f"got {r['config']['heel_height_in']}"
+        )
+        assert r["config"]["pitch"] == "6/12", (
+            f"pitch should be preserved at '6/12' on REBUILD, "
+            f"got {r['config']['pitch']!r}"
+        )
+        assert (
+            r["config"]["bearing_wall_a_name"] == bearing_a_name
+        ), (
+            f"bearing_wall_a should be preserved at "
+            f"{bearing_a_name!r}, got "
+            f"{r['config']['bearing_wall_a_name']!r}"
+        )
+        for t in r["trusses_framed"]:
+            assert t["n_heel_blocks"] == 2, (
+                f"energy heel -> 2 heel blocks, "
+                f"got {t['n_heel_blocks']}"
+            )
+            assert t["n_members"] == 9, (
+                f"7 + 2 heel = 9 members, "
+                f"got {t['n_members']}"
+            )
+
+        print(
+            f"\n[54] frame_roof REBUILD {roof_level_name} "
+            f"(eave_overhang_in=0 only — cumulative preserve)"
+        )
+        r = cli.call("frame_roof", {
+            "level_name": roof_level_name,
+            "eave_overhang_in": 0.0,
+        })
+        print(
+            f"  -> created={r['created']}, "
+            f"eave={r['config']['eave_overhang_in']}, "
+            f"heel={r['config']['heel_height_in']}"
+        )
+        assert r["created"] is False
+        assert r["config"]["eave_overhang_in"] == 0.0, (
+            f"eave should be 0.0 (Monopoly), "
+            f"got {r['config']['eave_overhang_in']}"
+        )
+        # Cumulative omit-preserves: the heel from [53] survives.
+        assert r["config"]["heel_height_in"] == 16.0, (
+            f"heel from prior REBUILD should persist at 16.0, "
+            f"got {r['config']['heel_height_in']}"
+        )
+
+        print(
+            f"\n[55] frame_roof REBUILD {roof_level_name} "
+            f"(pitch=CUSTOM, rise=7.5 — enum round-trip)"
+        )
+        r = cli.call("frame_roof", {
+            "level_name": roof_level_name,
+            "pitch": "CUSTOM",
+            "pitch_rise_in": 7.5,
+        })
+        print(
+            f"  -> created={r['created']}, "
+            f"pitch={r['config']['pitch']}, "
+            f"rise={r['config']['pitch_rise_in']}"
+        )
+        assert r["created"] is False
+        assert r["config"]["pitch"] == "CUSTOM", (
+            f"pitch should round-trip 'CUSTOM', "
+            f"got {r['config']['pitch']!r}"
+        )
+        assert r["config"]["pitch_rise_in"] == 7.5, (
+            f"pitch_rise_in should be 7.5, "
+            f"got {r['config']['pitch_rise_in']}"
+        )
+
+        print(
+            "\n[56] generate_cutlist — "
+            "truss 'A' suffix + cut-angle annotations"
+        )
+        # The Roof from [52]-[55] is now framed at CUSTOM 7.5/12 with
+        # 16" heel and 0" eave. Exact label format depends on v0.7.0
+        # Commit 5's cut-list output, but the ANGLED-suffix 'A' label
+        # and the degree-sign annotation are stable contracts: only
+        # angled truss members carry them, so their presence proves
+        # trusses reached the cut list with cut-angle metadata.
+        r = cli.call("generate_cutlist")
+        text = r["text"]
+        assert " A" in text, (
+            "expected an ANGLED 'A'-suffixed lumber label in the "
+            "cut list (e.g. '2x6x.. A')"
+        )
+        assert "°" in text, (
+            "expected a cut-angle degree annotation (°) on "
+            "angled truss pieces in the cut list"
+        )
+        print(
+            "  -> cut list contains ANGLED 'A' labels and degree "
+            "annotations"
+        )
+
+        print(
+            "\n[57] negative: frame_roof CREATE with a non-wall "
+            "bearing wall (expect INVALID_PARAMS)"
+        )
+        # Fresh Level so this is a clean CREATE attempt. Pass the
+        # Building Empty's name as bearing_wall_a_name — not a wall,
+        # so _resolve_wall_in_level rejects in _parse_roof_config
+        # BEFORE the add_roof operator runs.
+        r = cli.call("add_building", {})
+        bad_level_name = r["level_name"]
+        bad_building_name = r["building_name"]
+        try:
+            cli.call("frame_roof", {
+                "level_name": bad_level_name,
+                "bearing_wall_a_name": bad_building_name,
+                "bearing_wall_b_name": bad_building_name,
+            })
+            raise AssertionError(
+                "frame_roof with a non-wall bearing wall should "
+                "have raised INVALID_PARAMS"
+            )
+        except RuntimeError as e:
+            err_text = str(e)
+            assert (
+                "-32602" in err_text
+                or "INVALID_PARAMS" in err_text
+            ), (
+                f"expected INVALID_PARAMS code, got: {err_text!r}"
+            )
+        print("  -> rejected non-wall bearing wall as expected")
+
+        print(
+            "\n[58] negative: frame_roof CREATE with unset bearing "
+            "walls (expect INVALID_PARAMS + atomic rollback)"
+        )
+        # Fresh Level. The Level has no Roof, so this is CREATE.
+        # With no bearing walls in the params, the add_roof operator
+        # runs, the config write leaves both walls None, then
+        # validate_roof rejects. CREATE atomicity requires the
+        # just-created Roof Empty to be removed before the error
+        # surfaces, so a follow-up CREATE on the same Level (this
+        # time with good bearing walls) must report created=True
+        # (a stranded Roof would make it a REBUILD instead).
+        r = cli.call("add_building", {})
+        atomic_level_name = r["level_name"]
+        try:
+            cli.call(
+                "frame_roof", {"level_name": atomic_level_name},
+            )
+            raise AssertionError(
+                "frame_roof with unset bearing walls should have "
+                "raised INVALID_PARAMS"
+            )
+        except RuntimeError as e:
+            err_text = str(e)
+            assert (
+                "-32602" in err_text
+                or "INVALID_PARAMS" in err_text
+            ), (
+                f"expected INVALID_PARAMS code, got: {err_text!r}"
+            )
+            assert "Roof:" in err_text, (
+                f"expected verbatim 'Roof: ...' validation "
+                f"message, got: {err_text!r}"
+            )
+        print(
+            "  -> rejected unset bearing walls with 'Roof:' message"
+        )
+        # Atomicity proof: build two parallel walls under this same
+        # Level and CREATE again. If the failed CREATE left a
+        # stranded Roof, this call would be a REBUILD (created=False)
+        # instead of a CREATE — so created=True is the assertion
+        # that nails atomicity end-to-end.
+        r = cli.call("frame_wall", {
+            "level": atomic_level_name,
+            "length_in": 144.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+        })
+        atomic_a = r["wall_name"]
+        r = cli.call("frame_wall", {
+            "level": atomic_level_name,
+            "length_in": 144.0,
+            "height_in": 96.0,
+            "nominal": "2x4",
+            "location_m": [0.0, 2.4384, 0.0],
+        })
+        atomic_b = r["wall_name"]
+        r = cli.call("frame_roof", {
+            "level_name": atomic_level_name,
+            "bearing_wall_a_name": atomic_a,
+            "bearing_wall_b_name": atomic_b,
+        })
+        assert r["created"] is True, (
+            "CREATE after a failed CREATE should be created=True "
+            "(proving the failed CREATE left no stranded Roof); "
+            f"got created={r['created']}"
+        )
+        print(
+            "  -> failed CREATE left no stranded Roof "
+            "(atomicity confirmed)"
         )
 
         print("\nAll checks passed.")
