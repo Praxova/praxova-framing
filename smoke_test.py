@@ -8,15 +8,17 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the full v0.6.61 RPC surface end-to-end (18 methods — unchanged
+Covers the full v0.7.0 RPC surface end-to-end (18 methods — unchanged
 from v0.6.2; v0.6.25 through v0.6.50 were bug-fix / UI-only cycles
 with no bridge schema changes, v0.6.51 added T-joint bridge surface
 inside existing handlers, v0.6.60 added CALIFORNIA + LADDER_BLOCKING
-L-corner styles operator-side, and v0.6.61 extends the wire format
-to accept them — joint-type / corner-style combo check via set
+L-corner styles operator-side, v0.6.61 extended the wire format to
+accept them — joint-type / corner-style combo check via set
 membership, AUTO-aware LADDER_BLOCKING wall-height pre-flight via
 Building walk-up, and per-style Object-name counters
-(n_corner_backers, n_ladder_blocks) on walls_framed; still 18
+(n_corner_backers, n_ladder_blocks) on walls_framed; and v0.7.0
+adds site-built Fink trusses operator/UI/cut-list side without any
+new bridge surface — truss bridge parity lands in v0.7.1; still 18
 methods): ping (with addon_version and method_count
 assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
@@ -181,8 +183,14 @@ def run(host: str, port: int) -> int:
         # frame_building — mirrors v0.6.51 step [41] structure).
         # method_count stays 18 — new styles extend existing
         # handlers, no new RPCs.
-        assert r["addon_version"] == "0.6.61", (
-            f"expected addon_version 0.6.61, got {r['addon_version']!r}"
+        # v0.7.0: addon_version 0.6.61 -> 0.7.0 for site-built Fink
+        # truss roof framing (Roof container + add_roof / frame_roof
+        # operators + Roof Framing UI panel + cut-list ANGLED 'A'
+        # suffix and cut-angle annotations). Operator/UI/cut-list
+        # cycle — method_count stays 18, truss bridge parity (and
+        # truss smoke coverage) lands in v0.7.1.
+        assert r["addon_version"] == "0.7.0", (
+            f"expected addon_version 0.7.0, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 18, (
             f"expected 18 methods, got {r['method_count']}"

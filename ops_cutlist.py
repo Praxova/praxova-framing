@@ -152,11 +152,15 @@ def _format_lumber_sections(pieces: list[dict]) -> tuple[list[str], int]:
 
     Args:
         pieces: list of per-piece dicts with keys:
-            label        - stock cutlist label, e.g. "2x4x8 V"
-            nominal      - e.g. "2x4"
-            cut_in       - float, final cut length in inches
-            stock_in     - float, purchased stock length in inches
-            orient_short - "V" or "H"
+            label                - stock cutlist label, e.g. "2x4x8 V"
+            nominal              - e.g. "2x4"
+            cut_in               - float, final cut length in inches
+            stock_in             - float, purchased stock length in inches
+            orient_short         - "V" / "H" / "A" (v0.7: A = ANGLED)
+            cut_angle_start_deg  - float, degrees from square at x=0
+                                   end (v0.7; 0.0 for square wall stock)
+            cut_angle_end_deg    - float, degrees from square at the
+                                   far end (v0.7; 0.0 for square stock)
 
     Returns:
         (lines, total_piece_count). Total is the number of physical pieces;
@@ -166,12 +170,17 @@ def _format_lumber_sections(pieces: list[dict]) -> tuple[list[str], int]:
     if not pieces:
         return [], 0
 
-    # Cut list aggregation: key = (label, cut_in, stock_in). Two pieces
-    # with identical stock label AND identical cut length collapse into
-    # one row; identical label but different cuts (e.g. 91.5" vs 89" cuts
-    # of the same 2x4x8 V) appear as separate rows, which is what you want
-    # at the saw.
-    cut_counter: dict[tuple[str, float, float], int] = {}
+    # Cut list aggregation: key = (label, cut_in, stock_in, a_start, a_end).
+    # Two pieces with identical stock label AND identical cut length AND
+    # identical cut angles collapse into one row; any one of those differ
+    # and the pieces appear as separate rows — which is what you want at
+    # the saw (a 91.5" square stud and a 91.5" 26.6°/26.6° top chord are
+    # different cuts on the miter saw, even though both are 91.5" 2x4x8
+    # pieces). v0.7 added the two angle components; wall pieces carry
+    # 0.0 / 0.0, so non-truss aggregation is byte-for-byte unchanged.
+    cut_counter: dict[
+        tuple[str, float, float, float, float], int
+    ] = {}
 
     # Order aggregation: key = (nominal_sort_tuple, stock_ft).
     # Value = {orient_short: count}. Numeric nominal tuple so '2x10' sorts
@@ -179,7 +188,10 @@ def _format_lumber_sections(pieces: list[dict]) -> tuple[list[str], int]:
     order_data: dict[tuple[tuple[int, int], int], dict[str, int]] = {}
 
     for p in pieces:
-        cut_key = (p['label'], p['cut_in'], p['stock_in'])
+        cut_key = (
+            p['label'], p['cut_in'], p['stock_in'],
+            p['cut_angle_start_deg'], p['cut_angle_end_deg'],
+        )
         cut_counter[cut_key] = cut_counter.get(cut_key, 0) + 1
 
         try:
@@ -204,7 +216,7 @@ def _format_lumber_sections(pieces: list[dict]) -> tuple[list[str], int]:
         cut_counter.items(),
         key=lambda kv: _lumber_sort_key(kv[0][0]) + (kv[0][1],),
     )
-    for (label, cut_in, stock_in), qty in cut_sorted:
+    for (label, cut_in, stock_in, a_start, a_end), qty in cut_sorted:
         total += qty
         # Epsilon comparison: floats stored on a FloatProperty can pick up
         # tiny rounding error. 0.01" is well below any practical cut
@@ -213,6 +225,16 @@ def _format_lumber_sections(pieces: list[dict]) -> tuple[list[str], int]:
             display = f'{label}  \u2192 cut to {_format_inches(cut_in)}"'
         else:
             display = label
+        # v0.7: angle annotation for truss members (and any future piece
+        # whose ends aren't square). Format: (start\u00b0 / end\u00b0). _format_
+        # inches strips trailing zeros, so 26.6 stays 26.6 and 45.0 -> 45.
+        # Square-ended pieces (wall stock, square heel blocks, square
+        # bottom chords) carry 0.0 / 0.0 and skip the annotation entirely.
+        if a_start != 0.0 or a_end != 0.0:
+            display += (
+                f"  ({_format_inches(a_start)}\u00b0"
+                f" / {_format_inches(a_end)}\u00b0)"
+            )
         lines.append(f"  {qty:4d}  x  {display}")
 
     # --- Subsection 2: ORDER SUMMARY ---
@@ -270,7 +292,22 @@ def _build_report() -> tuple[str, int, dict[str, int]]:
                 'nominal': tag.nominal_size,
                 'cut_in': cut_in,
                 'stock_in': stock_in,
-                'orient_short': 'V' if tag.orientation == 'VERTICAL' else 'H',
+                # v0.7: ANGLED -> 'A' alongside VERTICAL -> 'V', else 'H'.
+                # Mirrors templates.lumber_cutlist_label's suffix dict so
+                # the orientation glyph matches the cutlist_label suffix.
+                'orient_short': {
+                    'VERTICAL': 'V', 'ANGLED': 'A',
+                }.get(tag.orientation, 'H'),
+                # v0.7: cut-angle metadata for the CUT LIST annotation.
+                # Wall studs/plates default to 0.0 / 0.0 (FloatProperty
+                # defaults from PraxovaLumberProps), so non-truss pieces
+                # render unchanged.
+                'cut_angle_start_deg': round(
+                    float(tag.cut_angle_start_deg), 1,
+                ),
+                'cut_angle_end_deg': round(
+                    float(tag.cut_angle_end_deg), 1,
+                ),
             })
 
     filename = bpy.path.basename(bpy.data.filepath) or "(unsaved)"

@@ -14,7 +14,7 @@ external MCP server can drive the same operators from an LLM agent.
 # imported by server/handlers.py's ping() so the bridge doesn't carry its
 # own copy. blender_manifest.toml is the canonical version for Blender's
 # extension loader; the two must be bumped together each release.
-__version__ = "0.6.61"
+__version__ = "0.7.0"
 
 import os
 
@@ -100,6 +100,10 @@ def register():
         properties.PraxovaJoint,
         properties.PraxovaLevelProps,
         properties.PraxovaBuildingProps,
+        # v0.7: Roof container with bearing-wall PointerProperty pair; Truss
+        # marker hook for v0.7.0, prep for per-truss variation in v0.7.50.
+        properties.PraxovaTrussProps,
+        properties.PraxovaRoofProps,
         properties.PraxovaSceneProps,
         # Operators.
         ops_add.PRAXOVA_OT_add_lumber,
@@ -119,6 +123,9 @@ def register():
         ops_frame.PRAXOVA_OT_add_joint,
         ops_frame.PRAXOVA_OT_remove_joint,
         ops_frame.PRAXOVA_OT_frame_building,
+        # v0.7: Roof container + truss framing orchestrator.
+        ops_frame.PRAXOVA_OT_add_roof,
+        ops_frame.PRAXOVA_OT_frame_roof,
         ops_cutlist.PRAXOVA_OT_generate_cutlist,
         ops_units.PRAXOVA_OT_set_imperial_units,
         # v0.3: MCP bridge operators.
@@ -147,6 +154,10 @@ def register():
         ui.PRAXOVA_MT_panels_submenu,
         ui.PRAXOVA_PT_wall_framing,
         ui.PRAXOVA_PT_building,
+        # v0.7: Roof Framing tab — sits between Building and MCP Bridge
+        # in the N-panel tab order (panel order follows registration
+        # order within the same bl_category).
+        ui.PRAXOVA_PT_roof_framing,
         # v0.6: MCP Bridge moved to its own panel — global add-on
         # capability, always visible regardless of Building/Level state.
         ui.PRAXOVA_PT_mcp_bridge,
@@ -180,6 +191,17 @@ def register():
     bpy.types.Object.praxova_building = bpy.props.PointerProperty(
         type=properties.PraxovaBuildingProps,
     )
+    # v0.7: Roof container and Truss marker pointers, mirroring v0.6's
+    # praxova_wall / praxova_level / praxova_building pattern. Every Object
+    # carries these pointers; the is_roof / is_truss discriminators
+    # distinguish Praxova-managed Roof / Truss Empties from arbitrary
+    # scene Objects.
+    bpy.types.Object.praxova_truss = bpy.props.PointerProperty(
+        type=properties.PraxovaTrussProps,
+    )
+    bpy.types.Object.praxova_roof = bpy.props.PointerProperty(
+        type=properties.PraxovaRoofProps,
+    )
     bpy.types.Scene.praxova_framing = bpy.props.PointerProperty(
         type=properties.PraxovaSceneProps,
     )
@@ -200,6 +222,8 @@ def unregister():
     del bpy.types.Object.praxova_wall
     del bpy.types.Object.praxova_level
     del bpy.types.Object.praxova_building
+    del bpy.types.Object.praxova_truss
+    del bpy.types.Object.praxova_roof
     del bpy.types.Scene.praxova_framing
 
     for cls in reversed(_registered_classes):
