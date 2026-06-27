@@ -1,9 +1,21 @@
 """Menus and N-panel for Praxova Framing."""
 
+import math
+
 import bpy
 
 from . import templates
 from . import server as _server  # v0.3: bridge state for the MCP Bridge subpanel
+
+
+def _fmt_ft_in(inches: float) -> str:
+    """Format inches as feet-inches for a carpenter-eye readout, e.g.
+    144.0 -> "12' 0.0\"". Used by the v0.7 Roof Framing tab's span /
+    peak height / top chord readouts. Kept local to ui.py — same
+    pattern the Building tab's wall_a_position_in readout inlines."""
+    feet_whole = int(inches // 12)
+    inches_rem = inches - feet_whole * 12
+    return f"{feet_whole}' {inches_rem:.1f}\""
 
 
 # ===========================================================================
@@ -1050,6 +1062,178 @@ class PRAXOVA_PT_building(bpy.types.Panel):
             )
             if not ok:
                 box.label(text=msg, icon='ERROR')
+
+
+# ===========================================================================
+# Roof Framing tab (v0.7)
+# ===========================================================================
+
+def _roof_in_level(level):
+    """Return the single Roof Empty under `level`, or None.
+
+    v0.7.0 allows one Roof per Level; frame_roof and add_roof both find
+    it by this same walk (is_roof == True among the Level's children).
+    Mirrors _walls_in_level's shape so the Roof Framing tab and the
+    Building tab use the same parent → children-with-is_X discovery
+    pattern.
+    """
+    if level is None:
+        return None
+    return next(
+        (c for c in level.children
+         if getattr(c, 'praxova_roof', None) is not None
+         and c.praxova_roof.is_roof),
+        None,
+    )
+
+
+class PRAXOVA_PT_roof_framing(bpy.types.Panel):
+    """Roof Framing panel — v0.7 site-built Fink trusses.
+
+    One Roof section, gated on the active Level (set in the Building
+    tab):
+
+      - No active Level → prompt to pick one in the Building tab.
+      - Level, no Roof  → Add Roof button.
+      - Level + Roof    → full Roof config: bearing-wall pickers,
+        pitch, eave overhang, heel height, member nominals, OC
+        spacing, a live preview (span / truss count / peak height /
+        top chord length), a live validation indicator, and Frame
+        Roof.
+
+    The bearing-wall pickers are plain Object pickers (mirrors the
+    joint tab's wall_a / wall_b — no PointerProperty `poll` filter,
+    which would require a properties.py edit). validate_roof provides
+    the live feedback in the panel, and frame_roof re-validates at
+    frame time. The live preview calls the same Commit-1 helpers
+    frame_roof uses, guarded so a half-set or invalid Roof never
+    throws in draw().
+    """
+
+    bl_idname = "PRAXOVA_PT_roof_framing"
+    bl_label = "Roof Framing"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Praxova"
+
+    def draw(self, context):
+        layout = self.layout
+        sp = context.scene.praxova_framing
+
+        # --- Roof section (gated on active Level) ---
+        box = layout.box()
+        box.label(text="Roof", icon='MOD_BUILD')
+
+        level = sp.active_level
+        is_level_valid = (
+            level is not None
+            and getattr(level, 'praxova_level', None) is not None
+            and level.praxova_level.is_level
+        )
+        if not is_level_valid:
+            box.label(
+                text="No active Level. Set one in the Building tab.",
+                icon='INFO',
+            )
+            return
+
+        box.label(
+            text=f"Active Level: {level.name}",
+            icon='SEQ_STRIP_META',
+        )
+
+        roof = _roof_in_level(level)
+        if roof is None:
+            box.label(text="This Level has no Roof yet.", icon='INFO')
+            box.operator("praxova.add_roof", icon='ADD')
+            return
+
+        rp = roof.praxova_roof
+
+        # --- Truss type ---
+        box.prop(rp, "truss_type")
+
+        # --- Bearing walls ---
+        col = box.column(align=True)
+        col.label(text="Bearing Walls:")
+        col.prop(rp, "bearing_wall_a", text="A")
+        col.prop(rp, "bearing_wall_b", text="B")
+
+        # --- Pitch (custom rise visible only for CUSTOM) ---
+        box.prop(rp, "pitch")
+        if rp.pitch == 'CUSTOM':
+            box.prop(rp, "pitch_rise_in")
+
+        # --- Eave / heel ---
+        box.prop(rp, "eave_overhang_in")
+        box.prop(rp, "heel_height_in")
+
+        # --- Member nominals ---
+        col = box.column(align=True)
+        col.label(text="Members:")
+        col.prop(rp, "top_chord_nominal", text="Top Chord")
+        col.prop(rp, "bottom_chord_nominal", text="Bottom Chord")
+        col.prop(rp, "web_nominal", text="Web")
+
+        # --- OC spacing ---
+        box.prop(rp, "oc_spacing_in")
+
+        # --- Live preview + validation ---
+        self._draw_preview(box, rp, level)
+
+        # --- Frame Roof button ---
+        # Stays visible even on validation failure (mirrors how the
+        # Building tab keeps Frame Building visible below its
+        # validation indicator). Clicking it re-runs validate_roof
+        # and surfaces the same first-failure message.
+        box.operator("praxova.frame_roof", icon='MOD_BUILD')
+
+    def _draw_preview(self, box, rp, level):
+        """Live span / count / peak / chord readout + validation line.
+
+        Guarded so draw() never raises: validate_roof first, then a
+        broad except around compute_truss_layout (which does matrix
+        math and trig and can raise on degenerate input — defense in
+        depth even though validate_roof is supposed to catch every
+        such case upstream).
+        """
+        valid, msg = templates.validate_roof(rp, level)
+        if not valid:
+            sub = box.column(align=True)
+            sub.label(text=msg, icon='ERROR')
+            return
+
+        try:
+            truss_layout = templates.compute_truss_layout(rp)
+        except Exception:
+            sub = box.column(align=True)
+            sub.scale_y = 0.7
+            sub.label(text="  Preview unavailable", icon='INFO')
+            return
+
+        span_in = truss_layout['span_in']
+        count = truss_layout['truss_count']
+        peak_in = truss_layout['peak_height_in']
+
+        # Top chord slope length — same formula Commit 1's
+        # truss_member_lengths_and_angles uses; computed locally for
+        # the readout to avoid building all 9 members per redraw.
+        # (S/2 + e) / cos(theta).
+        e = rp.eave_overhang_in
+        theta_deg = truss_layout['pitch_angle_deg']
+        top_len_in = (
+            (span_in / 2.0 + e)
+            / math.cos(math.radians(theta_deg))
+        )
+
+        col = box.column(align=True)
+        col.scale_y = 0.8
+        col.label(text=f"Span: {_fmt_ft_in(span_in)}", icon='INFO')
+        col.label(
+            text=f"Trusses: {count} @ {rp.oc_spacing_in}\" OC",
+        )
+        col.label(text=f"Peak height: {_fmt_ft_in(peak_in)}")
+        col.label(text=f"Top chord: {_fmt_ft_in(top_len_in)}")
 
 
 # ===========================================================================

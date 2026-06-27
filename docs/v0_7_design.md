@@ -721,8 +721,13 @@ Roof Framing tab:
 │   └── [Frame Roof] button
 ```
 
-The bearing wall pickers use `poll` functions that filter Object selection to
-walls in the active Level. The "Computed span readout" updates live as the
+The bearing wall pickers are plain `PointerProperty(Object)` dropdowns
+(`row.prop(rp, "bearing_wall_a", text="")`), matching the joint detail
+panel's `wall_a` / `wall_b` pickers — they accept any Object, and
+`validate_roof` (surfaced live below the fields and again at Frame Roof
+time) rejects non-wall / non-parallel / mismatched picks. No property-level
+`poll` filter is used (consistent with the rest of the add-on, and it keeps
+this an `ui.py`-only commit). The "Computed span readout" updates live as the
 user picks bearing walls or moves them in the viewport.
 
 ## Validation Rules
@@ -873,8 +878,9 @@ File: `ops_frame.py`
 File: `ui.py`
 
 - Add `PRAXOVA_PT_roof_framing` panel under the "Praxova" N-panel category
-- Add bearing wall pickers with `poll` filters restricting selection to walls
-  in the active Level
+- Add bearing wall pickers as plain `PointerProperty(Object)` dropdowns
+  (no property-level `poll` — matches the joint `wall_a` / `wall_b`
+  pattern; `validate_roof` provides the live feedback instead)
 - Add the live computed-span readout, pitch dropdown with CUSTOM branch, live
   preview (truss count, peak height, top chord slope length), live validation
   indicator, and Frame Roof button
