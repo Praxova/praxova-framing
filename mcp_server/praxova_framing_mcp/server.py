@@ -5,8 +5,9 @@ Desktop, etc.) can place lumber, place sheets, place metal panels, duplicate
 on-center, fill edge-to-edge, frame a wall with optional door and window
 openings, organize walls into Buildings and Levels with multi-wall re-framing
 in place, manage L-corner joints in three styles (three-stud, California, or
-ladder-blocking) and T joints between walls (v0.6 / v0.6.51 / v0.6.61), and
-generate cut lists in a live Blender session.
+ladder-blocking) and T joints between walls (v0.6 / v0.6.51 / v0.6.61),
+frame site-built Fink roof trusses on a Level's bearing-wall pair (v0.7.1),
+and generate cut lists in a live Blender session.
 
 Configuration (env vars, read at startup):
     PRAXOVA_BRIDGE_HOST     default: 127.0.0.1
@@ -1150,6 +1151,220 @@ def frame_building(level_name: str) -> dict:
     identify which wall needs adjustment).
     """
     return _call("frame_building", {"level_name": level_name})
+
+
+# ===========================================================================
+# Roof / truss framing (v0.7.1)
+# ===========================================================================
+
+@mcp.tool()
+def frame_roof(
+    level_name: str,
+    name: str | None = None,
+    bearing_wall_a_name: str | None = None,
+    bearing_wall_b_name: str | None = None,
+    truss_type: Literal["FINK"] = "FINK",
+    pitch: Literal[
+        "3/12", "4/12", "5/12", "6/12", "7/12",
+        "8/12", "9/12", "10/12", "12/12", "CUSTOM",
+    ] = "6/12",
+    pitch_rise_in: float = 6.0,
+    eave_overhang_in: float = 12.0,
+    heel_height_in: float = 0.0,
+    top_chord_nominal: str = "2x6",
+    bottom_chord_nominal: str = "2x6",
+    web_nominal: str = "2x4",
+    oc_spacing_in: Literal["12", "16", "19.2", "24"] = "24",
+) -> dict:
+    """Create-and-frame or reconfigure-and-reframe a Level's Roof.
+
+    Site-built Fink trusses, generated from a Roof container under a
+    Praxova Level. Mirrors frame_wall's single-method CREATE/REBUILD
+    shape:
+
+      - CREATE (the Level has no Roof yet): create a Roof Empty under
+        the Level and frame the trusses. Returns created=True.
+      - REBUILD (the Level already has a Roof): reconfigure the
+        existing Roof in place with omit-preserves semantics, then
+        re-frame the trusses. The Roof Empty is preserved (any
+        external references stay intact); only its truss children
+        are delete-and-regenerated. Returns created=False.
+
+    Mode is picked automatically by the presence of a Roof under the
+    Level — v0.7.0/.1 allows exactly one Roof per Level, so the
+    decision is unambiguous from `level_name`. There is no separate
+    add_roof / remove_roof / configure_roof tool — CREATE/REBUILD is
+    one tool, mirroring frame_wall.
+
+    Omit-preserves on REBUILD: omitted params preserve the Roof's
+    current values, so changing just the heel is
+    `frame_roof(level_name=..., heel_height_in=16)`. This is how you
+    reconfigure or replace a roof — no separate remove step.
+
+    Omit-preserves CAVEAT for this typed tool: scalar design params
+    (truss_type, pitch, pitch_rise_in, eave_overhang_in,
+    heel_height_in, the three nominals, oc_spacing_in) have typed
+    Python defaults and are ALWAYS sent to the bridge, so a REBUILD
+    via this tool re-asserts those defaults rather than preserving
+    prior values for scalars the caller didn't mention. This matches
+    frame_wall's tool behavior exactly. To preserve a non-default
+    scalar (e.g. an existing 12/12 pitch) across a REBUILD, pass it
+    explicitly. The conditional params — `name`, `bearing_wall_a_name`,
+    `bearing_wall_b_name` — DO preserve on omit through the typed tool
+    (sent only when not None). A raw JSON-RPC caller gets full
+    preserve-on-omit for every field.
+
+    Convention-agnostic bearing walls: any two parallel, equal-length,
+    equal-height walls under this Level can bear the trusses. Eave-
+    bearing (the residential convention, trusses spanning the long
+    walls) and gable-bearing (the chicken-coop case, trusses spanning
+    the short walls) are the same code path — you pick which two
+    walls bear the load.
+
+    Pitch: carpenter rise/run string ("6/12" = 6" of rise per 12" of
+    run). Use "CUSTOM" to dial in a non-standard rise via
+    `pitch_rise_in`. Monopoly-style flush eave via
+    `eave_overhang_in=0`; energy heel (full insulation depth over the
+    wall plate) via `heel_height_in > 0` (adds vertical heel blocks
+    at each bottom-chord end).
+
+    Bearing-wall requirement: required in practice for CREATE
+    (validate_roof rejects unset bearing walls — pass both
+    `bearing_wall_a_name` and `bearing_wall_b_name`). On REBUILD,
+    omit to keep the current pair, or pass one or both to swap them.
+
+    Validation errors the caller may see (all INVALID_PARAMS,
+    verbatim "Roof: ..." messages matching what the in-Blender Roof
+    Framing panel's live indicator shows): bearing walls unset,
+    bearing walls not parallel (Z-rotation difference > 0.5° from
+    parallel or anti-parallel), span too small for the eave overhang,
+    custom pitch out of range. CREATE atomicity: if validate_roof
+    rejects the freshly-written config, the just-created Roof Empty
+    is removed before the error surfaces — no stranded Roof.
+    REBUILD: a snapshot is taken before writing, and validation
+    failure restores the prior config — a failed REBUILD leaves the
+    existing Roof entirely unchanged.
+
+    Known footgun: `bearing_wall_a_name` / `bearing_wall_b_name` are
+    Object-name strings, not handles. Renaming a wall in Blender (or
+    via another tool call) invalidates any cached bearing-wall name
+    from a prior frame_roof response — re-resolve before a
+    subsequent REBUILD. Same shape as add_joint's wall_a_name /
+    wall_b_name footgun.
+
+    Args:
+        level_name: Name of the Praxova Level Empty hosting the Roof.
+            Resolved with the standard error shapes:
+            APP_OBJECT_NOT_FOUND (-32004) if missing,
+            INVALID_PARAMS (-32602) if the named object isn't a
+            Praxova Level.
+        name: Optional override for the auto-generated Roof_NN name
+            on CREATE. Must not collide with any existing scene
+            object. Ignored in REBUILD (the Roof already has a name;
+            renaming via this tool is out of scope).
+        bearing_wall_a_name: Object name of the first bearing wall.
+            Resolved against `level_name` — must be a Praxova wall
+            parented under THIS Level. CREATE without it fails
+            validate_roof.
+        bearing_wall_b_name: Object name of the second bearing wall.
+            Must be parallel to bearing_wall_a (validate_roof
+            checks).
+        truss_type: Truss family. Only "FINK" in v0.7.0/.1 (Howe,
+            Pratt, Modified Queen, scissor, mono in v0.7.50).
+        pitch: Roof pitch as a carpenter rise/run string, or "CUSTOM"
+            (then `pitch_rise_in` applies). Common residential range
+            "4/12" - "10/12"; "3/12" is a low-slope cap; "12/12"
+            (45°) is the steep end of the preset list.
+        pitch_rise_in: Inches of rise per 12" of run, used only when
+            the effective pitch is "CUSTOM". Range 1.0-24.0.
+        eave_overhang_in: Top-chord projection past the bearing
+            wall's exterior face. 0 = Monopoly-style flush eave.
+            Range 0.0-48.0.
+        heel_height_in: Heel block height at each bottom-chord end.
+            0 = standard heel (top chord meets bottom chord at the
+            bearing line); > 0 = energy heel (vertical heel blocks
+            lift the truss off the cap plate for full insulation
+            depth over the wall plate). Range 0.0-24.0.
+        top_chord_nominal: Dimensional lumber nominal for the two
+            top chords. Same set add_lumber accepts (e.g. "2x4",
+            "2x6", "2x8").
+        bottom_chord_nominal: Dimensional lumber nominal for the
+            bottom chord.
+        web_nominal: Dimensional lumber nominal for the four Fink
+            web members.
+        oc_spacing_in: Truss on-center spacing, sent as the stored
+            EnumProperty key (a string, not a number): one of "12",
+            "16", "19.2", "24".
+
+    Returns:
+        roof_name: Object name of the Roof Empty (new on CREATE,
+            preserved on REBUILD).
+        level_name: Echo of `level_name`.
+        created: True for CREATE (a new Roof was created and framed),
+            False for REBUILD (the existing Roof was reconfigured and
+            reframed). Parallels frame_wall's wall_target_used
+            CREATE/REBUILD flag.
+        truss_count: Number of Truss Empties under the Roof after
+            framing. Derived from the bearing-wall length and OC
+            spacing via stud_positions semantics.
+        span_in: Computed exterior-face-to-exterior-face perpendicular
+            distance between the two bearing walls.
+        pitch: Effective carpenter pitch string after the write
+            (e.g. "6/12" or "CUSTOM").
+        peak_height_in: Peak height above the bearing-wall cap plate,
+            including any energy heel.
+        bearing_wall_a_name: Effective Object name of bearing wall A
+            (or null if unset).
+        bearing_wall_b_name: Effective Object name of bearing wall B
+            (or null if unset).
+        config: Full effective config echo — every design field made
+            explicit, including the ones the caller didn't pass but
+            that exist on the Roof (defaults on CREATE, preserved
+            values on REBUILD). Mirrors the same field set listed in
+            Args.
+        trusses_framed: List of per-truss dicts, one per Truss Empty
+            under the Roof after framing. Parallels frame_building's
+            walls_framed. Each entry:
+
+              {
+                "truss_name":      str,  # e.g. "Truss_03"
+                "n_top_chords":    int,  # 2 for Fink
+                "n_bottom_chords": int,  # 1
+                "n_webs":          int,  # 4 for Fink
+                "n_heel_blocks":   int,  # 0 (standard) or 2 (energy)
+                "n_members":       int,  # sum of the four counts
+              }
+
+    Raises:
+        APP_OBJECT_NOT_FOUND (-32004): `level_name` doesn't resolve
+            to a Praxova Level Empty.
+        INVALID_PARAMS (-32602): any param-level rejection
+            (out-of-range numeric, non-wall or wrong-Level bearing
+            wall), name collision on CREATE, or any validate_roof
+            failure (verbatim "Roof: ..." message).
+        APP_OPERATOR_FAILED (-32004): the underlying add_roof
+            (CREATE) or frame_roof operator returned a non-FINISHED
+            result.
+    """
+    params: dict = {
+        "level_name":           level_name,
+        "truss_type":           truss_type,
+        "pitch":                pitch,
+        "pitch_rise_in":        pitch_rise_in,
+        "eave_overhang_in":     eave_overhang_in,
+        "heel_height_in":       heel_height_in,
+        "top_chord_nominal":    top_chord_nominal,
+        "bottom_chord_nominal": bottom_chord_nominal,
+        "web_nominal":          web_nominal,
+        "oc_spacing_in":        oc_spacing_in,
+    }
+    if name is not None:
+        params["name"] = name
+    if bearing_wall_a_name is not None:
+        params["bearing_wall_a_name"] = bearing_wall_a_name
+    if bearing_wall_b_name is not None:
+        params["bearing_wall_b_name"] = bearing_wall_b_name
+    return _call("frame_roof", params)
 
 
 # ===========================================================================
