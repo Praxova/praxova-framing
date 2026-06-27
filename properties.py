@@ -15,6 +15,7 @@ from bpy.props import (
     IntProperty,
     FloatProperty,
     EnumProperty,
+    PointerProperty,
 )
 
 from . import templates
