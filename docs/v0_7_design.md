@@ -886,19 +886,56 @@ File: `ui.py`
   indicator, and Frame Roof button
 - Register the new panel class in `__init__.py`
 
-### Commit 5: End-of-cycle — manifest + version + smoke + CHANGELOG + README
+### Commit 5: Cut-list truss-awareness + end-of-cycle (version, smoke, docs)
 
-Files: `blender_manifest.toml`, `__init__.py`, `smoke_test.py`, `CHANGELOG.md`,
-`README.md`
+Files: `ops_cutlist.py`, `blender_manifest.toml`, `__init__.py`,
+`smoke_test.py`, `CHANGELOG.md`, `README.md`
+
+**Cut-list (`ops_cutlist.py`):** truss members already flow into the cut list
+automatically — `_build_report` walks every `is_lumber` Object scene-wide, and
+truss members are tagged `category='LUMBER'` with correct nominal, cut length,
+stock length, orientation, and `cutlist_label`. Two small fixes plus one
+optional enhancement make them render correctly:
+
+- **`orient_short` for ANGLED** (required): line ~273 hardcodes
+  `'V' if orientation == 'VERTICAL' else 'H'`, so ANGLED pieces are mislabeled
+  `'H'`. Change to map `'ANGLED'` → `'A'` (mirrors the `lumber_cutlist_label`
+  fix from Commit 3): `{'VERTICAL': 'V', 'ANGLED': 'A'}.get(orientation, 'H')`.
+- **ORDER SUMMARY orient sort** (required): the V-before-H sort
+  (`key=lambda o: (o != 'V', o)`) already places `'A'` after `'V'`
+  alphabetically (A < H, so order becomes V, A, H) — verify it reads sensibly;
+  no change needed beyond confirming `'A'` slots in. The breakdown
+  parenthetical will show e.g. `(2 V, 48 A)` for a wall+truss mix.
+- **Cut-angle annotation** (enhancement, in scope for v0.7.0): in the CUT LIST
+  subsection, append the cut angles to angled pieces. The pieces dict already
+  carries enough to thread `cut_angle_start_deg` / `cut_angle_end_deg` through
+  from the tag. For an ANGLED piece with non-zero angles, render e.g.
+  `2x6x14 A  → cut to 163"  (26.6° / 60.3°)`. Square-cut pieces (both angles
+  0) render unchanged. Keep it compact; the two-number form
+  `(start° / end°)` is enough — a carpenter reads the role from context. This
+  requires adding `cut_angle_start_deg` / `cut_angle_end_deg` to the per-piece
+  dict in `_build_report` and consuming them in `_format_lumber_sections`'s
+  CUT LIST loop.
+
+The ORDER SUMMARY is unaffected by cut angles (you order stock by SKU; angles
+are a cut-time concern), so the rollup stays correct without further change.
+
+**End-of-cycle:**
 
 - `blender_manifest.toml`: `0.6.61` → `0.7.0`
 - `__init__.py`: `__version__ = "0.7.0"`
-- `smoke_test.py`: `addon_version` assertion `"0.6.61"` → `"0.7.0"`. Method
-  count stays `18` (no bridge changes — bridge parity lands in v0.7.1). Add a
-  few new smoke steps exercising a basic Fink truss roof (e.g., 12' span,
-  6/12 pitch, 0 heel, 12" overhang, 2x6 chords, 2x4 webs) and verifying truss
-  count, member counts per truss, cut-angle metadata on top chord and web
-  pieces, and ANGLED orientation labels in the cut list
+- `smoke_test.py`: `addon_version` assertion `"0.6.61"` → `"0.7.0"`; append a
+  one-line entry to the version-history comment block (mirroring every prior
+  bump). Method count **stays 18** and the existing 18-method assertion is
+  unchanged. **No truss smoke steps in v0.7.0.** `smoke_test.py` is an
+  external RPC client — it drives the scene exclusively through the bridge's
+  18 methods, and there is no `add_roof` / `frame_roof` bridge handler until
+  v0.7.1. The smoke test therefore cannot create or inspect a truss in
+  v0.7.0; truss end-to-end smoke coverage (frame a roof via the bridge,
+  assert member counts and the `A`-suffix / cut-angle annotations in
+  `generate_cutlist` output) is a **v0.7.1 deliverable**, added when the
+  handlers land. v0.7.0 truss verification is the manual viewport/outliner
+  walkthrough in "End-of-Cycle Validation" below.
 - `CHANGELOG.md`: new `[0.7.0]` entry at top
 - `README.md`:
   - Status line: `Beta (v0.6.61)` → `Beta (v0.7.0)`
@@ -911,8 +948,11 @@ Files: `blender_manifest.toml`, `__init__.py`, `smoke_test.py`, `CHANGELOG.md`,
 
 1. Pull v0.7 branch
 2. Reload add-on in Blender
-3. Run `python smoke_test.py` — expect "All checks passed" with `addon_version
-   "0.7.0"` and `method_count 18`
+3. Run `python smoke_test.py` against the running bridge — expect "All checks
+   passed" with `addon_version "0.7.0"` and `method_count 18`. (The smoke test
+   is unchanged in coverage apart from the version bump; it exercises the v0.6
+   bridge surface, which v0.7.0 doesn't touch. Truss coverage arrives in
+   v0.7.1.)
 4. Manual tests:
    - Create a Building + Level + four walls + L joints per v0.6 workflow,
      positioned to form a 12' × 16' rectangle
