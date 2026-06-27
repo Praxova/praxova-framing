@@ -2113,6 +2113,31 @@ def resolve_pitch_ratio(roof_props) -> float:
     )
 
 
+def _mw_apply_inches(mw, vec_in) -> Vector:
+    """Apply matrix_world (METERS-based) to a local point in INCHES;
+    return the world-space point in INCHES.
+
+    Blender's matrix_world has its rotation in unitless form but its
+    translation component in METERS (Blender's scene unit). Multiplying
+    it directly by a Vector of inch values mixes units — the rotated
+    point stays in inches while the translation is added in meters,
+    yielding nonsense world coordinates.
+
+    Workaround: convert the local-inch input to meters before the
+    transform, then convert the world-meter result back to inches. The
+    rotation passes through unchanged (rotations are dimensionless),
+    and the translation lines up because both the rotated point and
+    the matrix's translation are now in the same unit (meters).
+    """
+    in_m = Vector(
+        (vec_in[0] * INCH, vec_in[1] * INCH, vec_in[2] * INCH),
+    )
+    out_m = mw @ in_m
+    return Vector(
+        (out_m.x / INCH, out_m.y / INCH, out_m.z / INCH),
+    )
+
+
 def compute_bearing_wall_geometry(wall_obj) -> dict:
     """Read-only world-space geometry for ONE bearing wall.
 
@@ -2150,9 +2175,15 @@ def compute_bearing_wall_geometry(wall_obj) -> dict:
     mw_3x3 = mw.to_3x3()
 
     # Centerline endpoints — local (0, t/2, h/2) and (L, t/2, h/2)
-    # transformed to world.
-    cl_start = mw @ Vector((0.0, thickness_in / 2.0, height_in / 2.0))
-    cl_end = mw @ Vector((length_in, thickness_in / 2.0, height_in / 2.0))
+    # transformed to world. Local frame is in INCHES; matrix_world
+    # mixes units (rotation unitless, translation meters), so go via
+    # _mw_apply_inches to keep the world result in inches.
+    cl_start = _mw_apply_inches(
+        mw, (0.0, thickness_in / 2.0, height_in / 2.0),
+    )
+    cl_end = _mw_apply_inches(
+        mw, (length_in, thickness_in / 2.0, height_in / 2.0),
+    )
 
     # World-space basis vectors. The 3x3 rotation part maps the local
     # unit axes to world coords; mw_3x3 @ Vector((1, 0, 0)) is the
@@ -2193,9 +2224,11 @@ def _bearing_wall_exterior_face_center(
     length_in = geom_self['length_in']
     height_in = geom_self['height_in']
     thickness_in = geom_self['thickness_in']
-    front_center = mw @ Vector((length_in / 2.0, 0.0, height_in / 2.0))
-    back_center = mw @ Vector(
-        (length_in / 2.0, thickness_in, height_in / 2.0),
+    front_center = _mw_apply_inches(
+        mw, (length_in / 2.0, 0.0, height_in / 2.0),
+    )
+    back_center = _mw_apply_inches(
+        mw, (length_in / 2.0, thickness_in, height_in / 2.0),
     )
     d_front = (front_center - paired_centerline_midpoint).length
     d_back = (back_center - paired_centerline_midpoint).length
@@ -2322,8 +2355,8 @@ def compute_truss_layout(roof_props) -> dict:
     # convention puts the wall base at z=0 and the cap plate top at
     # z=wall_height_in).
     mw_a = roof_props.bearing_wall_a.matrix_world
-    world_origin = mw_a @ Vector(
-        (0.0, a_ext_y_local, geom_a['height_in']),
+    world_origin = _mw_apply_inches(
+        mw_a, (0.0, a_ext_y_local, geom_a['height_in']),
     )
 
     return {
