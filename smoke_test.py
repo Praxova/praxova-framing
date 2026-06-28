@@ -8,8 +8,8 @@ on 127.0.0.1:9876 with a fresh empty scene.
 
 Exits non-zero on any unexpected response.
 
-Covers the in-progress v0.7.1 RPC surface end-to-end (19 methods —
-v0.6.2 was the prior count of 18 and stayed there through v0.7.0;
+Covers the full v0.7.1 RPC surface end-to-end (19 methods — v0.6.2
+was the prior count of 18 and stayed there through v0.7.0;
 v0.6.25 through v0.6.50 were bug-fix / UI-only cycles with no bridge
 schema changes, v0.6.51 added T-joint bridge surface inside existing
 handlers, v0.6.60 added CALIFORNIA + LADDER_BLOCKING L-corner styles
@@ -20,10 +20,8 @@ style Object-name counters (n_corner_backers, n_ladder_blocks) on
 walls_framed; v0.7.0 added site-built Fink trusses operator/UI/cut-
 list side without any new bridge surface, and v0.7.1 adds that bridge
 surface as the new frame_roof method — one CREATE/REBUILD handler
-mirroring frame_wall's single-method shape, so 18 -> 19 methods —
-note the addon_version assertion stays at "0.7.0" through Commit 3
-and bumps to "0.7.1" in Commit 4 atomically with the add-on package
-bump): ping (with addon_version and method_count
+mirroring frame_wall's single-method shape, so 18 -> 19 methods):
+ping (with addon_version and method_count
 assertions), scene
 info, material catalog, lumber / sheet / panel placement, on-center
 duplication, edge-to-edge fill, wall framing with optional door/window
@@ -193,26 +191,27 @@ def run(host: str, port: int) -> int:
         # suffix and cut-angle annotations). Operator/UI/cut-list
         # cycle — method_count stays 18, truss bridge parity (and
         # truss smoke coverage) lands in v0.7.1.
-        # v0.7.1 Commit 1: method_count 18 -> 19 for the new frame_roof
-        # handler (a single CREATE/REBUILD method mirroring frame_wall).
-        # The addon_version assertion stays pinned at 0.7.0 until the
-        # cycle's Commit 4 bumps the add-on's __init__.py / manifest
-        # together with this assertion — the bridge reports addon_
-        # version from the add-on package's __version__ (not from the
-        # mcp_server package), so this pin must move atomically with
-        # the add-on bump or the smoke test will fail mid-cycle.
-        # v0.7.1 Commit 3 adds the truss smoke steps below ([49]-[58]):
-        # frame_roof CREATE (full config + carpenter-string pitch
-        # mapping), three REBUILD omit-preserves reconfigures (heel,
-        # then eave, then CUSTOM pitch — each changing one field at a
-        # time, created=False, prior fields preserved), the validate_
-        # roof negatives (non-wall bearing wall, unset bearing walls —
-        # with CREATE rollback verified by a follow-up CREATE
-        # succeeding on the same Level), and the A-suffix / cut-angle
-        # annotations in generate_cutlist now that trusses are
-        # reachable via the bridge.
-        assert r["addon_version"] == "0.7.0", (
-            f"expected addon_version 0.7.0, got {r['addon_version']!r}"
+        # v0.7.1: addon_version 0.7.0 -> 0.7.1 for roof / truss bridge
+        # parity. method_count 18 -> 19 (frame_roof, a single CREATE/
+        # REBUILD method mirroring frame_wall — one Roof per Level
+        # makes the Level the implicit discriminator, so no
+        # roof_target param). The bridge reports addon_version from
+        # the add-on package's __version__ (not from the mcp_server
+        # package), so the assertion pin moves atomically with the
+        # add-on bump (manifest + add-on __init__.py) — the two were
+        # split across Commits 1 and 4 of the cycle for incremental
+        # smoke-runnability and re-joined here. New steps [49]-[58]
+        # exercise frame_roof CREATE (full config + carpenter-string
+        # pitch mapping), three REBUILD omit-preserves reconfigures
+        # (heel, then eave, then CUSTOM pitch — each changing one
+        # field at a time, created=False, prior fields preserved),
+        # the validate_roof negatives (non-wall bearing wall, unset
+        # bearing walls — with CREATE rollback verified by a follow-
+        # up CREATE succeeding on the same Level), and the A-suffix /
+        # cut-angle annotations in generate_cutlist now that trusses
+        # are reachable via the bridge.
+        assert r["addon_version"] == "0.7.1", (
+            f"expected addon_version 0.7.1, got {r['addon_version']!r}"
         )
         assert r["method_count"] == 19, (
             f"expected 19 methods, got {r['method_count']}"
