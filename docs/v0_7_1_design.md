@@ -48,10 +48,12 @@ with no separate wall-creation method.
 - **Commit 2**: `mcp_server/praxova_framing_mcp/server.py` — the `frame_roof`
   FastMCP typed tool wrapper + package version 0.6.61 → 0.7.1.
 - **Commit 3**: `smoke_test.py` — new truss steps (CREATE + REBUILD now
-  reachable via the bridge), `method_count` 18 → 19, `addon_version`
-  0.7.0 → 0.7.1, history comment line.
+  reachable via the bridge), `method_count` 18 → 19. `addon_version` assertion
+  stays pinned at `"0.7.0"` (the bridge reports the add-on `__version__`, which
+  doesn't move until Commit 4 — they're coupled).
 - **Commit 4**: end-of-cycle — `blender_manifest.toml` + `__init__.py` version
-  → 0.7.1, CHANGELOG, README.
+  → 0.7.1, the smoke test's `addon_version` assertion 0.7.0 → 0.7.1 (coupled to
+  the `__version__` bump — moves in the same commit), CHANGELOG, README.
 
 **Where this sits on the broader roadmap:**
 - v0.7.0 ✅ — Fink truss, site-built, operator/UI/cut-list
@@ -601,20 +603,30 @@ mirroring the existing `frame_wall` REBUILD steps in the suite.
 
 ### Version assertions
 
-- `addon_version`: `"0.7.0"` → `"0.7.1"` (assertion + f-string message).
+- `addon_version`: **stays pinned at `"0.7.0"`** in Commit 3. The bridge's
+  `addon_version` comes from the add-on package `__version__`
+  (`server/handlers.py` does `from .. import __version__`), which doesn't move
+  until Commit 4 bumps `__init__.py` + `blender_manifest.toml`. Commit 2's
+  `mcp_server` package bump is a separate version the bridge never reports. So
+  the smoke assertion must match the still-0.7.0 add-on here, and moves to
+  "0.7.1" atomically with the `__version__` bump in Commit 4.
 - `method_count`: `18` → `19` (assertion + message).
 - Module docstring "Covers the full v0.7.0 RPC surface (18 methods ...)" →
   "v0.7.1 ... (19 methods ...)".
-- One new history-comment line in the running block:
+- One new history-comment line in the running block (note the `addon_version`
+  bump is flagged as deferred to Commit 4, since it can't move until the add-on
+  `__version__` does — Commit 4 finalizes this wording to past tense):
   ```
-  # v0.7.1: addon_version 0.7.0 -> 0.7.1 for roof / truss bridge
-  # parity. method_count 18 -> 19 (frame_roof, CREATE/REBUILD mirroring
-  # frame_wall). New steps exercise frame_roof CREATE (full config +
-  # carpenter-string pitch mapping), frame_roof REBUILD (omit-preserves
-  # reconfigure: heel + eave + pitch changed one at a time, created=False),
-  # the validate_roof pre-flight negatives (unset bearing walls, bad
-  # bearing-wall pick), and the A-suffix / cut-angle annotations in
-  # generate_cutlist now that trusses can be created via the bridge.
+  # v0.7.1 (in progress): method_count 18 -> 19 (frame_roof, a single
+  # CREATE/REBUILD method mirroring frame_wall). addon_version STAYS
+  # 0.7.0 here — the bridge reports the add-on __version__, which bumps
+  # to 0.7.1 atomically with __init__.py + the manifest in Commit 4.
+  # New steps exercise frame_roof CREATE (full config + carpenter-string
+  # pitch mapping), REBUILD omit-preserves reconfigure (heel + eave +
+  # pitch changed one at a time, created=False, prior fields preserved),
+  # the validate_roof negatives (unset bearing walls, bad bearing-wall
+  # pick — with CREATE rollback verified), and the A-suffix / cut-angle
+  # annotations in generate_cutlist now that trusses are bridge-reachable.
   ```
 
 ### New smoke steps (sketch)
@@ -667,7 +679,12 @@ style and asserts with descriptive messages.
 ## Version + Docs (Commit 4)
 
 - `blender_manifest.toml`: `0.7.0` → `0.7.1`.
-- `__init__.py`: `__version__ = "0.7.1"`.
+- `__init__.py` (add-on root): `__version__ = "0.7.1"`.
+- `smoke_test.py`: the `addon_version` assertion `"0.7.0"` → `"0.7.1"` (coupled
+  to the `__version__` bump — the bridge reports the add-on `__version__`, so
+  the assertion must move in the same commit that bumps it), and finalize the
+  Commit-3 in-progress notes (history comment + module docstring) to past
+  tense. `method_count` stays `19` (moved in Commit 3). No new smoke steps.
 - `CHANGELOG.md`: new `## [0.7.1]` entry at top. Lead paragraph: roof/truss
   bridge parity via a single `frame_roof` RPC with `frame_wall`-style
   CREATE/REBUILD + omit-preserves, 18 → 19 methods, no operator/geometry/cut-
@@ -675,10 +692,11 @@ style and asserts with descriptive messages.
   modes, the wire format, the response shape), `_parse_roof_config` +
   `_write/_snapshot/_restore_roof_config` + `_roof_config_to_wire` + the
   pitch-string map, the FastMCP `frame_roof` tool, the new smoke steps.
-  `### Changed`: `mcp_server` pkg 0.6.61 → 0.7.1, manifest + `__version__`
-  bumps, smoke `method_count` 18 → 19 + `addon_version` bump. `### Bridge`:
-  method count 18 → 19 (the first roof/truss RPC); note that reconfiguration is
-  `frame_roof` REBUILD (no `configure_roof` / `remove_roof`, mirroring walls).
+  `### Changed`: `mcp_server` pkg 0.6.61 → 0.7.1 (Commit 2), manifest +
+  `__version__` bumps, smoke `addon_version` 0.7.0 → 0.7.1 + `method_count`
+  18 → 19. `### Bridge`: method count 18 → 19 (the first roof/truss RPC); note
+  that reconfiguration is `frame_roof` REBUILD (no `configure_roof` /
+  `remove_roof`, mirroring walls).
 - `README.md`: flip the "Bridge (vX.Y.Z)" subsection heading to v0.7.1; add a
   paragraph describing the `frame_roof` RPC (CREATE/REBUILD, omit-preserves,
   carpenter-string pitch, validate_roof pre-flight, the `trusses_framed`
