@@ -287,6 +287,25 @@ _JOINT_CORNER_STYLE_CHOICES = (
 )
 _JOINT_EXTENDING_CHOICES = ("AUTO", "A", "B")
 
+# v0.7.1: roof pitch wire-format <-> PraxovaRoofProps enum-key mapping.
+# The wire accepts carpenter strings ("6/12"); the PropertyGroup stores
+# P_N_12 / CUSTOM enum keys. Both directions mapped here so frame_roof's
+# request parser and response builder share one source of truth.
+_PITCH_STR_TO_KEY = {
+    "3/12":  "P_3_12",
+    "4/12":  "P_4_12",
+    "5/12":  "P_5_12",
+    "6/12":  "P_6_12",
+    "7/12":  "P_7_12",
+    "8/12":  "P_8_12",
+    "9/12":  "P_9_12",
+    "10/12": "P_10_12",
+    "12/12": "P_12_12",
+    "CUSTOM": "CUSTOM",
+}
+_PITCH_KEY_TO_STR = {v: k for k, v in _PITCH_STR_TO_KEY.items()}
+_PITCH_WIRE_CHOICES = tuple(_PITCH_STR_TO_KEY.keys())
+
 
 def _resolve_wall_in_level(name: str, level: bpy.types.Object, field: str) -> bpy.types.Object:
     """Resolve a wall-name string to a wall Empty parented under `level`.
@@ -2595,6 +2614,491 @@ def frame_building(params: dict) -> dict:
 
 
 # ===========================================================================
+# Roof framing (v0.7.1 bridge parity for v0.7.0 frame_roof)
+# ===========================================================================
+#
+# One method — frame_roof — covering both CREATE (Level has no Roof yet)
+# and REBUILD (Level already has a Roof; reconfigure-and-reframe with
+# omit-preserves semantics). Mirrors frame_wall's single-method shape.
+#
+# Param-level validation runs BEFORE any scene mutation (so a bad pitch
+# or non-wall bearing wall never reaches the operator). CREATE uses
+# delete-on-failure to keep atomicity (no stranded Roof Empty when
+# validate_roof rejects post-write); REBUILD snapshots + restores so a
+# failed validation leaves the existing Roof unchanged.
+#
+# Helpers live with the handler rather than near _parse_joint to keep
+# the v0.7.1 surface grouped in one place — matches how frame_wall
+# bundles _predict_wall_splice_plans / _splice_xs_from_pieces /
+# _build_splice_summary right next to itself.
+
+
+def _roof_in_level(level: bpy.types.Object):
+    """Return the single Roof Empty under `level`, or None.
+
+    One Roof per Level (v0.7.0/.1). Mirrors the walk frame_roof /
+    add_roof / the Roof Framing panel use (is_roof == True among the
+    Level's children). Inlined here rather than imported from ui.py to
+    keep server/ free of UI-layer dependencies (same rationale as
+    frame_building's inlined walls-in-level walk).
+    """
+    return next(
+        (c for c in level.children
+         if getattr(c, 'praxova_roof', None) is not None
+         and c.praxova_roof.is_roof),
+        None,
+    )
+
+
+def _reject_bool_and_range(
+    value, lo: float, hi: float, field: str,
+) -> None:
+    """Reject bool (an int subclass) and out-of-range numerics for a
+    roof param. INVALID_PARAMS with the field name and the accepted
+    range. Mirrors add_level's inline `isinstance(x, bool) or x <= 0`
+    pattern, factored out because _parse_roof_config uses it three
+    times (pitch_rise_in, eave_overhang_in, heel_height_in).
+    """
+    if isinstance(value, bool) or not (lo <= value <= hi):
+        raise bridge.RPCError(
+            bridge.INVALID_PARAMS,
+            f'"{field}" must be a number in [{lo}, {hi}]',
+        )
+
+
+def _parse_roof_config(
+    params: dict, level: bpy.types.Object,
+) -> dict:
+    """Validate + normalize the roof design params present in `params`.
+
+    Returns a dict containing ONLY the keys explicitly supplied by the
+    caller, each normalized to its PraxovaRoofProps storage form:
+    pitch as the P_N_12 / CUSTOM enum key under 'pitch_key';
+    bearing walls as resolved Object refs under 'wall_a' / 'wall_b'
+    (alongside their names for the response echo). Omitted params are
+    absent from the result — the handler writes only what's present,
+    which yields CREATE-defaults on a fresh Roof and preserve-on-omit
+    on REBUILD with no mode-specific branching here.
+
+    Param-level errors (unknown pitch string, out-of-range number,
+    non-wall or wrong-Level bearing wall, bad nominal / oc value) raise
+    RPCError(INVALID_PARAMS, ...) with the same shapes the rest of the
+    bridge uses, BEFORE the caller mutates any scene state.
+
+    'present' is tested with `key in params` so that a legitimately-
+    zero numeric (e.g. heel_height_in=0 = standard heel, eave_overhang
+    _in=0 = Monopoly flush eave) is distinguished from an omitted
+    field. Bool is rejected for numeric fields (Python bool is an int
+    subclass — same guard add_level uses for level_height_in).
+    """
+    out: dict = {}
+
+    if "truss_type" in params:
+        out["truss_type"] = _require(
+            params, "truss_type", str, choices=("FINK",),
+        )
+
+    if "bearing_wall_a_name" in params:
+        a_name = _require(params, "bearing_wall_a_name", str)
+        out["wall_a"] = _resolve_wall_in_level(
+            a_name, level, "bearing_wall_a_name",
+        )
+        out["wall_a_name"] = a_name
+    if "bearing_wall_b_name" in params:
+        b_name = _require(params, "bearing_wall_b_name", str)
+        out["wall_b"] = _resolve_wall_in_level(
+            b_name, level, "bearing_wall_b_name",
+        )
+        out["wall_b_name"] = b_name
+
+    if "pitch" in params:
+        pitch_str = _require(
+            params, "pitch", str, choices=_PITCH_WIRE_CHOICES,
+        )
+        out["pitch_key"] = _PITCH_STR_TO_KEY[pitch_str]
+
+    if "pitch_rise_in" in params:
+        v = _require(params, "pitch_rise_in", (int, float))
+        _reject_bool_and_range(v, 1.0, 24.0, "pitch_rise_in")
+        out["pitch_rise_in"] = float(v)
+
+    if "eave_overhang_in" in params:
+        v = _require(params, "eave_overhang_in", (int, float))
+        _reject_bool_and_range(v, 0.0, 48.0, "eave_overhang_in")
+        out["eave_overhang_in"] = float(v)
+
+    if "heel_height_in" in params:
+        v = _require(params, "heel_height_in", (int, float))
+        _reject_bool_and_range(v, 0.0, 24.0, "heel_height_in")
+        out["heel_height_in"] = float(v)
+
+    for key in (
+        "top_chord_nominal", "bottom_chord_nominal", "web_nominal",
+    ):
+        if key in params:
+            out[key] = _require(
+                params, key, str,
+                choices=tuple(templates.LUMBER_TYPES),
+            )
+
+    if "oc_spacing_in" in params:
+        out["oc_spacing_in"] = _require(
+            params, "oc_spacing_in", str,
+            choices=("12", "16", "19.2", "24"),
+        )
+
+    return out
+
+
+def _write_roof_config(rp, parsed: dict) -> None:
+    """Write each provided field of `parsed` onto the Roof's
+    PraxovaRoofProps. Omit-preserves: any field not in `parsed` is
+    left untouched, which yields CREATE-defaults on a fresh Roof and
+    preserve-on-omit on REBUILD with no mode-specific branching.
+    """
+    if "truss_type" in parsed:
+        rp.truss_type = parsed["truss_type"]
+    if "wall_a" in parsed:
+        rp.bearing_wall_a = parsed["wall_a"]
+    if "wall_b" in parsed:
+        rp.bearing_wall_b = parsed["wall_b"]
+    if "pitch_key" in parsed:
+        rp.pitch = parsed["pitch_key"]
+    if "pitch_rise_in" in parsed:
+        rp.pitch_rise_in = parsed["pitch_rise_in"]
+    if "eave_overhang_in" in parsed:
+        rp.eave_overhang_in = parsed["eave_overhang_in"]
+    if "heel_height_in" in parsed:
+        rp.heel_height_in = parsed["heel_height_in"]
+    if "top_chord_nominal" in parsed:
+        rp.top_chord_nominal = parsed["top_chord_nominal"]
+    if "bottom_chord_nominal" in parsed:
+        rp.bottom_chord_nominal = parsed["bottom_chord_nominal"]
+    if "web_nominal" in parsed:
+        rp.web_nominal = parsed["web_nominal"]
+    if "oc_spacing_in" in parsed:
+        rp.oc_spacing_in = parsed["oc_spacing_in"]
+
+
+def _snapshot_roof_config(rp) -> dict:
+    """Capture all 11 design fields for REBUILD rollback.
+
+    PointerProperties are captured as direct Object refs (restorable
+    via assignment in _restore_roof_config). The snapshot pair gives
+    REBUILD its "validation failure leaves the Roof unchanged"
+    guarantee — analogous to frame_wall's REBUILD attempt-then-roll-
+    back pattern.
+    """
+    return {
+        "truss_type":           rp.truss_type,
+        "bearing_wall_a":       rp.bearing_wall_a,
+        "bearing_wall_b":       rp.bearing_wall_b,
+        "pitch":                rp.pitch,
+        "pitch_rise_in":        rp.pitch_rise_in,
+        "eave_overhang_in":     rp.eave_overhang_in,
+        "heel_height_in":       rp.heel_height_in,
+        "top_chord_nominal":    rp.top_chord_nominal,
+        "bottom_chord_nominal": rp.bottom_chord_nominal,
+        "web_nominal":          rp.web_nominal,
+        "oc_spacing_in":        rp.oc_spacing_in,
+    }
+
+
+def _restore_roof_config(rp, snap: dict) -> None:
+    """Reassign every field captured by _snapshot_roof_config."""
+    rp.truss_type           = snap["truss_type"]
+    rp.bearing_wall_a       = snap["bearing_wall_a"]
+    rp.bearing_wall_b       = snap["bearing_wall_b"]
+    rp.pitch                = snap["pitch"]
+    rp.pitch_rise_in        = snap["pitch_rise_in"]
+    rp.eave_overhang_in     = snap["eave_overhang_in"]
+    rp.heel_height_in       = snap["heel_height_in"]
+    rp.top_chord_nominal    = snap["top_chord_nominal"]
+    rp.bottom_chord_nominal = snap["bottom_chord_nominal"]
+    rp.web_nominal          = snap["web_nominal"]
+    rp.oc_spacing_in        = snap["oc_spacing_in"]
+
+
+def _roof_config_to_wire(rp) -> dict:
+    """Read the effective Roof config back into the wire format for
+    the response's `config` echo. Pitch enum key round-trips to its
+    carpenter string via _PITCH_KEY_TO_STR; bearing-wall Object refs
+    round-trip to names (or None when unset).
+    """
+    return {
+        "truss_type": rp.truss_type,
+        "bearing_wall_a_name": (
+            rp.bearing_wall_a.name if rp.bearing_wall_a else None
+        ),
+        "bearing_wall_b_name": (
+            rp.bearing_wall_b.name if rp.bearing_wall_b else None
+        ),
+        "pitch":                _PITCH_KEY_TO_STR[rp.pitch],
+        "pitch_rise_in":        rp.pitch_rise_in,
+        "eave_overhang_in":     rp.eave_overhang_in,
+        "heel_height_in":       rp.heel_height_in,
+        "top_chord_nominal":    rp.top_chord_nominal,
+        "bottom_chord_nominal": rp.bottom_chord_nominal,
+        "web_nominal":          rp.web_nominal,
+        "oc_spacing_in":        rp.oc_spacing_in,
+    }
+
+
+def frame_roof(params: dict) -> dict:
+    """Create-and-frame or reconfigure-and-reframe a Level's Roof.
+
+    Bridge parity for v0.7.0's `praxova.frame_roof` operator, mirroring
+    the single-method CREATE/REBUILD shape of `frame_wall`:
+
+      - **CREATE** (the Level has no Roof yet): create a Roof Empty
+        under the Level via the `add_roof` operator, write the design
+        params from `params` (omitted fields take the PraxovaRoofProps
+        defaults — 6/12 pitch, 12" eave, 0 heel, 2x6/2x6/2x4 nominals,
+        24" OC, FINK), run `validate_roof`, then delete-and-regenerate
+        trusses via the `frame_roof` operator. Returns `created: true`.
+
+      - **REBUILD** (the Level already has a Roof): reconfigure that
+        Roof in place with omit-preserves semantics — each provided
+        param is written; each omitted param is preserved at its
+        current value — then re-validate and re-frame. Returns
+        `created: false`. The Roof Empty is preserved (so any external
+        references to it stay intact); only its truss children are
+        delete-and-regenerated.
+
+    Mode is picked automatically by the presence of a Roof under the
+    Level — v0.7.0 allows exactly one Roof per Level, so the decision
+    is unambiguous. There is no `add_roof` / `remove_roof` /
+    `configure_roof` RPC in v0.7.1; the `add_roof` operator is invoked
+    internally as part of CREATE.
+
+    Atomicity:
+      - CREATE: if `validate_roof` rejects the freshly-written config
+        (e.g. bearing walls not parallel), the just-created Roof Empty
+        is removed before the error surfaces — no stranded Roof on
+        the Level. The Empty has no children yet (frame_roof hasn't
+        run), so a plain delete suffices.
+      - REBUILD: a snapshot is taken before writing, and on validation
+        failure the Roof's config is restored from the snapshot — a
+        failed REBUILD leaves the existing Roof entirely unchanged
+        (config and any prior truss children).
+
+    Param-level validation (unknown pitch string, out-of-range number,
+    non-wall bearing wall, bearing wall in a different Level, bad
+    nominal / oc value) runs in `_parse_roof_config` BEFORE any scene
+    mutation, so those errors never produce a partially-applied state.
+
+    Args (params):
+        level_name (str, REQUIRED) — Praxova Level Empty hosting the
+            Roof.
+        name (str, OPTIONAL — CREATE only) — override the auto Roof_NN
+            name. Name-collision rejected. Ignored in REBUILD.
+        bearing_wall_a_name, bearing_wall_b_name (str, OPTIONAL) —
+            Object names of the two parallel bearing walls, each
+            resolved against `level_name`. CREATE typically supplies
+            both (validate_roof rejects unset). REBUILD omit =
+            preserve current.
+        truss_type (str, OPTIONAL) — "FINK" only in v0.7.0/.1.
+            CREATE default "FINK".
+        pitch (str, OPTIONAL) — carpenter string: "3/12", "4/12",
+            "5/12", "6/12", "7/12", "8/12", "9/12", "10/12", "12/12",
+            or "CUSTOM" (use pitch_rise_in for the rise). CREATE
+            default "6/12".
+        pitch_rise_in (number, OPTIONAL) — rise per 12" run. Used only
+            when the effective pitch is "CUSTOM". Range 1.0-24.0.
+            CREATE default 6.0.
+        eave_overhang_in (number, OPTIONAL) — top-chord projection
+            past the bearing wall exterior face; 0 = Monopoly flush
+            eave. Range 0.0-48.0. CREATE default 12.0.
+        heel_height_in (number, OPTIONAL) — heel block height; 0 =
+            standard heel, >0 = energy heel. Range 0.0-24.0. CREATE
+            default 0.0.
+        top_chord_nominal, bottom_chord_nominal, web_nominal (str,
+            OPTIONAL) — dimensional lumber nominals (same set
+            add_lumber accepts). CREATE defaults 2x6 / 2x6 / 2x4.
+        oc_spacing_in (str, OPTIONAL) — truss OC spacing as an
+            EnumProperty key: one of "12", "16", "19.2", "24" (the
+            stored string form, not a number). CREATE default "24".
+
+    Returns:
+        {
+          "roof_name":           str   — Object name of the Roof
+                                         Empty (new or existing).
+          "level_name":          str   — echo of `level_name`.
+          "created":             bool  — True for CREATE, False for
+                                         REBUILD.
+          "truss_count":         int   — number of Truss Empties under
+                                         the Roof after frame.
+          "span_in":             float — computed exterior-face-to-
+                                         exterior-face span from
+                                         compute_truss_layout.
+          "pitch":               str   — effective carpenter string
+                                         after the write.
+          "peak_height_in":      float — peak above cap plate
+                                         (includes heel).
+          "bearing_wall_a_name": str   — effective name, or null.
+          "bearing_wall_b_name": str   — effective name, or null.
+          "config":              dict  — full effective config echo
+                                         (every design field made
+                                         explicit, so the LLM sees
+                                         exactly what the Roof now
+                                         is).
+          "trusses_framed":      list  — parallel to frame_building's
+                                         walls_framed; per Truss entry:
+            {
+              "truss_name":      str   — e.g. "Truss_03".
+              "n_top_chords":    int   — 2 for Fink.
+              "n_bottom_chords": int   — 1.
+              "n_webs":          int   — 4 for Fink.
+              "n_heel_blocks":   int   — 0 (standard) or 2 (energy).
+              "n_members":       int   — sum of the four.
+            }
+        }
+
+    Errors:
+        APP_OBJECT_NOT_FOUND — `level_name` doesn't resolve to a
+            Praxova Level Empty.
+        INVALID_PARAMS       — any param-level rejection from
+            _parse_roof_config (bad pitch / numeric / nominal / oc
+            value, bearing wall not in this Level, bearing wall isn't
+            a Praxova wall), name collision on CREATE, or any
+            validate_roof failure (verbatim "Roof: ..." message,
+            matching what the Roof Framing panel's live indicator
+            shows).
+        APP_OPERATOR_FAILED  — `add_roof` (CREATE) or `frame_roof`
+            operator returned a non-FINISHED result.
+        INTERNAL_ERROR       — `add_roof` reported FINISHED but no
+            Roof was found under the Level afterwards (should never
+            happen; surfaces a Blender-side anomaly for debugging).
+
+    Known footgun:
+        bearing_wall_a_name / bearing_wall_b_name are Object-name
+        strings, not handles. Renaming a wall in Blender (or via
+        another bridge call) invalidates any cached bearing-wall name
+        from a prior `frame_roof` response — re-resolve before a
+        subsequent REBUILD. Same shape as add_joint's wall_a_name /
+        wall_b_name footgun.
+    """
+    level_name = _require(params, "level_name", str)
+    level = _resolve_level(level_name)
+
+    existing = _roof_in_level(level)
+    created = existing is None
+
+    # Param-level validation + normalization BEFORE any scene mutation.
+    # A bad pitch, out-of-range number, non-wall bearing wall, or
+    # wrong-Level bearing wall raises INVALID_PARAMS here — the Roof
+    # Empty is never created and existing-Roof config is never touched.
+    parsed = _parse_roof_config(params, level)
+
+    scene = bpy.context.scene
+    sp = scene.praxova_framing
+
+    if created:
+        # CREATE: name-collision guard, create the Empty via the
+        # operator, write the parsed config, validate; on validation
+        # failure delete the just-created Empty so no stranded Roof
+        # remains under the Level (atomicity).
+        if "name" in params and params["name"] in bpy.data.objects:
+            raise bridge.RPCError(
+                bridge.INVALID_PARAMS,
+                f'name {params["name"]!r} already exists in the scene',
+            )
+        sp.active_level = level
+        result = bpy.ops.praxova.add_roof('EXEC_DEFAULT')
+        _check_op_result(result, "praxova.add_roof")
+
+        roof = _roof_in_level(level)
+        if roof is None:
+            raise bridge.RPCError(
+                bridge.INTERNAL_ERROR,
+                "add_roof finished but produced no Roof under the Level",
+            )
+        if "name" in params:
+            roof.name = params["name"]
+
+        _write_roof_config(roof.praxova_roof, parsed)
+        ok, msg = templates.validate_roof(roof.praxova_roof, level)
+        if not ok:
+            # CREATE atomicity: the Empty has no children yet
+            # (frame_roof hasn't run), so a plain remove suffices —
+            # no recursive descendant cleanup needed.
+            bpy.data.objects.remove(roof, do_unlink=True)
+            raise bridge.RPCError(bridge.INVALID_PARAMS, msg)
+    else:
+        # REBUILD: snapshot the existing config, write the provided
+        # fields, validate; on failure restore from the snapshot so
+        # the Roof is byte-for-byte unchanged. Any prior truss
+        # children are preserved on failure (frame_roof hasn't run
+        # yet at the point validation fails).
+        roof = existing
+        snapshot = _snapshot_roof_config(roof.praxova_roof)
+        _write_roof_config(roof.praxova_roof, parsed)
+        ok, msg = templates.validate_roof(roof.praxova_roof, level)
+        if not ok:
+            _restore_roof_config(roof.praxova_roof, snapshot)
+            raise bridge.RPCError(bridge.INVALID_PARAMS, msg)
+
+    # Generate trusses (delete-and-regenerate). active_level set so
+    # the operator's poll passes whether or not a CREATE just ran.
+    sp.active_level = level
+    result = bpy.ops.praxova.frame_roof('EXEC_DEFAULT')
+    _check_op_result(result, "praxova.frame_roof")
+
+    # Post-op: refetch trusses + read the canonical layout once for
+    # the response numerics.
+    rp = roof.praxova_roof
+    trusses = sorted(
+        (c for c in roof.children
+         if getattr(c, 'praxova_truss', None) is not None
+         and c.praxova_truss.is_truss),
+        key=lambda t: t.name,
+    )
+    layout = templates.compute_truss_layout(rp)
+
+    trusses_framed = []
+    for truss in trusses:
+        n_top = sum(
+            1 for c in truss.children
+            if c.name.startswith(f"{truss.name}_TopChord_")
+        )
+        n_bot = sum(
+            1 for c in truss.children
+            if c.name.startswith(f"{truss.name}_BottomChord")
+        )
+        n_web = sum(
+            1 for c in truss.children
+            if c.name.startswith(f"{truss.name}_Web_")
+        )
+        n_heel = sum(
+            1 for c in truss.children
+            if c.name.startswith(f"{truss.name}_HeelBlock_")
+        )
+        trusses_framed.append({
+            "truss_name":      truss.name,
+            "n_top_chords":    n_top,
+            "n_bottom_chords": n_bot,
+            "n_webs":          n_web,
+            "n_heel_blocks":   n_heel,
+            "n_members":       n_top + n_bot + n_web + n_heel,
+        })
+
+    config = _roof_config_to_wire(rp)
+    return {
+        "roof_name":           roof.name,
+        "level_name":          level.name,
+        "created":             created,
+        "truss_count":         len(trusses),
+        "span_in":             layout["span_in"],
+        "pitch":               config["pitch"],
+        "peak_height_in":      layout["peak_height_in"],
+        "bearing_wall_a_name": config["bearing_wall_a_name"],
+        "bearing_wall_b_name": config["bearing_wall_b_name"],
+        "config":              config,
+        "trusses_framed":      trusses_framed,
+    }
+
+
+# ===========================================================================
 # Cut list
 # ===========================================================================
 
@@ -2682,6 +3186,11 @@ METHODS = {
     "remove_joint": remove_joint,
     "frame_wall": frame_wall,
     "frame_building": frame_building,
+    # v0.7.1: roof / truss bridge parity. One method covering both
+    # CREATE (Level has no Roof yet) and REBUILD (omit-preserves
+    # reconfigure-and-reframe) — mirrors frame_wall's single-method
+    # shape. method_count 18 -> 19.
+    "frame_roof": frame_roof,
     "generate_cutlist": generate_cutlist,
     "set_imperial_units": set_imperial_units,
 }
